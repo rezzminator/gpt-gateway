@@ -3,11 +3,51 @@
 Each runs gateway.py as a process from a staged install, as run.sh does.
 """
 import os
+import io
+from contextlib import redirect_stdout
+from unittest.mock import patch
 import subprocess
 import unittest
 
 from model_gateway import cli
 from tests import jail
+
+
+class ChatGPTStatsTest(unittest.TestCase):
+    def test_lane_totals_empty_and_unreadable(self):
+        import contextlib
+        import io
+        d = jail.scratch(self)
+        path = os.path.join(d, "gw.log")
+        with open(path, "w") as f:
+            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1\n")
+            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1\n")
+        with open(path + ".1", "w") as f:
+            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=50 cached=40 ratio=0.800 attempts=1\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path})
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().splitlines(), ["a responses=1 input=20 cached=0 hit=0.000",
+                         "b responses=2 input=150 cached=100 hit=0.667",
+                         "total responses=3 input=170 cached=100 hit=0.588"])
+        with open(path, "w"):
+            pass
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-stats", path], d, {}), 0)
+        self.assertIn("no gpt responses in " + path, out.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["chatgpt-stats", path + ".missing"], d, {}), 1)
+        self.assertIn(path + ".missing", err.getvalue())
+        os.unlink(path + ".1")  # a log that has not rotated yet: the default reads what exists
+        with open(path, "w") as f:
+            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=5 ratio=0.250 attempts=1\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path}), 0)
+        self.assertEqual(out.getvalue().splitlines()[0], "a responses=1 input=20 cached=5 hit=0.250")
 
 MW_CLI = '''
 NAME = "tool"
@@ -129,6 +169,44 @@ class UsageTest(CliCase):
             self.assertIn("gateway.py " + name, err)
         self.assertEqual(self.run_gateway("check", "a", "b")[0], 2)
         self.assertEqual(self.run_gateway("mw")[0], 2)
+
+
+class CodexCliTest(unittest.TestCase):
+    def test_k10_status_and_login_explain_codex_precedence(self):
+        from model_gateway import clock, env
+        from model_gateway.chatgpt import auth
+        from tests.model_gateway.chatgpt.test_auth import tokens
+        home = jail.scratch(self)
+        mapping = jail.clean_env(home, MODEL_GATEWAY_CHATGPT_AUTH_STORE="file")
+        path = os.path.join(home, ".codex", "auth.json")
+        os.makedirs(os.path.dirname(path))
+        expiry = 1800000000
+        jail.write_json(path, {"tokens": dict(tokens(expiry), account_id="acct-test-0001")})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(),
+            "ChatGPT: Codex login (~/.codex/auth.json); account ...0001; access expires " +
+            clock.stamp("%Y-%m-%d %H:%M:%S %z", expiry))
+        for args, name in (([], "browser_login"), (["--device"], "device_login")):
+            out = io.StringIO()
+            with patch("model_gateway.chatgpt.login." + name) as login, redirect_stdout(out):
+                self.assertEqual(cli.main(["chatgpt-login"] + args, home, mapping), 0)
+            self.assertIsInstance(login.call_args.args[0], auth.Store)
+            self.assertEqual(out.getvalue().splitlines()[0],
+                "ChatGPT: a Codex login at ~/.codex/auth.json is used first; this login serves only without it")
+        os.unlink(path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(),
+                        "ChatGPT: not logged in; run codex login, or gateway.py chatgpt-login")
+        store = auth.Store(env.ChatGPTEnv.parse(mapping))
+        store.save(tokens(expiry))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(), store.status())
 
 
 if __name__ == "__main__":

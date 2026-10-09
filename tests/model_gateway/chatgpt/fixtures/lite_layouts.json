@@ -1,0 +1,38 @@
+[
+  {
+    "source": "captured_gpt56sol_lite_http.json",
+    "layout": {
+      "prefix": [
+        {
+          "type": "additional_tools",
+          "role": "developer"
+        },
+        {
+          "type": "message",
+          "role": "developer"
+        }
+      ],
+      "top_level_tools": false,
+      "parallel_tool_calls": false,
+      "reasoning_context": "all_turns"
+    }
+  },
+  {
+    "source": "gpt56_lite_bundle.json",
+    "layout": {
+      "prefix": [
+        {
+          "type": "additional_tools",
+          "role": "developer"
+        },
+        {
+          "type": "message",
+          "role": "developer"
+        }
+      ],
+      "top_level_tools": false,
+      "parallel_tool_calls": false,
+      "reasoning_context": "all_turns"
+    }
+  }
+]

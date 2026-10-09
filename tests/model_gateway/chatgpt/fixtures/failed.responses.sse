@@ -1,0 +1,9 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"text_fixture"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"Partial"}
+
+event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"fixture failure"}}}
+

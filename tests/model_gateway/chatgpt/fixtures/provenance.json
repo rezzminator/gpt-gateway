@@ -1,0 +1,7 @@
+{
+  "recorded_text": "opencode/packages/llm/test/fixtures/recordings/openai-responses/gpt-5-5-streams-text.json",
+  "recorded_tool": "opencode/packages/llm/test/fixtures/recordings/openai-responses/gpt-5-5-streams-tool-call.json",
+  "commit": "3884062",
+  "license": "MIT; Copyright (c) 2025 opencode; permission notice in THIRD_PARTY_NOTICES.md",
+  "changes": "Only response event shapes retained; identifiers, arguments and reasoning ciphertext are invented. Other cases invented from the Responses event table."
+}

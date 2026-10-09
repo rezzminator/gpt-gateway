@@ -1,5 +1,6 @@
 """Fake upstreams, recording middleware, and an in-process gateway serving against them."""
 import http.client
+import json
 import os
 import sys
 import threading
@@ -226,3 +227,62 @@ def logged(rt, settle=0.1):
         return ""
     with open(rt.log.path) as f:
         return f.read()
+
+
+CHATGPT_MODELS = {"models": [{"slug": "gpt-test", "supported_reasoning_levels": [],
+                             "use_responses_lite": True}]}
+
+
+def responses_event(kind, **fields):
+    return ("event: " + kind + "\ndata: " + json.dumps(dict(type=kind, **fields)) + "\n\n").encode()
+
+
+def responses_turn(tool=False):
+    frames = [responses_event("response.created"),
+              responses_event("response.output_item.done", output_index=0,
+                              item=dict(type="reasoning", id="rs_invented", encrypted_content="opaque-invented"))]
+    if tool:
+        frames.append(responses_event("response.output_item.done", output_index=1,
+                                      item=dict(type="function_call", call_id="call_invented", name="lookup",
+                                                arguments='{"city":"Harbor"}')))
+    else:
+        frames.extend([responses_event("response.output_text.delta", output_index=1, delta="Hello"),
+                       responses_event("response.output_item.done", output_index=1, item=dict(type="message"))])
+    frames.append(responses_event("response.completed", response={"usage": {
+        "input_tokens": 100, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 60}}}))
+    return b"".join(frames)
+
+
+class ChatGPTUpstream(BaseHTTPRequestHandler):
+    """Invented catalog, scripted Responses and OAuth; each test supplies an isolated subclass."""
+
+    protocol_version = "HTTP/1.1"
+    seen = []
+    script = []
+    models_status = 200
+    models_body = CHATGPT_MODELS
+    tokens = {}
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.seen.append({"method": self.command, "path": self.path,
+                          "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
+        if self.path.startswith("/backend-api/codex/models?"):
+            status, payload = self.models_status, self.models_body
+        elif self.path == "/oauth/token":
+            status, payload = 200, self.tokens
+        elif self.path == "/backend-api/codex/responses":
+            status, payload = self.script.pop(0) if self.script else (200, responses_turn())
+        else:
+            status, payload = 404, {"error": "unknown fake path"}
+        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("content-type", "text/event-stream" if isinstance(payload, bytes) else "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    do_GET = do_POST

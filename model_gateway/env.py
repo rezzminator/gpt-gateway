@@ -13,6 +13,7 @@ CAPTURE_DIR = "MODEL_GATEWAY_CAPTURE_DIR"
 DRAIN_SECONDS = "MODEL_GATEWAY_DRAIN_SECONDS"
 DEBUG = "MODEL_GATEWAY_DEBUG"
 MIDDLEWARE_DIR = "MODEL_GATEWAY_MIDDLEWARE_DIR"
+CHATGPT = "MODEL_GATEWAY_CHATGPT"
 
 DEFAULT_PORT = 18787
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -78,3 +79,67 @@ class CoreEnv:
             if not drain >= 0:
                 raise EnvError("env %s: must be a number of seconds >= 0, got %r" % (DRAIN_SECONDS, raw))
         return cls(port, upstream, log_path, drain, value(env, DEBUG) is not None)
+
+
+CHATGPT_ORIGIN = "MODEL_GATEWAY_CHATGPT_ORIGIN"
+CHATGPT_MODELS_PATH = "MODEL_GATEWAY_CHATGPT_MODELS_PATH"
+CHATGPT_AUTH_ORIGIN = "MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN"
+CHATGPT_AUTH_STORE = "MODEL_GATEWAY_CHATGPT_AUTH_STORE"
+CHATGPT_AUTH_PATH = "MODEL_GATEWAY_CHATGPT_AUTH_PATH"
+CHATGPT_CODEX_AUTH = "MODEL_GATEWAY_CHATGPT_CODEX_AUTH"
+CODEX_HOME = "CODEX_HOME"
+
+
+def chatgpt_origin(environ, name, default):
+    origin = value(environ, name) or default
+    parts = urlsplit(origin)
+    try:
+        valid = (parts.scheme in ("http", "https") and parts.hostname and not parts.username
+                 and not parts.password and parts.path in ("", "/") and not parts.query
+                 and not parts.fragment and (parts.port is None or parts.port > 0))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise EnvError("env %s: must be an http or https origin" % name)
+    return origin.rstrip("/")
+
+
+def chatgpt_path(environ, name, default, resolve=True):
+    path = value(environ, name) or default
+    if path.startswith("~/"):
+        home = value(environ, "HOME")
+        if not home or not os.path.isabs(home):
+            raise EnvError("env HOME: an absolute path is required for ChatGPT storage")
+        path = os.path.join(home, path[2:])
+    if not os.path.isabs(path):
+        raise EnvError("env %s: must be an absolute path" % name)
+    return os.path.realpath(path) if resolve else os.path.abspath(path)
+
+
+class ChatGPTEnv:
+    """ChatGPT knobs; paths resolve against the supplied HOME mapping."""
+
+    def __init__(self, auth_origin, auth_path, auth_store, origin="https://chatgpt.com", models_path=None,
+                 codex_auth=None, home=None):
+        self.auth_origin, self.auth_path, self.auth_store = auth_origin, auth_path, auth_store
+        self.origin, self.models_path = origin, models_path
+        self.codex_auth, self.home = codex_auth, home
+
+    @classmethod
+    def parse(cls, environ):
+        auth_origin = chatgpt_origin(environ, CHATGPT_AUTH_ORIGIN, "https://auth.openai.com")
+        origin = chatgpt_origin(environ, CHATGPT_ORIGIN, "https://chatgpt.com")
+        kind = value(environ, CHATGPT_AUTH_STORE) or "auto"
+        if kind not in ("auto", "file", "keychain"):
+            raise EnvError("env %s: must be auto, file or keychain" % CHATGPT_AUTH_STORE)
+        path = chatgpt_path(environ, CHATGPT_AUTH_PATH, "~/.local/state/model-gateway/chatgpt-auth.json")
+        models = chatgpt_path(environ, CHATGPT_MODELS_PATH, "~/.local/state/model-gateway/chatgpt-models.json")
+        codex = value(environ, CHATGPT_CODEX_AUTH)
+        if codex != "off":
+            default = "~/.codex/auth.json"
+            if codex is None and value(environ, CODEX_HOME):  # a bad CODEX_HOME is named as itself
+                default = os.path.join(chatgpt_path(environ, CODEX_HOME, None, resolve=False), "auth.json")
+            codex = chatgpt_path(environ, CHATGPT_CODEX_AUTH, default, resolve=False)
+        else:
+            codex = None
+        return cls(auth_origin, path, kind, origin, models, codex, value(environ, "HOME"))

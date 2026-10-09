@@ -19,8 +19,14 @@ class Runtime:
         self.drain = Drain()
         self.sequence = Sequence()
         self.chain = Chain((), self.log.write)
+        self.chatgpt = None
 
     def load(self):
-        """Read the settings and load the middleware; SettingsError or MiddlewareError stops the start."""
+        """Read the settings and load the middleware; SettingsError, MiddlewareError or EnvError stops the start."""
         self.settings.load()
         self.chain = Chain(self.settings.modules, self.log.write)
+        if self.settings.snapshot.chatgpt:
+            from .env import ChatGPTEnv
+            from .chatgpt.route import Route
+            # The token store opens on first use, so a Codex login never waits on a Keychain probe (K11).
+            self.chatgpt = Route(ChatGPTEnv.parse(self.settings.env), self.log.write)

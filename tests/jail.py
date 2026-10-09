@@ -1,7 +1,7 @@
 """The test jail: every scratch directory, port and environment a test uses comes from here.
 
 Scratch directories share one prefix and go when the test ends. `clean_env` gives a subprocess a
-scratch HOME and drops every MODEL_GATEWAY_* variable the shell may carry, so no test reads or writes
+scratch HOME and drops CODEX_HOME and every MODEL_GATEWAY_* variable the shell may carry, so no test reads or writes
 the real home or a live gateway's settings.
 """
 import json
@@ -33,8 +33,8 @@ def free_port():
 
 
 def clean_env(home, **overrides):
-    """The process environment minus every MODEL_GATEWAY_* variable, HOME set to `home`, then `overrides`."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("MODEL_GATEWAY_")}
+    """Drop CODEX_HOME and MODEL_GATEWAY_*; set HOME to `home`, then apply `overrides`."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MODEL_GATEWAY_") and k != "CODEX_HOME"}
     env["HOME"] = home
     env.update(overrides)
     return env
@@ -74,15 +74,18 @@ def ship_list():
 
 
 def stage_install(dest):
-    """An installed copy at `dest`, flat as install.sh lays it out, with an empty middleware/; returns dest."""
+    """An installed copy at `dest`, preserving package trees, with an empty middleware/; returns dest."""
     os.makedirs(dest, exist_ok=True)
     for item in ship_list():
         src, target = os.path.join(ROOT, item), os.path.join(dest, os.path.basename(item))
         if os.path.isdir(src):
             os.makedirs(target)
-            for name in os.listdir(src):
-                if name.endswith(".py"):
-                    shutil.copy(os.path.join(src, name), target)
+            for directory, _, names in os.walk(src):
+                package = os.path.join(target, os.path.relpath(directory, src))
+                for name in names:
+                    if name.endswith(".py"):
+                        os.makedirs(package, exist_ok=True)
+                        shutil.copy(os.path.join(directory, name), package)
         else:
             shutil.copy(src, target)
     os.makedirs(os.path.join(dest, "middleware"), exist_ok=True)

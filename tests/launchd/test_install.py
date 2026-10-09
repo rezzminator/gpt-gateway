@@ -4,6 +4,7 @@ import os
 import subprocess
 import unittest
 
+from tests import jail
 from tests.launchd.stub import Host
 
 FIRST_SETTINGS = {"capture_dir": None, "middleware": []}
@@ -16,8 +17,9 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("installed; the gateway is off", out)
         for name in ("gateway.py", "run.sh", "ctl.sh", "README.md", "LICENSE", "model_gateway/proxy.py",
-                     "model_gateway/harness.py"):
-            self.assertTrue(os.path.isfile(os.path.join(h.dest, name)), name)
+                     "model_gateway/harness.py", "model_gateway/chatgpt/stream.py", "THIRD_PARTY_NOTICES.md"):
+            with self.subTest(name=name):
+                self.assertTrue(os.path.isfile(os.path.join(h.dest, name)), name)
         self.assertFalse(os.path.exists(os.path.join(h.dest, "model_gateway", "__pycache__")))
         self.assertTrue(os.access(os.path.join(h.dest, "run.sh"), os.X_OK))
         self.assertTrue(os.path.isdir(os.path.join(h.dest, "middleware")))
@@ -34,6 +36,16 @@ class InstallTest(unittest.TestCase):
         p = subprocess.run(["/usr/bin/python3", "-I", "-B", os.path.join(h.dest, "gateway.py"), "check"],
                            capture_output=True, text=True, env={"HOME": h.home, "PATH": "/usr/bin:/bin"})
         self.assertEqual(p.stdout, "ok: %s\n" % os.path.join(h.dest, "settings.json"))
+
+    def test_jail_stages_the_package_tree_and_notices(self):
+        dest = jail.stage_install(os.path.join(jail.scratch(self), "app"))
+        for name in ("model_gateway/chatgpt/__init__.py", "model_gateway/chatgpt/stream.py",
+                     "THIRD_PARTY_NOTICES.md"):
+            with self.subTest(name=name):
+                installed = os.path.join(dest, name)
+                self.assertTrue(os.path.isfile(installed), name)
+                with open(installed, "rb") as actual, open(os.path.join(jail.ROOT, name), "rb") as source:
+                    self.assertEqual(actual.read(), source.read())
 
     def test_an_update_keeps_a_valid_settings_file_with_its_middleware(self):
         h = Host(self)
