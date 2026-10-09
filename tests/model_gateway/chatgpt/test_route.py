@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -494,4 +495,105 @@ class CodexRouteTest(unittest.TestCase):
                 self.assertTrue(all(t not in threading.enumerate() for t in readers))
                 self.assertFalse(any(isinstance(getattr(getattr(t, "_target", None), "__self__", None), Reader)
                                      for t in set(threading.enumerate()) - before))
+                lines = self.gpt_lines(rt)
+                if mode == "stale":  # Upstream.send's own fresh retry marks the answer stale
+                    self.assertEqual([line[-16:] for line in lines], ["reused=0 stale=0", "reused=0 stale=1"])
+                if mode == "held":  # the client had message_stop before the reader's 2 s join gave up
+                    self.assertLess(int(re.search(r" total_ms=(\d+) ", lines[0]).group(1)), 2000, lines[0])
                 client.close()
+
+    def keepalive(self, port, turns):
+        """The (status, body) of `turns` requests sent one after another on one client connection."""
+        import http.client
+        client = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(client.close)
+        answers = []
+        for _ in range(turns):
+            client.request("POST", "/v1/messages", json.dumps(self.body), self.headers)
+            response = client.getresponse()
+            answers.append((response.status, response.read()))
+        return answers
+
+    def gpt_lines(self, rt):
+        return [x for x in fakes.logged(rt).splitlines() if "    gpt lane=" in x]
+
+    def test_reused_connection_that_dies_before_the_first_body_byte_retries_once_silently(self):
+        self.fake.script = [(200, fakes.responses_turn()), (200, fakes.CLOSE_AFTER_HEADERS),
+                            (200, fakes.responses_turn())]
+        jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
+        rt, port = self.gateway()
+        with patch("model_gateway.chatgpt.errors.backoff", return_value=0) as backoff:
+            answers = self.keepalive(port, 2)
+        self.assertEqual([status for status, _ in answers], [200, 200])
+        self.assertIn(b"message_stop", answers[1][1])
+        self.assertEqual(len(self.responses()), 3)
+        backoff.assert_not_called()
+        log = fakes.logged(rt)
+        self.assertNotIn("gpt error", log)
+        first, second = self.gpt_lines(rt)
+        self.assertIn("attempts=1 ", first)
+        self.assertTrue(first.endswith("reused=0 stale=0"), first)
+        self.assertIn("attempts=1 ", second)
+        self.assertTrue(second.endswith("reused=0 stale=1"), second)
+
+    def test_a_fresh_failure_a_body_byte_or_a_second_failure_is_an_ordinary_retry(self):
+        turn, cut, byte = ((200, fakes.responses_turn()), (200, fakes.CLOSE_AFTER_HEADERS),
+                           (200, fakes.Cut(fakes.responses_event("response.created"))))
+        for name, script, turns, stale in (("fresh connection", [cut, turn], 1, "0"),
+                                           ("body byte first", [turn, byte, turn], 2, "0"),
+                                           ("after the silent retry", [turn, cut, cut, turn], 2, "1")):
+            with self.subTest(name):
+                self.fake.script = script
+                jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
+                rt, port = self.gateway()
+                with patch("model_gateway.chatgpt.errors.backoff", return_value=0) as backoff:
+                    self.assertEqual({status for status, _ in self.keepalive(port, turns)}, {200})
+                backoff.assert_called_once_with(1)
+                log = fakes.logged(rt)
+                self.assertEqual(log.count("gpt error"), 1)
+                self.assertIn("status=transport attempt=1 action=retry body=b'IncompleteRead(0 bytes read)'", log)
+                line = self.gpt_lines(rt)[-1]
+                self.assertIn("attempts=2 ", line)
+                self.assertTrue(line.endswith("reused=0 stale=" + stale), line)
+
+    def test_gpt_line_ends_with_the_measurement_fields(self):
+        self.fake.script = [(200, fakes.responses_turn(reasoning=3)), (200, fakes.responses_turn())]
+        jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
+        rt, port = self.gateway()
+        self.keepalive(port, 2)
+        pattern = re.compile(r"input=100 cached=60 ratio=0\.600 attempts=1 out=8 reasoning=(\S+) ttfb_ms=(\d+) "
+                             r"upstream_ms=(\d+) total_ms=(\d+) reused=([01]) stale=0$")
+        first, second = (pattern.search(line) for line in self.gpt_lines(rt))
+        self.assertEqual((first.group(1), first.group(5)), ("3", "0"))
+        self.assertEqual((second.group(1), second.group(5)), ("-", "1"))
+        for match in (first, second):
+            ttfb, upstream, total = (int(match.group(i)) for i in (2, 3, 4))
+            self.assertLessEqual(ttfb, total)
+            self.assertLessEqual(upstream, total)
+
+    def test_terminal_line_measures_from_receipt_send_and_terminal_event(self):
+        from types import SimpleNamespace
+        from model_gateway.chatgpt.route import Measure, Route
+        lines = []
+        route = Route.__new__(Route)
+        route.log, route.lock = lines.append, __import__("threading").Lock()
+        translator = stream.Translator("gpt-test", {}, 10)
+        translator.terminal, translator.usage = "response.completed", {"output_tokens": 8, "cache_read_input_tokens": 60}
+        translator.input_tokens, translator.cache_ratio, translator.reasoning_tokens = 100, 0.6, 5
+        reader = SimpleNamespace(first_byte_at=101.25, terminal_at=103.0, transport_error=None, error_head=b"")
+        measure = Measure(started=100.0, sent_at=100.5, reused=True, stale=True)
+        estimator = SimpleNamespace(observe=lambda *args: None)
+        with patch.object(clock, "monotonic", return_value=104.5):
+            route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1), translator,
+                            estimator, 1, 200, reader, None, measure)
+        self.assertEqual(lines, ["    gpt lane=lane slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1 "
+                                 "out=8 reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1"])
+
+    def test_ttfb_counts_from_the_gateway_receipt_of_the_request(self):
+        jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
+        rt, port = fakes.start_gateway(self, self.anthropic, env=self.env, settings={"middleware": [{"module": "slow"}]},
+                                       middleware={"slow": 'NAME = "slow"\nfrom model_gateway import clock\n'
+                                                           'def on_request(ctx, req):\n    clock.sleep(0.3)\n'})
+        self.assertEqual(self.send(port)[0].status, 200)
+        (line,) = self.gpt_lines(rt)
+        self.assertGreaterEqual(int(re.search(r" ttfb_ms=(\d+) ", line).group(1)), 300, line)

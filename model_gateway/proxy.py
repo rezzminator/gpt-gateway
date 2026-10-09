@@ -154,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
         note = assemble_note(kind, notes)
         if selected[0] == "chatgpt":
             resp = selected[2] or rt.chatgpt.exchange(req.body if sent is not raw else body,
-                                                     selected[1], self.headers, self.path, cap)
+                                                     selected[1], self.headers, self.path, cap, started)
             return self.relay(rt, ctx, resp, note, meta, cap, started, rt.chatgpt.client)
         headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # a repeated header goes as sent
         headers.append(("accept-encoding", "identity"))

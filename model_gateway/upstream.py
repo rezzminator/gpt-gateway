@@ -1,8 +1,9 @@
 """The upstream API: one connection per serving thread, kept alive, with one fresh retry.
 
 A pooled connection the server closed fails on its next use; the request is retried once on a new
-connection. Any other connection error, and a response http.client cannot parse, is final, and the
-caller answers 502. Request headers go as an ordered list of pairs, so a header sent twice goes twice.
+connection; `reuse()` reports whether the last send rode a kept-alive connection and whether that retry
+fired. Any other connection error, and a response http.client cannot parse, is final, and the caller
+answers 502. Request headers go as an ordered list of pairs, so a header sent twice goes twice.
 """
 import http.client
 import socket
@@ -13,6 +14,13 @@ from urllib.parse import urlsplit
 TIMEOUT_SECONDS = 900
 RETRYABLE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError,
              http.client.CannotSendRequest, http.client.ResponseNotReady)
+
+
+def is_stale(error):
+    """Whether `error` is the signature of a kept-alive connection the server closed before sending any body."""
+    if isinstance(error, http.client.IncompleteRead):
+        return not error.partial
+    return isinstance(error, (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError))
 
 
 class UpstreamError(Exception):
@@ -51,6 +59,11 @@ class Upstream:
             except Exception as e:
                 self.log("    upstream close failed: %r" % (e,))
 
+    def reuse(self):
+        """(reused, stale) of this thread's last send: the answering attempt rode a kept-alive connection;
+        a kept-alive connection failed and the request went again on a fresh one."""
+        return getattr(self.local, "reused", False), getattr(self.local, "stale", False)
+
     def abort(self):
         """Shut this thread's socket down, so a reader blocked on its response returns, then drop it."""
         conn = getattr(self.local, "conn", None)
@@ -67,9 +80,11 @@ class Upstream:
         headers: ((name, value), ...) in the client's order; Host comes from the origin.
         timeout: seconds for this thread's connection from now on, when given.
         """
+        self.local.reused = self.local.stale = False
         for attempt in (1, 2):
             try:
                 conn = self.connection()
+                self.local.reused = conn.sock is not None
                 if timeout is not None:
                     conn.timeout = timeout
                     if conn.sock is not None:
@@ -80,6 +95,7 @@ class Upstream:
                 conn.endheaders(body)
                 return conn.getresponse()
             except RETRYABLE as e:
+                self.local.stale = self.local.stale or self.local.reused
                 self.drop()
                 if attempt == 2:
                     raise UpstreamError("upstream connection failed: %r" % e)

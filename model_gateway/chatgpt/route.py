@@ -4,12 +4,13 @@ Retry orchestration derived from openai/codex, changed (Apache-2.0;
 see THIRD_PARTY_NOTICES.md). All translation stays in the pure translators.
 """
 import copy
+from dataclasses import dataclass
 import json
 import http.client
 import threading
 
 from .. import clock
-from ..upstream import UpstreamError
+from ..upstream import UpstreamError, is_stale
 from . import auth, errors, estimate, lane, request, signature, stream
 from .catalog import Catalog, CatalogUnavailable
 from .client import Client
@@ -75,6 +76,19 @@ def without_reasoning(body):
     return cleaned
 
 
+@dataclass
+class Measure:
+    """One exchange's clock marks and connection facts, read by the `gpt` line of the attempt that answered."""
+    started: float  # the gateway received the client request
+    sent_at: float = 0.0  # the attempt's upstream request was sent
+    reused: bool = False  # the attempt rode a kept-alive connection
+    stale: bool = False  # a kept-alive connection failed before any body byte and the request went on a fresh one
+
+
+def milliseconds(seconds):
+    return int(round(seconds * 1000))
+
+
 class Route:
     def __init__(self, knobs, log):
         self.log = log
@@ -104,7 +118,9 @@ class Route:
         self.log("    gpt error lane=%s slug=%s status=%s attempt=%d action=%s body=%r" %
                  (key, slug, status, attempt, action, head[:300]))
 
-    def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials):
+    def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
+                  ended=None):
+        """`ended`: when the client had the last byte, the stream's end before the reader's join; now when None."""
         if translator.error is not None:
             self._error_line(key, model.slug, "transport" if reader.transport_error else status,
                              attempt, "final", reader.error_head, credentials)
@@ -112,12 +128,21 @@ class Route:
             if translator.terminal == "response.completed":
                 with self.lock:
                     estimator.observe(translation.estimate_chars, translator.input_tokens)
-            self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d" %
+            reasoning = "-" if translator.reasoning_tokens is None else translator.reasoning_tokens
+            self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d out=%d reasoning=%s "
+                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d" %
                      (key, model.slug, status, translator.input_tokens,
-                      translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt))
+                      translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt,
+                      translator.usage["output_tokens"], reasoning,
+                      milliseconds(reader.first_byte_at - measure.started),
+                      milliseconds(reader.terminal_at - measure.sent_at),
+                      milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
+                      measure.reused, measure.stale))
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
-    def exchange(self, body, model, headers, path, cap):
+    def exchange(self, body, model, headers, path, cap, started=None):
+        measure = Measure(clock.monotonic() if started is None else started)
+        silent = False  # the one free retry of a kept-alive connection that died before any body byte
         key = lane.key(headers.get("x-claude-code-session-id", ""), headers.get("x-claude-code-agent-id", ""))
         estimator = self.estimator(key)
         try:
@@ -131,12 +156,17 @@ class Route:
             return Response.json(200, {"input_tokens": estimated})
         refreshed = dropped = False
         credentials = None
-        for attempt in range(1, errors.MAX_RETRIES + 2):
+        attempt = 0
+        while True:
+            attempt += 1
             translator = stream.Translator(model.slug, translation.tool_names, estimated)
             reader = None
             try:
                 credentials = credentials or self.store.credentials()
+                measure.sent_at = clock.monotonic()
                 response = self.client.responses(translation, key, credentials)
+                reused, retried = self.client.upstream.reuse()
+                measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
                 if status != 200:
                     head = response.read(65536)
@@ -148,11 +178,13 @@ class Route:
                     if first:
                         if body.get("stream"):
                             reader.on_end = lambda: self._terminal(key, model, translation, translator,
-                                                                  estimator, attempt, 200, reader, credentials)
+                                                                  estimator, attempt, 200, reader, credentials, measure,
+                                                                  reader.ended_at)
                             return Response(200, first, reader=reader)
                         data = stream.accumulate(first + Response(200, reader=reader).read())
                         code = 502 if data.get("type") == "error" else 200
-                        self._terminal(key, model, translation, translator, estimator, attempt, code, reader, credentials)
+                        self._terminal(key, model, translation, translator, estimator, attempt, code, reader,
+                                       credentials, measure)
                         return Response.json(code, data)
                     decision, head = translator.error, reader.error_head
                     if reader.transport_error:
@@ -168,6 +200,11 @@ class Route:
             finally:
                 if reader is not None and not translator.emitted_any:
                     reader.close()
+            if (not silent and measure.reused and reader is not None and reader.first_byte_at is None
+                    and is_stale(reader.transport_exception)):
+                silent, measure.stale = True, True
+                attempt -= 1
+                continue
             can_retry = decision.retry and attempt <= errors.MAX_RETRIES
             if decision.refresh and refreshed or decision.drop_reasoning and dropped:
                 can_retry = False

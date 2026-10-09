@@ -28,7 +28,8 @@ class Translator:
     the caller must not retry. error is always a Decision, with
     retries disabled after output. terminal is the event kind or synthetic
     stream_closed/idle_timeout/protocol_error. input_tokens is the upstream
-    total; cache_ratio is cached / total. usage is the final Anthropic usage.
+    total; cache_ratio is cached / total. usage is the final Anthropic usage;
+    reasoning_tokens is upstream's reasoning count, None when it reports none.
     """
 
     # claude-code-proxy/src/providers/codex/translate/live_stream.rs:78-106.
@@ -40,6 +41,7 @@ class Translator:
         self.error = None
         self.cache_ratio = None
         self.input_tokens = None
+        self.reasoning_tokens = None
         self._splitter = EventSplitter()
         self._blocks = {}
         self._done = set()
@@ -218,6 +220,8 @@ class Translator:
         cached = max(0, int(details.get("cached_tokens") or 0))
         written = max(0, int(details.get("cache_write_tokens", raw.get("cache_write_tokens")) or 0))
         self.input_tokens = total
+        reasoning = (raw.get("output_tokens_details") or {}).get("reasoning_tokens")
+        self.reasoning_tokens = max(0, int(reasoning)) if reasoning is not None else None
         self.cache_ratio = cached / total if total else 0.0
         self.usage = {"input_tokens": max(0, total - cached - written),
                       "output_tokens": max(0, int(raw.get("output_tokens") or 0)),

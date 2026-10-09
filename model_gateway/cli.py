@@ -136,24 +136,36 @@ def cmd_chatgpt_status(args, install_dir, environ):
     return 0
 
 
+def percentile(values, percent):
+    """The nearest-rank percentile of a non-empty list."""
+    ordered = sorted(values)
+    return ordered[max(1, -(-len(ordered) * percent // 100)) - 1]
+
+
 def cmd_chatgpt_stats(args, install_dir, environ):
     name = None
     try:
         path = envmod.CoreEnv.parse(environ).log_path
         # The default rotation exists only once the log has passed its size limit; a named file is required.
         files = args or [path] + ([path + ".1"] if os.path.exists(path + ".1") else [])
-        lanes = {}
-        pattern = re.compile(r"    gpt lane=(\S+) slug=\S+ status=\d+ input=(\d+) cached=(\d+) ratio=\S+ attempts=\d+")
+        lanes, timed = {}, {}
+        pattern = re.compile(r"    gpt lane=(\S+) slug=(\S+) status=\d+ input=(\d+) cached=(\d+) ratio=\S+ attempts=\d+(.*)")
+        timing = re.compile(r" ttfb_ms=(\d+) upstream_ms=\d+ total_ms=(\d+) ")
         for name in files:
             with open(name, encoding="utf-8") as source:
                 for line in source:
                     match = pattern.search(line)
                     if match:
-                        key, tokens, cached = match.groups()
+                        key, slug, tokens, cached, tail = match.groups()
                         row = lanes.setdefault(key, [0, 0, 0])
                         row[0] += 1
                         row[1] += int(tokens)
                         row[2] += int(cached)
+                        times = timing.search(tail)  # lines from before the measurement fields have none
+                        if times:
+                            timed.setdefault(slug, ([], []))
+                            for column, value in zip(timed[slug], times.groups()):
+                                column.append(int(value))
     except (OSError, UnicodeError, envmod.EnvError) as error:
         print("model-gateway: chatgpt-stats: %s%s" % ((str(name) + ": ") if name else "", error), file=sys.stderr)
         return 1
@@ -167,11 +179,15 @@ def cmd_chatgpt_stats(args, install_dir, environ):
         total = [a + b for a, b in zip(total, row)]
     print("total responses=%d input=%d cached=%d hit=%.3f" %
           (*total, total[2] / total[1] if total[1] else 0))
+    for slug, (ttfb, whole) in sorted(timed.items()):
+        print("slug=%s timed=%d ttfb_ms p50=%d p95=%d total_ms p50=%d p95=%d" %
+              (slug, len(ttfb), percentile(ttfb, 50), percentile(ttfb, 95), percentile(whole, 50),
+               percentile(whole, 95)))
     return 0
 
 
 COMMANDS = {
-    "chatgpt-stats": (cmd_chatgpt_stats, "chatgpt-stats [LOG...]", "print the ChatGPT cache hit rate per lane"),
+    "chatgpt-stats": (cmd_chatgpt_stats, "chatgpt-stats [LOG...]", "print the ChatGPT cache hit rate per lane and response times per slug"),
     "chatgpt-login": (cmd_chatgpt_login, "chatgpt-login [--device]", "log in to ChatGPT using a browser or device code"),
     "chatgpt-status": (cmd_chatgpt_status, "chatgpt-status", "show login presence, masked account and token expiry"),
     "serve": (cmd_serve, "serve", "run the gateway (the default when no command is given)"),

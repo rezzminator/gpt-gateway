@@ -207,15 +207,17 @@ The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator
 
 ### Logs, stats and capture
 
-The normal request line still carries `kind=sub`. Each completed ChatGPT response adds a line with total input and cached input tokens; each upstream error or retry decision records its action and at most the first 300 bytes of its error body, as a repr. These lines contain no token, account id or request body:
+The normal request line still carries `kind=sub`. Each completed ChatGPT response adds a line with total input and cached input tokens, output tokens and the response's timing; each upstream error or retry decision records its action and at most the first 300 bytes of its error body, as a repr. These lines contain no token, account id or request body:
 
 ```text
-    gpt lane={lane} slug={slug} status={status} input={input} cached={cached} ratio={ratio:.3f} attempts={n}
+    gpt lane={lane} slug={slug} status={status} input={input} cached={cached} ratio={ratio:.3f} attempts={n} out={output} reasoning={reasoning|-} ttfb_ms={ms} upstream_ms={ms} total_ms={ms} reused={0|1} stale={0|1}
     gpt error lane={lane} slug={slug} status={status|transport} attempt={n} action={retry|refresh|drop_reasoning|final} body={body_head!r}
     gpt drop-reasoning lane={lane} slug={slug}
 ```
 
-`gateway.py chatgpt-stats [LOG...]` reads these completion lines, using the core log and, once it exists, its `.1` rotation by default. It prints lanes sorted by key as `{lane} responses={n} input={sum} cached={sum} hit={cached/input:.3f}`, then the same totals prefixed by `total`. An unreadable log names the file and exits 1; no matching lines prints `no gpt responses in {files}` and exits 0.
+The fields after `attempts` come in this order and only ever grow at the end. `out` is the output tokens; `reasoning` is `usage.output_tokens_details.reasoning_tokens` of the Responses `response.completed`, `-` when upstream reports none. `ttfb_ms` runs from the gateway's receipt of the client request to the first upstream body byte of the attempt that answered, `upstream_ms` from that attempt's upstream request sent to the upstream terminal event, and `total_ms` from receipt to the last byte written to the client (for a non-stream request, to the hand-off of the response to the relay). `reused=1` means the attempt that answered rode a kept-alive connection. `stale=1` means a kept-alive connection failed before any body byte (`IncompleteRead` with 0 bytes, `RemoteDisconnected`, `ConnectionResetError` or `BrokenPipeError`) and the request went again at once on a fresh connection: that retry has no backoff, no `gpt error` line and no share of the retry budget, and a failure on a fresh connection, or a second failure, is an ordinary attempt.
+
+`gateway.py chatgpt-stats [LOG...]` reads these completion lines, using the core log and, once it exists, its `.1` rotation by default. It prints lanes sorted by key as `{lane} responses={n} input={sum} cached={sum} hit={cached/input:.3f}`, then the same totals prefixed by `total`. When lines carry the timing fields, one more line per slug follows, `slug={slug} timed={n} ttfb_ms p50={ms} p95={ms} total_ms p50={ms} p95={ms}` (nearest-rank percentiles; lines from before the fields are counted above but not timed). An unreadable log names the file and exits 1; no matching lines prints `no gpt responses in {files}` and exits 0.
 
 When capture is enabled, the folder kind is `gpt`, while `ctx.kind` stays `sub`. `3-request.sent.body` contains the translated Responses bytes of the attempt that answered; the response capture contains the client-facing Anthropic translation. Capture includes conversation bodies, unlike the aggregate `gpt lane=` log lines. Third-party licence texts and attribution ship in `THIRD_PARTY_NOTICES.md`.
 

@@ -59,6 +59,17 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(t.input_tokens, 100)
         self.assertEqual(t.cache_ratio, 0.3)
 
+    def test_reasoning_tokens_come_from_the_completed_usage_or_stay_absent(self):
+        for details, expected in (({"output_tokens_details": {"reasoning_tokens": 7}}, 7),
+                                  ({"output_tokens_details": {"reasoning_tokens": 0}}, 0),
+                                  ({"output_tokens_details": {}}, None), ({}, None)):
+            with self.subTest(details=details):
+                t = self.translator()
+                t.feed(upstream("response.output_text.delta", output_index=0, delta="x"))
+                t.feed(upstream("response.completed", response={"usage": dict(input_tokens=10, output_tokens=4,
+                                                                              **details)}))
+                self.assertEqual((t.terminal, t.reasoning_tokens), ("response.completed", expected))
+
     def test_accumulate_and_emptied_reasoning_round_trip(self):
         for name, reason in (("recorded_text", "end_turn"), ("recorded_tool", "tool_use"),
                              ("reasoning", "end_turn"), ("incomplete", "max_tokens")):

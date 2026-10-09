@@ -20,6 +20,34 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(json.loads(up.send("POST", "/x", b"{}", HEADERS).read()), {"n": 2})
         self.assertIsNot(up.local.conn, first)
 
+    def test_reuse_reports_a_kept_alive_connection_and_the_stale_retry(self):
+        ClosingUpstream.count[0] = 0
+        up = Upstream(fakes.start_upstream(self, ClosingUpstream))
+        self.assertEqual(up.reuse(), (False, False))
+        up.send("POST", "/x", b"{}", HEADERS).read()
+        self.assertEqual(up.reuse(), (False, False))  # a fresh connection
+        up.send("POST", "/x", b"{}", HEADERS).read()
+        self.assertEqual(up.reuse(), (False, True))  # the kept-alive one was dead; the answer came on a fresh one
+
+    def test_reuse_is_true_when_the_server_keeps_the_connection(self):
+        class Keeping(ClosingUpstream):
+            def do_POST(self):
+                super().do_POST()
+                self.close_connection = False
+        up = Upstream(fakes.start_upstream(self, Keeping))
+        for expected in (False, True, True):
+            up.send("POST", "/x", b"{}", HEADERS).read()
+            self.assertEqual(up.reuse(), (expected, False))
+
+    def test_is_stale_names_the_errors_of_a_connection_closed_before_any_body(self):
+        import http.client
+        from model_gateway.upstream import is_stale
+        for error, expected in ((http.client.IncompleteRead(b""), True), (http.client.RemoteDisconnected("x"), True),
+                                (ConnectionResetError(), True), (BrokenPipeError(), True),
+                                (http.client.IncompleteRead(b"ab", 3), False), (OSError("other"), False),
+                                (None, False)):
+            self.assertEqual(is_stale(error), expected, repr(error))
+
     def test_a_connection_that_fails_twice_is_final(self):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))

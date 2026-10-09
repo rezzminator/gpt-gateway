@@ -237,7 +237,17 @@ def responses_event(kind, **fields):
     return ("event: " + kind + "\ndata: " + json.dumps(dict(type=kind, **fields)) + "\n\n").encode()
 
 
-def responses_turn(tool=False):
+class Cut:
+    """A script payload: chunked headers, `sent` as one chunk when given, then EOF before the next chunk."""
+
+    def __init__(self, sent=b""):
+        self.sent = sent
+
+
+CLOSE_AFTER_HEADERS = Cut()  # the wire shape http.client reports as IncompleteRead(0 bytes read)
+
+
+def responses_turn(tool=False, reasoning=None):
     frames = [responses_event("response.created"),
               responses_event("response.output_item.done", output_index=0,
                               item=dict(type="reasoning", id="rs_invented", encrypted_content="opaque-invented"))]
@@ -248,8 +258,10 @@ def responses_turn(tool=False):
     else:
         frames.extend([responses_event("response.output_text.delta", output_index=1, delta="Hello"),
                        responses_event("response.output_item.done", output_index=1, item=dict(type="message"))])
-    frames.append(responses_event("response.completed", response={"usage": {
-        "input_tokens": 100, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 60}}}))
+    usage = {"input_tokens": 100, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 60}}
+    if reasoning is not None:
+        usage["output_tokens_details"] = {"reasoning_tokens": reasoning}
+    frames.append(responses_event("response.completed", response={"usage": usage}))
     return b"".join(frames)
 
 
@@ -278,6 +290,16 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             status, payload = self.script.pop(0) if self.script else (200, responses_turn())
         else:
             status, payload = 404, {"error": "unknown fake path"}
+        if isinstance(payload, Cut):
+            self.send_response(status)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.end_headers()
+            if payload.sent:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(payload.sent), payload.sent))
+            self.wfile.flush()
+            self.close_connection = True
+            return
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("content-type", "text/event-stream" if isinstance(payload, bytes) else "application/json")

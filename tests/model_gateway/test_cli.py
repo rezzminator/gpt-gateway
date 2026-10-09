@@ -49,6 +49,29 @@ class ChatGPTStatsTest(unittest.TestCase):
             self.assertEqual(cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path}), 0)
         self.assertEqual(out.getvalue().splitlines()[0], "a responses=1 input=20 cached=5 hit=0.250")
 
+    def test_timed_lines_add_p50_and_p95_per_slug_after_the_total(self):
+        import contextlib
+        import io
+        d = jail.scratch(self)
+        path = os.path.join(d, "gw.log")
+        tail = " out=8 reasoning=- ttfb_ms=%d upstream_ms=1 total_ms=%d reused=0 stale=0\n"
+        with open(path, "w") as f:
+            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1\n")  # untimed
+            for n in (4, 1, 3, 2):
+                f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1" +
+                        tail % (n * 100, n * 1000))
+            f.write("stamp    gpt lane=b slug=gpt-other status=200 input=10 cached=5 ratio=0.500 attempts=2" +
+                    (tail % (50, 700)).replace("\n", " later_total_ms=9\n"))  # fields only ever grow at the end
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-stats", path], d, {}), 0)
+        self.assertEqual(out.getvalue().splitlines(), [
+            "a responses=5 input=100 cached=0 hit=0.000", "b responses=1 input=10 cached=5 hit=0.500",
+            "total responses=6 input=110 cached=5 hit=0.045",
+            "slug=gpt-other timed=1 ttfb_ms p50=50 p95=50 total_ms p50=700 p95=700",
+            "slug=gpt-test timed=4 ttfb_ms p50=200 p95=400 total_ms p50=2000 p95=4000"])
+
+
 MW_CLI = '''
 NAME = "tool"
 SETTINGS = {"greeting": ("hi", str, "MODEL_GATEWAY_TOOL_GREETING")}

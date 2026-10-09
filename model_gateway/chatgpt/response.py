@@ -55,6 +55,10 @@ class Reader:
         self.drained = False
         self.error_head = b""
         self.transport_error = None
+        self.transport_exception = None
+        self.first_byte_at = None  # monotonic time of the first upstream body byte
+        self.terminal_at = None  # monotonic time the translator saw the terminal event
+        self.ended_at = None  # monotonic time the serving thread asked past the terminal, its last bytes relayed
         self.on_end = None
         self.next_idle = clock.monotonic() + 15
         self.thread = threading.Thread(target=self._read, daemon=True)
@@ -77,6 +81,8 @@ class Reader:
                     self.drained = True
                     self._put(EOF)
                     break
+                if self.first_byte_at is None:
+                    self.first_byte_at = clock.monotonic()
                 self._put(chunk)
         except Exception as error:
             self._put(error)
@@ -93,6 +99,7 @@ class Reader:
         while not self.finished:
             if self.translator.terminal:
                 self.finished = True
+                self.ended_at = clock.monotonic()
                 if self.translator.error is None:
                     self.thread.join(2.0)
                 if (self.translator.error is None and self.drained and not self.thread.is_alive()
@@ -113,6 +120,7 @@ class Reader:
             elif chunk is EOF:
                 data = self.translator.finish()
             elif isinstance(chunk, Exception):
+                self.transport_exception = chunk
                 self.transport_error = str(chunk)
                 self.error_head = self.transport_error.encode()[:300]
                 if not self.translator.emitted_any:
@@ -126,6 +134,8 @@ class Reader:
                 self.error_head = (self.error_head + chunk)[:300]
                 self.next_idle = clock.monotonic() + 15
                 data = self.translator.feed(chunk)
+            if self.terminal_at is None and self.translator.terminal:
+                self.terminal_at = clock.monotonic()
             if data:
                 return data
         return b""
