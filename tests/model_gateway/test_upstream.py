@@ -39,6 +39,29 @@ class UpstreamTest(unittest.TestCase):
             up.send("POST", "/x", b"{}", HEADERS).read()
             self.assertEqual(up.reuse(), (expected, False))
 
+    def test_a_kept_alive_connection_idle_past_the_limit_is_replaced_before_use(self):
+        from unittest import mock
+        from model_gateway import upstream
+
+        class Keeping(ClosingUpstream):
+            def do_POST(self):
+                super().do_POST()
+                self.close_connection = False
+        up = Upstream(fakes.start_upstream(self, Keeping))
+        t = [1000.0]
+        with mock.patch.object(upstream.clock, "monotonic", lambda: t[0]):
+            up.send("POST", "/x", b"{}", HEADERS).read()
+            first = up.local.conn
+            t[0] += upstream.IDLE_SECONDS
+            up.send("POST", "/x", b"{}", HEADERS).read()
+            self.assertEqual(up.reuse(), (True, False))  # idle exactly the limit: still reused
+            self.assertIs(up.local.conn, first)
+            t[0] += upstream.IDLE_SECONDS + 1
+            up.send("POST", "/x", b"{}", HEADERS).read()
+            self.assertEqual(up.reuse(), (False, False))  # idle past it: a fresh connection, no stale retry
+            self.assertIsNot(up.local.conn, first)
+            self.assertIsNone(first.sock)  # the idle one was closed, not leaked
+
     def test_is_stale_names_the_errors_of_a_connection_closed_before_any_body(self):
         import http.client
         from model_gateway.upstream import is_stale

@@ -1,6 +1,7 @@
 """The upstream API: one connection per serving thread, kept alive, with one fresh retry.
 
-A pooled connection the server closed fails on its next use; the request is retried once on a new
+A pooled connection idle past IDLE_SECONDS is closed before use, never sent on. A pooled connection
+the server closed fails on its next use; the request is retried once on a new
 connection; `reuse()` reports whether the last send rode a kept-alive connection and whether that retry
 fired. Any other connection error, and a response http.client cannot parse, is final, and the caller
 answers 502. Request headers go as an ordered list of pairs, so a header sent twice goes twice.
@@ -11,7 +12,12 @@ import ssl
 import threading
 from urllib.parse import urlsplit
 
+from . import clock
+
 TIMEOUT_SECONDS = 900
+# reqwest's default pool idle timeout. Past it a NAT or the edge may have dropped the connection without a
+# FIN, and a request sent on it waits out the TCP retransmission timeout before failing.
+IDLE_SECONDS = 90
 RETRYABLE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError,
              http.client.CannotSendRequest, http.client.ResponseNotReady)
 
@@ -40,6 +46,11 @@ class Upstream:
 
     def connection(self):
         conn = getattr(self.local, "conn", None)
+        # Idle runs from the last response's headers, so a long stream counts toward it: reconnecting early
+        # costs one handshake, reusing a dead connection costs the TCP timeout.
+        if conn is not None and conn.sock is not None and clock.monotonic() - getattr(self.local, "answered", float("-inf")) > IDLE_SECONDS:
+            self.drop()
+            conn = None
         if conn is None:
             host, port = self.origin.hostname, self.origin.port
             if self.tls is not None:
@@ -93,7 +104,9 @@ class Upstream:
                 for name, value in headers:
                     conn.putheader(name, value)
                 conn.endheaders(body)
-                return conn.getresponse()
+                resp = conn.getresponse()
+                self.local.answered = clock.monotonic()
+                return resp
             except RETRYABLE as e:
                 self.local.stale = self.local.stale or self.local.reused
                 self.drop()
