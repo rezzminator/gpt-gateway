@@ -19,8 +19,17 @@ class Runtime:
         self.drain = Drain()
         self.sequence = Sequence()
         self.chain = Chain((), self.log.write)
+        self.chatgpt = None
 
     def load(self):
-        """Read the settings and load the middleware; SettingsError or MiddlewareError stops the start."""
+        """Read the settings and load the middleware; SettingsError, MiddlewareError or EnvError stops the start."""
         self.settings.load()
         self.chain = Chain(self.settings.modules, self.log.write)
+        if self.settings.snapshot.chatgpt:
+            from .env import CHATGPT_AUTH_STORE, ChatGPTEnv, EnvError
+            from .chatgpt.auth import AuthError
+            from .chatgpt.route import Route
+            try:
+                self.chatgpt = Route(ChatGPTEnv.parse(self.settings.env), self.log.write)
+            except AuthError as e:  # the chosen token store cannot open: a start error like a bad knob
+                raise EnvError("env %s: %s" % (CHATGPT_AUTH_STORE, e)) from None

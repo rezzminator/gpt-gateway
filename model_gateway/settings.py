@@ -17,7 +17,7 @@ from . import env as envmod
 from . import middleware
 
 FILE_NAME = "settings.json"
-KEYS = ("capture_dir", "middleware", "middleware_dir")
+KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt")
 ENTRY_KEYS = ("module", "settings")
 MODULE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\Z")
 CAPTURE_OFF = ("off", "0")
@@ -42,6 +42,7 @@ class Snapshot:
     module_settings: object   # {module: read-only settings}
     sources: object           # {key: "env" | "file" | "default"}
     state: str                # "ok" | "missing" | "unread" | "error(...)"
+    chatgpt: bool = False
 
 
 def absolute_dir(value, where, key):
@@ -99,6 +100,10 @@ def read_file(path):
     if unknown:
         raise SettingsError("%s: unknown key(s) %s; known: %s" % (path, ", ".join(unknown), ", ".join(KEYS)))
     out = {}
+    if "chatgpt" in data:
+        if data["chatgpt"] is not None and type(data["chatgpt"]) is not bool:
+            raise SettingsError("%s: chatgpt must be a boolean or null" % path)
+        out["chatgpt"] = data["chatgpt"]
     for key in ("capture_dir", "middleware_dir"):
         if key in data:
             out[key] = None if data[key] is None else absolute_dir(data[key], path, key)
@@ -167,7 +172,7 @@ class Settings:
         return os.path.join(os.path.dirname(os.path.abspath(self.path)), "middleware")
 
     def core(self, file_values):
-        """(capture_dir, middleware_dir, entries, sources) from env, file values and defaults."""
+        """(capture_dir, middleware_dir, entries, sources, chatgpt) from env, file and defaults."""
         sources = {}
         raw = envmod.value(self.env, envmod.CAPTURE_DIR)
         if raw is not None:
@@ -187,14 +192,22 @@ class Settings:
             mdir, sources["middleware_dir"] = self.default_middleware_dir(), "default"
         entries = file_values.get("middleware", ())
         sources["middleware"] = "file" if "middleware" in file_values else "default"
-        return capture, mdir, entries, sources
+        raw = envmod.value(self.env, envmod.CHATGPT)
+        if raw is not None:
+            if raw.lower() not in ("1", "true", "on", "0", "false", "off"):
+                raise SettingsError("env %s: must be 1|true|on or 0|false|off" % envmod.CHATGPT)
+            chatgpt, sources["chatgpt"] = raw.lower() in ("1", "true", "on"), "env"
+        else:
+            chatgpt = file_values.get("chatgpt") or False
+            sources["chatgpt"] = "file" if file_values.get("chatgpt") is not None else "default"
+        return capture, mdir, entries, sources, chatgpt
 
     def build(self, core, modules, state):
-        capture, mdir, entries, sources = core
+        capture, mdir, entries, sources, chatgpt = core
         per_module = {m.module: module_settings(m, values, self.env, self.path)
                       for m, (_, values) in zip(modules, entries)}
         return Snapshot(capture, mdir, tuple(name for name, _ in entries), MappingProxyType(per_module),
-                        MappingProxyType(sources), state)
+                        MappingProxyType(sources), state, chatgpt)
 
     def stat_key(self):
         try:
@@ -244,6 +257,8 @@ class Settings:
             if core[1] != self.snapshot.middleware_dir:
                 raise SettingsError("%s: middleware_dir changed; restart to apply (running %s, file %s)"
                                     % (self.path, self.snapshot.middleware_dir, core[1]))
+            if core[4] != self.snapshot.chatgpt:
+                raise SettingsError("%s: chatgpt changed; restart to apply" % self.path)
             snap = self.build(core, self.modules, "missing" if file_values is None else "ok")
         except SettingsError as e:
             self.snapshot = dataclasses.replace(self.snapshot, state="error(%s)" % str(e).replace("\n", " "))

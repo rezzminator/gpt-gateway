@@ -1,0 +1,21 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_fixture"}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"Plan α"}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":1,"delta":"Check β"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_fixture","encrypted_content":"encrypted-fixture","summary":[]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":12,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":10}}}}
+

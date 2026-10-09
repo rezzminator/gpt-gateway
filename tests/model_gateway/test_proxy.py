@@ -218,5 +218,28 @@ class HookExchangeTest(unittest.TestCase):
         self.assertIn("POST /v1/json client disconnected mid-stream kind=main rec=seen", fakes.logged(rt))
 
 
+class RelayRouteTest(unittest.TestCase):
+    def test_disconnect_drops_only_selected_upstream(self):
+        from unittest.mock import Mock
+        from model_gateway import clock
+        from model_gateway.proxy import Handler
+        from model_gateway.chatgpt.response import Response
+        for failure in (BrokenPipeError(), RuntimeError("invented write failure")):
+            rt, client, cap, ctx = Mock(), Mock(), Mock(), Mock()
+            rt.chain.event_sink.return_value = None
+            handler = Handler.__new__(Handler)
+            handler.command, handler.path = "POST", "/v1/messages"
+            handler.send_response = Mock(side_effect=failure)
+            handler.close_connection = False
+            handler.relay(rt, ctx, Response.json(200, {"ok": True}), " kind=sub", "", cap,
+                          clock.monotonic(), client)
+            client.drop.assert_called_once_with()
+            rt.upstream.drop.assert_not_called()
+            self.assertTrue(handler.close_connection)
+            result = rt.chain.run_response_end.call_args.args[1]
+            self.assertFalse(result.completed)
+            self.assertEqual(result.client_disconnected, isinstance(failure, BrokenPipeError))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,14 +1,27 @@
 # model-gateway layout
 
-Greenfield design per `/quality:llm-codebase`. The units of change come from the single-file predecessor gateway (one 926-line module plus four shell scripts); this repository has no history yet, so every co-change below is marked "assumed". Written before the code; the tree under § Tree is what `scripts/checks.sh` and `scripts/gate.sh` hold the build to.
+The gateway has an Anthropic passthrough, a middleware contract and an optional ChatGPT route. The tables below define its units, vocabulary and façades; co-change evidence marked "assumed" is a design boundary, not a measured history. `scripts/checks.sh` and `scripts/gate.sh` enforce the countable laws.
+
+## Contents
+
+- [1. Units of change](#1-units-of-change)
+- [2. Tree](#2-tree)
+- [3. Glossary](#3-glossary)
+- [4. Façades](#4-façades)
+- [5. Registries](#5-registries)
+- [6. Gates](#6-gates)
+- [7. Metrics](#7-metrics)
+- [8. Migration](#8-migration)
+- [9. Brief template and work tree](#9-brief-template-and-work-tree)
+- [10. Open rulings](#10-open-rulings)
 
 ## 1. Units of change
 
 | Unit | Concepts it owns | Directory or module | Co-change evidence |
 | --- | --- | --- | --- |
 | entry | the `gateway.py` script: import path setup, hand-off to the CLI | `gateway.py` | assumed: changes only when the package's entry changes |
-| cli | the commands `serve`, `check [FILE]`, `mw NAME ARGS…`, their usage text | `model_gateway/cli.py` | assumed: a new command adds a table row and its function together |
-| env | every environment read; the core knob names (`MODEL_GATEWAY_*`); parsing the knobs into `CoreEnv` | `model_gateway/env.py` | assumed: a new knob lands here alone |
+| cli | core and `chatgpt-login`, `chatgpt-status`, `chatgpt-stats` commands; usage | `model_gateway/cli.py` | assumed: a new command adds a table row and its function together |
+| env | environment reads, `MODEL_GATEWAY_*`, `CoreEnv`, `ChatGPTEnv` | `model_gateway/env.py` | assumed: a new knob lands here alone |
 | clock | wall time, local-time stamps, sleeping | `model_gateway/clock.py` | assumed: never co-changes |
 | log | the locked, rotating gateway log | `model_gateway/log.py` | assumed: rotation and line format change together |
 | settings | `settings.json`: the core keys, the `middleware` entries, env over file over default for core keys and each module's `SETTINGS`, `check()`, the strict start read, the mtime/size/inode reload with last-good | `model_gateway/settings.py` | assumed: a new core key changes its default, validator and reload together |
@@ -23,6 +36,22 @@ Greenfield design per `/quality:llm-codebase`. The units of change come from the
 | server | the listening socket with `SO_REUSEPORT`, in-flight tracking, SIGTERM drain | `model_gateway/server.py` | assumed: graceful restart and drain change together |
 | runtime | composing env, log, settings, middleware, upstream and drain into one object | `model_gateway/runtime.py` | assumed: changes when a new mechanism joins |
 | harness | the public middleware test harness | `model_gateway/harness.py` | assumed: changes with the hooks contract |
+| chatgpt signature | reasoning signature codec | `model_gateway/chatgpt/signature.py` | assumed: replay and stream share the codec |
+| chatgpt auth | credentials, token storage and refresh | `model_gateway/chatgpt/auth.py` | assumed: token lifecycle co-changes |
+| chatgpt login | browser PKCE and device-code login | `model_gateway/chatgpt/login.py` | assumed: OAuth flow changes together |
+| chatgpt keychain | macOS Keychain token storage | `model_gateway/chatgpt/keychain.py` | assumed: platform storage changes alone |
+| chatgpt catalog | model parsing, fetch and last-good cache | `model_gateway/chatgpt/catalog.py` | assumed: refresh and model fields co-change |
+| chatgpt request | Anthropic to Responses body translation | `model_gateway/chatgpt/request.py` | assumed: request mapping changes together |
+| chatgpt tools | tool definitions, choice and name mapping | `model_gateway/chatgpt/tools.py` | assumed: tool request and response names agree |
+| chatgpt schema | pure JSON schema sanitization | `model_gateway/chatgpt/schema.py` | assumed: schema rules change alone |
+| chatgpt lane | per-session, per-agent cache key | `model_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
+| chatgpt stream | Responses SSE translation and accumulation | `model_gateway/chatgpt/stream.py` | assumed: event mapping and accumulation agree |
+| chatgpt errors | error decisions and retry backoff | `model_gateway/chatgpt/errors.py` | assumed: status and retry policy co-change |
+| chatgpt estimate | per-lane token estimate calibration | `model_gateway/chatgpt/estimate.py` | assumed: measurement and estimate co-change |
+| chatgpt identity | Codex client version and identity headers | `model_gateway/chatgpt/identity.py` | assumed: OAuth and backend share identity |
+| chatgpt client | Responses and models HTTP requests | `model_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
+| chatgpt route | routing decision, attempts, stream commit, lanes | `model_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
+| chatgpt response | the response-like object the relay reads, its reader thread | `model_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
 | example | the minimal middleware, the contract's executable documentation | `examples/middleware/model_note.py` | assumed: changes with the contract |
 | launchd | the supervisor (`run.sh`, fail-open), `ctl.sh`, `install.sh`, `uninstall.sh`, the launchd agent | `launchd/` | assumed: the plist's variables appear in all four, so they co-change |
 | gates | `scripts/checks.sh`, `scripts/gate.sh`, `scripts/baselines/` | `scripts/` | assumed: a new check and its baseline land together |
@@ -34,11 +63,12 @@ The request path is one unit (`proxy`), not a prefixed pipeline: its steps share
 ```
 .gitignore
 LICENSE                                   MIT, holder "model-gateway contributors"
-README.md                                 what it is, install, settings, the middleware contract, health, fail-open, capture, operating it
+THIRD_PARTY_NOTICES.md                     distilled sources' licences and notices
+README.md                                 install, settings, middleware, health, fail-open, capture, ChatGPT route, operating it
 gateway.py                                entry: puts its own directory on sys.path, runs model_gateway.cli.main
 model_gateway/__init__.py                 package purpose
-model_gateway/cli.py                      COMMANDS table → serve | check | mw; usage generated from the table
-model_gateway/env.py                      façade: environment reads; CoreEnv
+model_gateway/cli.py                      COMMANDS table → serve | check | mw | chatgpt-login | chatgpt-status | chatgpt-stats
+model_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 model_gateway/clock.py                    façade: time
 model_gateway/log.py                      façade: the gateway log
 model_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
@@ -53,6 +83,23 @@ model_gateway/health.py                   health_line
 model_gateway/server.py                   Server, Drain, serve
 model_gateway/runtime.py                  Runtime
 model_gateway/harness.py                  run, run_cli, load
+model_gateway/chatgpt/__init__.py         package purpose
+model_gateway/chatgpt/signature.py        reasoning signature encode, decode
+model_gateway/chatgpt/auth.py             credential store and refresh
+model_gateway/chatgpt/login.py            browser and device-code login
+model_gateway/chatgpt/keychain.py         macOS Keychain storage
+model_gateway/chatgpt/catalog.py          Model, parse, Catalog
+model_gateway/chatgpt/request.py          deterministic Responses request translation
+model_gateway/chatgpt/tools.py            tool mapping and name restoration
+model_gateway/chatgpt/schema.py           pure schema sanitizer
+model_gateway/chatgpt/lane.py             lane key
+model_gateway/chatgpt/stream.py           Translator, accumulate
+model_gateway/chatgpt/errors.py           Decision, classify, backoff
+model_gateway/chatgpt/estimate.py         Estimator
+model_gateway/chatgpt/identity.py         CODEX_CLIENT_VERSION, headers
+model_gateway/chatgpt/client.py           separate ChatGPT Upstream, responses and models
+model_gateway/chatgpt/route.py            decision, retries, lanes
+model_gateway/chatgpt/response.py         Response, Reader: the relay's response object and reader thread
 examples/middleware/model_note.py         NAME "model-note", SETTINGS enabled, on_request
 launchd/install.sh                        copies the SHIP list to ~/.local/share/model-gateway/, writes the plist
 launchd/uninstall.sh                      stops the agent, unlinks, removes the plist and the install dir
@@ -68,6 +115,9 @@ tests/fakes.py                            fake upstreams (SSE, split SSE, slow S
 tests/test_gateway.py                     ↔ gateway.py
 tests/model_gateway/__init__.py
 tests/model_gateway/test_{cli,env,clock,log,settings,middleware,hooks,headers,events,capture,upstream,proxy,health,server,runtime,harness}.py
+tests/model_gateway/chatgpt/__init__.py
+tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,response}.py
+tests/model_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py
 tests/examples/middleware/test_model_note.py
@@ -78,9 +128,9 @@ tests/scripts/__init__.py
 tests/scripts/test_{checks,gate}.py
 ```
 
-The installed copy is flat: `install.sh` copies `gateway.py`, `model_gateway/` (its `*.py`), `launchd/run.sh`, `launchd/ctl.sh`, `README.md` and `LICENSE` to `~/.local/share/model-gateway/`, and creates `middleware/` and `settings.json` there. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
+Top-level install items are flat: `install.sh` copies `gateway.py`, `model_gateway/`, `launchd/run.sh`, `launchd/ctl.sh`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` to `~/.local/share/model-gateway/`, and creates `middleware/` and `settings.json` there. The package copy includes every `*.py` recursively, preserving subdirectories through the `.new` swap. `tests/jail.py` mirrors that layout with `os.walk`. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
 
-Anatomy: every module of `model_gateway/` opens with a docstring stating its purpose and has exactly one test home, `tests/model_gateway/test_{stem}.py`; `__init__.py` files are package markers and exempt.
+Anatomy: every source module opens with a purpose docstring and has a test home at `tests/{dir}/test_{stem}.py`, preserving package subdirectories; `__init__.py` files are package markers and exempt.
 
 ## 3. Glossary
 
@@ -93,11 +143,15 @@ Anatomy: every module of `model_gateway/` opens with a docstring stating its pur
 | a middleware file | module (`module` key, file stem) | plugin, extension, filter | `settings.json` `middleware[].module`, `middleware.Module`, `load_modules` |
 | a middleware's label | `NAME` | id, title | health line, hook failure lines, `gateway.py mw NAME` |
 | a hook | `on_request`, `on_event`, `on_response_end`, `health`, `cli`, `check` | callbacks, handlers | `hooks.Chain`, the example, README § Middleware |
-| main session vs sub-agent | kind (`main`, `sub`) | conv, conversation type | `ctx.kind`, log note `kind=`, capture folder names; census `spelling-kind` |
+| main session vs sub-agent | kind (`main`, `sub`) | conv, conversation type | `ctx.kind`, log note `kind=`; ChatGPT capture uses `gpt`; census `spelling-kind` |
 | the capture folder tree | capture | dump, trace, record | `capture_dir`, `MODEL_GATEWAY_CAPTURE_DIR`, `capture.Capture` |
 | the API the gateway forwards to | upstream | backend, origin server | `MODEL_GATEWAY_UPSTREAM`, `upstream.Upstream` |
 | SIGTERM wind-down | drain | graceful shutdown | `MODEL_GATEWAY_DRAIN_SECONDS`, `server.Drain` |
-| the reserved routing target | route (`"anthropic"`) | backend, provider | `ctx.route` |
+| the routing target | route (`"anthropic"`, `"chatgpt"`) | codex bridge, translator module, provider | `ctx.route`, `chatgpt/route.py` |
+| cache affinity per session and agent | lane key | conversation id, session-only key | `chatgpt/lane.py`, `prompt_cache_key`, `session-id`, `x-client-request-id` |
+| models and their capabilities | catalog | allowlist, model table | `chatgpt/catalog.py`, disk cache, route decision |
+| catalog-selected Responses wire variant | Responses-Lite | lite mode, Sol protocol | `use_responses_lite`, `additional_tools`, `x-openai-internal-codex-responses-lite` |
+| replayable encrypted reasoning envelope | reasoning signature | thinking cache, reasoning blob | `chatgpt/signature.py`, `model-gateway:chatgpt:v1:` |
 
 The census of the product spelling exempts this document alone, since its glossary must be able to name what it rejects; the predecessor's names are never written, even here.
 
@@ -114,6 +168,8 @@ The census of the product spelling exempts this document alone, since its glossa
 | test scratch root | `tests/jail.py` | `tempfile.mkdtemp`, `mkstemp`, `TemporaryDirectory`, `NamedTemporaryFile` in tests |
 
 The harness creates its own temporary log file through `tempfile`; it is production code, so the test-jail count does not cover it.
+
+The ChatGPT route introduces no new primitive façade: it uses `model_gateway/upstream.py` for its separate HTTP client, `model_gateway/env.py` for its knobs and `model_gateway/clock.py` for time and backoff. Logging and capture continue through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
 
 ## 5. Registries
 

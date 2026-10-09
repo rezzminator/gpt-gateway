@@ -6,6 +6,23 @@ from model_gateway import env
 
 
 class CoreEnvTest(unittest.TestCase):
+    def test_chatgpt_origins_store_and_paths_are_validated(self):
+        for name, value in (("MODEL_GATEWAY_CHATGPT_ORIGIN", "ftp://invalid"),
+                            ("MODEL_GATEWAY_CHATGPT_ORIGIN", "http://host/path"),
+                            ("MODEL_GATEWAY_CHATGPT_MODELS_PATH", "relative"),
+                            ("MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN", "ftp://example.test"),
+                            ("MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN", "https://example.test/path"),
+                            ("MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN", "http://u:p@example.test"),
+                            ("MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN", "http://a:bad"),
+                            ("MODEL_GATEWAY_CHATGPT_AUTH_STORE", "unknown")):
+            with self.subTest(name=name, value=value), self.assertRaisesRegex(env.EnvError, name):
+                env.ChatGPTEnv.parse({"HOME": "/invented", name: value})
+        knobs = env.ChatGPTEnv.parse({"HOME": "/invented"})
+        self.assertEqual((knobs.origin, knobs.auth_origin, knobs.auth_store),
+                         ("https://chatgpt.com", "https://auth.openai.com", "auto"))
+        self.assertEqual(knobs.models_path, "/invented/.local/state/model-gateway/chatgpt-models.json")
+        self.assertEqual(knobs.auth_path, "/invented/.local/state/model-gateway/chatgpt-auth.json")
+
     def test_defaults(self):
         core = env.CoreEnv.parse({})
         self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug),

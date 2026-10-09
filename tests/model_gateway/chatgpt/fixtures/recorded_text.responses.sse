@@ -1,0 +1,27 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_fixture"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_fixture"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"encrypted-fixture"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"encrypted-fixture"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"text_fixture"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":1,"delta":"Hello"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":1,"delta":"!"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"text_fixture"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":12,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":10}}}}
+

@@ -45,6 +45,16 @@ def on_response_end(ctx, result):
 
 
 class OrderTest(ChainCase):
+    def test_chatgpt_route_is_readonly_and_model_changes_roll_back(self):
+        chain, modules = self.chain({"switch": 'NAME = "switch"\ndef on_request(ctx, req):\n    req.body["model"] = "other"\n    req.mark_changed()\n'})
+        ctx = Context(log=self.lines.append, log_path=None, settings={}, route="chatgpt")
+        with self.assertRaises(AttributeError):
+            ctx.route = "anthropic"
+        req = self.request()
+        self.assertIs(chain.run_request(ctx, req)[0], RAW)
+        self.assertEqual(ctx.route, "chatgpt")
+        self.assertEqual(modules[0].errors, 1)
+
     def test_hooks_run_in_list_order(self):
         chain, _ = self.chain({"c": ORDER.format(n="c"), "a": ORDER.format(n="a"), "b": ORDER.format(n="b")})
         ctx = self.ctx()

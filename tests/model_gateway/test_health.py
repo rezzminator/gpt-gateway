@@ -16,6 +16,17 @@ def health(port):
 
 
 class HealthTest(unittest.TestCase):
+    def test_chatgpt_health_uses_only_the_memory_count(self):
+        from unittest.mock import Mock
+        from model_gateway.health import health_line
+        rt, _ = fakes.start_gateway(self)
+        route = Mock()
+        for count, expected in [(None, "none"), (0, "0 models"), (2, "2 models")]:
+            route.catalog.count.return_value = count
+            line = health_line(rt.settings.snapshot, rt.chain, rt.log, route)
+            self.assertIn(" chatgpt=on catalog=" + expected + " middleware=", line)
+        route.catalog.models.assert_not_called()
+
     def test_no_settings_no_middleware(self):
         rt, port = fakes.start_gateway(self)
         self.assertEqual(health(port), b"ok pid=%d capture=off settings=missing middleware=[]\n" % os.getpid())

@@ -84,7 +84,7 @@ def recorded_events(chunks, content_type):
 
 def run(path, *, body, headers=None, response=b"", status=200, reason="OK", content_type=None,
         response_headers=(), chunk_size=None, settings=None, env=None, method="POST",
-        url_path="/v1/messages", request_id=1):
+        url_path="/v1/messages", request_id=1, route="anthropic"):
     """Run the middleware at `path` over one exchange; an Outcome.
 
     body: the request body, bytes as sent or an object (sent as `json.dumps(body)`).
@@ -110,7 +110,7 @@ def run(path, *, body, headers=None, response=b"", status=200, reason="OK", cont
         parsed = parse_object(raw)
         meta = request_meta(parsed)
         ctx = Context(log=log.write, log_path=log.path, settings=per_module, kind=kind, method=method,
-                      path=url_path, headers=request_headers,
+                      path=url_path, headers=request_headers, route=route,
                       model=parsed.get("model") if parsed is not None else None, request_id=request_id)
         forwarded, notes = chain.run_request(ctx, Request(raw, parsed))
         note = assemble_note(kind, notes)

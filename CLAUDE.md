@@ -1,6 +1,6 @@
-# model-gateway — a local passthrough between Claude Code and the Anthropic API, with a middleware hook API
+# model-gateway — a local passthrough between Claude Code and the Anthropic API, with a middleware hook API and an opt-in ChatGPT route
 
-The core forwards every request byte for byte and relays every response chunk as it arrives; behaviour beyond that lives in middleware files the core loads, never in the core. The layout, glossary, façades and gates are fixed by `docs/design/model-gateway-layout.md`; read it before adding a file.
+On the Anthropic route the core forwards every request byte for byte and relays every response chunk as it arrives; the ChatGPT route, the one route built in and off unless `chatgpt` is true, translates GPT sub-agent requests to the ChatGPT Codex backend and back; every other behaviour lives in middleware the core loads, never in the core. The layout, glossary, façades and gates are fixed by `docs/design/model-gateway-layout.md`; read it before adding a file.
 
 # Vocabulary
 
@@ -9,9 +9,10 @@ The core forwards every request byte for byte and relays every response chunk as
 - the contract: the per-request objects `Context`, `Request`, `Result` and the hook chain · `model_gateway/hooks.py`; each module's `SETTINGS` and `check` · `model_gateway/settings.py`; documented in `README.md` § Middleware
 - harness: the public middleware test harness, `run`, `run_cli`, `load` · `model_gateway/harness.py`
 - example: the smallest middleware, the contract's executable documentation · `examples/middleware/model_note.py`
-- kind: `main` or `sub` (a request carrying `x-claude-code-agent-id`); the log key is `kind=`
+- kind: `main` or `sub` (a request carrying `x-claude-code-agent-id`); the log key is `kind=`; a ChatGPT-route capture folder carries `gpt` in its place
+- ChatGPT route: GPT models as Claude Code sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, the `gpt` log lines and `gateway.py chatgpt-stats` · `model_gateway/chatgpt/`, `README.md` § ChatGPT route; third-party licences · `THIRD_PARTY_NOTICES.md`
 - capture: one folder per exchange, off by default · `model_gateway/capture.py`
-- launchd: the supervisor, `ctl.sh`, `install.sh`, `uninstall.sh`; the installed copy is flat under `~/.local/share/model-gateway/`, label `local.model-gateway` · `launchd/`
+- launchd: the supervisor, `ctl.sh`, `install.sh`, `uninstall.sh`; the installed copy is flat under `~/.local/share/model-gateway/`, a shipped package keeping its subdirectories, label `local.model-gateway` · `launchd/`
 - gates: `scripts/checks.sh` (every countable law, one `CHECK` line each), `scripts/gate.sh` (the only definition of ready), committed baselines · `scripts/baselines/`
 - test jail: every scratch directory, port and environment a test uses · `tests/jail.py`; fake upstreams and the recording middleware · `tests/fakes.py`; the stub launchctl · `tests/launchd/stub.py`
 
@@ -32,6 +33,7 @@ The core forwards every request byte for byte and relays every response chunk as
 ## Live systems
 
 - No test, script or session runs `launchd/*.sh` against the real `HOME` or reaches the real launchd, the real Claude Code settings or a running gateway: tests take a scratch `HOME` from `tests/jail.py`, free ports, fake upstreams and the stub launchctl.
+- No test, script or session touches `~/.codex/auth.json`, the real Keychain entry `model-gateway.chatgpt`, the real ChatGPT token or catalog file, or OpenAI: ChatGPT-route tests take a jailed file store (`MODEL_GATEWAY_CHATGPT_AUTH_STORE=file`) and the fake ChatGPT upstream in `tests/fakes.py`.
 
 ## Code
 

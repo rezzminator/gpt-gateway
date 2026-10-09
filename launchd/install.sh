@@ -21,8 +21,8 @@ done
 case "$PORT" in ''|*[!0-9]*) echo "install.sh: --port must be a number" >&2; exit 2 ;; esac
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
-# What an install copies, relative to the repository root; the installed copy is flat.
-SHIP="gateway.py model_gateway launchd/run.sh launchd/ctl.sh README.md LICENSE"
+# What an install copies; top-level items are flat, package subdirectories are preserved.
+SHIP="gateway.py model_gateway launchd/run.sh launchd/ctl.sh README.md LICENSE THIRD_PARTY_NOTICES.md"
 LABEL=${MODEL_GATEWAY_LABEL:-local.model-gateway}
 DEST="$HOME/.local/share/model-gateway"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -76,7 +76,19 @@ for f in $SHIP; do
     # A package goes whole, its sources only; the running gateway has already imported its copy.
     rm -rf "$DEST/$name.new"
     mkdir "$DEST/$name.new"
-    cp "$SRC/$f"/*.py "$DEST/$name.new/"
+    "$PY" -I - "$SRC/$f" "$DEST/$name.new" <<'PY'
+import os
+import shutil
+import sys
+
+src, dest = sys.argv[1:]
+for directory, _, names in os.walk(src):
+    target = os.path.join(dest, os.path.relpath(directory, src))
+    for name in names:
+        if name.endswith(".py"):
+            os.makedirs(target, exist_ok=True)
+            shutil.copy(os.path.join(directory, name), target)
+PY
     rm -rf "${DEST:?}/$name"
     mv "$DEST/$name.new" "$DEST/$name"
   else

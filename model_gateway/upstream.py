@@ -51,14 +51,29 @@ class Upstream:
             except Exception as e:
                 self.log("    upstream close failed: %r" % (e,))
 
-    def send(self, method, path, body, headers):
+    def abort(self):
+        """Shut this thread's socket down, so a reader blocked on its response returns, then drop it."""
+        conn = getattr(self.local, "conn", None)
+        if conn is not None and conn.sock is not None:
+            try:
+                conn.sock.shutdown(socket.SHUT_RDWR)
+            except OSError as e:
+                self.log("    upstream shutdown failed: %r" % (e,))
+        self.drop()
+
+    def send(self, method, path, body, headers, timeout=None):
         """The upstream response, or UpstreamError after the one fresh retry.
 
         headers: ((name, value), ...) in the client's order; Host comes from the origin.
+        timeout: seconds for this thread's connection from now on, when given.
         """
         for attempt in (1, 2):
             try:
                 conn = self.connection()
+                if timeout is not None:
+                    conn.timeout = timeout
+                    if conn.sock is not None:
+                        conn.sock.settimeout(timeout)
                 conn.putrequest(method, path, skip_accept_encoding=True)
                 for name, value in headers:
                     conn.putheader(name, value)

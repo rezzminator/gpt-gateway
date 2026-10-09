@@ -45,8 +45,8 @@ class Context:
     log_path = _field("log_path")
 
     def __init__(self, *, log, log_path, settings, kind=None, method=None, path=None, headers=None,
-                 model=None, request_id=None, capture_dir=None):
-        self._fields = {"kind": kind, "route": ROUTE, "method": method, "path": path,
+                 model=None, request_id=None, capture_dir=None, route=ROUTE):
+        self._fields = {"kind": kind, "route": route, "method": method, "path": path,
                         "headers": headers if headers is not None else MappingProxyType({}),
                         "model": model, "request_id": request_id, "capture_dir": capture_dir,
                         "log": log, "log_path": log_path}

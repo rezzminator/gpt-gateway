@@ -74,15 +74,18 @@ def ship_list():
 
 
 def stage_install(dest):
-    """An installed copy at `dest`, flat as install.sh lays it out, with an empty middleware/; returns dest."""
+    """An installed copy at `dest`, preserving package trees, with an empty middleware/; returns dest."""
     os.makedirs(dest, exist_ok=True)
     for item in ship_list():
         src, target = os.path.join(ROOT, item), os.path.join(dest, os.path.basename(item))
         if os.path.isdir(src):
             os.makedirs(target)
-            for name in os.listdir(src):
-                if name.endswith(".py"):
-                    shutil.copy(os.path.join(src, name), target)
+            for directory, _, names in os.walk(src):
+                package = os.path.join(target, os.path.relpath(directory, src))
+                for name in names:
+                    if name.endswith(".py"):
+                        os.makedirs(package, exist_ok=True)
+                        shutil.copy(os.path.join(directory, name), package)
         else:
             shutil.copy(src, target)
     os.makedirs(os.path.join(dest, "middleware"), exist_ok=True)

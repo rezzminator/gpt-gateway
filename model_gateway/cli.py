@@ -1,4 +1,6 @@
 """The gateway's commands — serve (the default), check [FILE], mw NAME [ARGS...] — and the usage built from them."""
+import os
+import re
 import sys
 
 from . import env as envmod
@@ -26,7 +28,7 @@ def cmd_serve(args, install_dir, environ):
         return start_error(None, "env error", e)
     try:
         rt.load()
-    except SettingsError as e:
+    except (SettingsError, envmod.EnvError) as e:
         return start_error(rt.log, "settings error", e)
     except MiddlewareError as e:
         return start_error(rt.log, "middleware error", e)
@@ -105,7 +107,68 @@ def cmd_mw(args, install_dir, environ):
     return invoke(module, list(args[1:]), ctx, log)
 
 
+def cmd_chatgpt_login(args, install_dir, environ):
+    if args not in ([], ["--device"]):
+        return usage_error()
+    from .chatgpt import auth, login
+    try:
+        store = auth.Store(envmod.ChatGPTEnv.parse(environ))
+        (login.device_login if args else login.browser_login)(store)
+    except (envmod.EnvError, auth.AuthError, OSError) as error:
+        return start_error(None, "ChatGPT login failed", error)
+    print("ChatGPT: logged in")
+    return 0
+
+
+def cmd_chatgpt_status(args, install_dir, environ):
+    if args:
+        return usage_error()
+    from .chatgpt import auth
+    try:
+        print(auth.Store(envmod.ChatGPTEnv.parse(environ)).status())
+    except (envmod.EnvError, auth.AuthError, OSError) as error:
+        return start_error(None, "ChatGPT status failed", error)
+    return 0
+
+
+def cmd_chatgpt_stats(args, install_dir, environ):
+    name = None
+    try:
+        path = envmod.CoreEnv.parse(environ).log_path
+        # The default rotation exists only once the log has passed its size limit; a named file is required.
+        files = args or [path] + ([path + ".1"] if os.path.exists(path + ".1") else [])
+        lanes = {}
+        pattern = re.compile(r"    gpt lane=(\S+) slug=\S+ status=\d+ input=(\d+) cached=(\d+) ratio=\S+ attempts=\d+")
+        for name in files:
+            with open(name, encoding="utf-8") as source:
+                for line in source:
+                    match = pattern.search(line)
+                    if match:
+                        key, tokens, cached = match.groups()
+                        row = lanes.setdefault(key, [0, 0, 0])
+                        row[0] += 1
+                        row[1] += int(tokens)
+                        row[2] += int(cached)
+    except (OSError, UnicodeError, envmod.EnvError) as error:
+        print("model-gateway: chatgpt-stats: %s%s" % ((str(name) + ": ") if name else "", error), file=sys.stderr)
+        return 1
+    if not lanes:
+        print("no gpt responses in " + ", ".join(files))
+        return 0
+    total = [0, 0, 0]
+    for key, row in sorted(lanes.items()):
+        print("%s responses=%d input=%d cached=%d hit=%.3f" %
+              (key, *row, row[2] / row[1] if row[1] else 0))
+        total = [a + b for a, b in zip(total, row)]
+    print("total responses=%d input=%d cached=%d hit=%.3f" %
+          (*total, total[2] / total[1] if total[1] else 0))
+    return 0
+
+
 COMMANDS = {
+    "chatgpt-stats": (cmd_chatgpt_stats, "chatgpt-stats [LOG...]", "print the ChatGPT cache hit rate per lane"),
+    "chatgpt-login": (cmd_chatgpt_login, "chatgpt-login [--device]", "log in to ChatGPT using a browser or device code"),
+    "chatgpt-status": (cmd_chatgpt_status, "chatgpt-status", "show login presence, masked account and token expiry"),
     "serve": (cmd_serve, "serve", "run the gateway (the default when no command is given)"),
     "check": (cmd_check, "check [FILE]",
               "validate a settings file and its middleware (default: %s beside gateway.py)" % FILE_NAME),

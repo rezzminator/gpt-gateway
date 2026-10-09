@@ -42,6 +42,12 @@ class HarnessTest(unittest.TestCase):
         self.dir = jail.scratch(self)
         self.path = jail.write_middleware(self.dir, "wide", WIDE)
 
+    def test_selected_route_reaches_every_hook(self):
+        source = 'NAME = "route"\ndef on_request(ctx, req):\n    return " route=" + ctx.route\n'
+        path = jail.write_middleware(self.dir, "route", source)
+        self.assertEqual(run(path, body={"model": "gpt-test"}, route="chatgpt").note,
+                         " kind=main route=chatgpt")
+
     def test_run_returns_forwarded_bytes_log_errors_events_and_result(self):
         out = run(self.path, body={"model": "m", "messages": []}, headers={"x-claude-code-agent-id": "a"},
                   response=SSE_BODY, chunk_size=5, settings={"tag": "x"})

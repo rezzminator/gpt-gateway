@@ -45,18 +45,40 @@ class SettingsCase(unittest.TestCase):
 
 
 class CoreSettingsTest(SettingsCase):
+    def test_chatgpt_precedence_validation_and_restart(self):
+        for raw in ("1", "true", "on", "TRUE"):
+            with self.subTest(raw=raw):
+                snap = self.loaded(MODEL_GATEWAY_CHATGPT=raw).current()
+                self.assertIs(getattr(snap, "chatgpt", False), True)
+        self.write({"chatgpt": True})
+        self.assertTrue(self.loaded().current().chatgpt)
+        for raw in ("0", "false", "off"):
+            self.assertFalse(self.loaded(MODEL_GATEWAY_CHATGPT=raw).current().chatgpt)
+        s = self.loaded()
+        self.write({"chatgpt": False}, bump=1)
+        self.assertTrue(s.current().chatgpt)
+        self.assertIn("restart to apply", s.current().state)
+        for value in (1, "true", [], {}):
+            self.write({"chatgpt": value})
+            with self.assertRaisesRegex(SettingsError, "chatgpt"):
+                self.loaded()
+        self.write({"chatgpt": None})
+        self.assertFalse(self.loaded().current().chatgpt)
+        with self.assertRaisesRegex(SettingsError, "MODEL_GATEWAY_CHATGPT"):
+            self.loaded(MODEL_GATEWAY_CHATGPT="yes")
+
     def test_missing_file_means_defaults_not_an_error(self):
         snap = self.loaded().current()
         self.assertEqual((snap.capture_dir, snap.middleware_dir, snap.modules, snap.state),
                          (None, self.mdir, (), "missing"))
         self.assertEqual(dict(snap.sources), {"capture_dir": "default", "middleware_dir": "default",
-                                              "middleware": "default"})
+                                              "middleware": "default", "chatgpt": "default"})
 
     def test_reads_the_file(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw", "middleware": []})
         snap = self.loaded().current()
         self.assertEqual((snap.capture_dir, snap.middleware_dir, snap.state), ("/cap", "/mw", "ok"))
-        self.assertEqual(dict(snap.sources), {"capture_dir": "file", "middleware_dir": "file", "middleware": "file"})
+        self.assertEqual(dict(snap.sources), {"capture_dir": "file", "middleware_dir": "file", "middleware": "file", "chatgpt": "default"})
 
     def test_env_wins_over_the_file_which_wins_over_the_default(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw"})

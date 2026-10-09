@@ -29,6 +29,7 @@ SETTINGS = {"enabled": (True, enabled_value, "MODEL_GATEWAY_MODEL_NOTE")}
 
 
 def on_request(ctx, req):
+    # ctx.route names the selected upstream: "anthropic" or "chatgpt".
     if ctx.settings["enabled"]:
         return " model-note=%s" % ctx.model
     return None

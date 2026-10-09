@@ -9,6 +9,43 @@ import unittest
 from model_gateway import cli
 from tests import jail
 
+
+class ChatGPTStatsTest(unittest.TestCase):
+    def test_lane_totals_empty_and_unreadable(self):
+        import contextlib
+        import io
+        d = jail.scratch(self)
+        path = os.path.join(d, "gw.log")
+        with open(path, "w") as f:
+            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1\n")
+            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1\n")
+        with open(path + ".1", "w") as f:
+            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=50 cached=40 ratio=0.800 attempts=1\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path})
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().splitlines(), ["a responses=1 input=20 cached=0 hit=0.000",
+                         "b responses=2 input=150 cached=100 hit=0.667",
+                         "total responses=3 input=170 cached=100 hit=0.588"])
+        with open(path, "w"):
+            pass
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-stats", path], d, {}), 0)
+        self.assertIn("no gpt responses in " + path, out.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["chatgpt-stats", path + ".missing"], d, {}), 1)
+        self.assertIn(path + ".missing", err.getvalue())
+        os.unlink(path + ".1")  # a log that has not rotated yet: the default reads what exists
+        with open(path, "w") as f:
+            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=5 ratio=0.250 attempts=1\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path}), 0)
+        self.assertEqual(out.getvalue().splitlines()[0], "a responses=1 input=20 cached=5 hit=0.250")
+
 MW_CLI = '''
 NAME = "tool"
 SETTINGS = {"greeting": ("hi", str, "MODEL_GATEWAY_TOOL_GREETING")}

@@ -5,6 +5,7 @@ is read, and the event hooks see it only after the client has. A request line is
 POST /v1/messages and for every status >= 400; on_response_end runs after it.
 """
 import json
+import copy
 from http.server import BaseHTTPRequestHandler
 
 from . import clock
@@ -67,6 +68,8 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         finally:
             rt.upstream.drop()
+            if rt.chatgpt is not None:
+                rt.chatgpt.client.drop()
 
     def log_message(self, *args):
         pass  # the gateway log records each exchange itself
@@ -102,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
         rt = self.server.runtime
         snap = rt.settings.current()  # one settings snapshot per request
         if self.path == HEALTH_PATH:
-            return self.reply(200, "text/plain", health_line(snap, rt.chain, rt.log).encode())
+            return self.reply(200, "text/plain", health_line(snap, rt.chain, rt.log, rt.chatgpt).encode())
         rt.drain.begin(self.connection)
         try:
             self.proxy(rt, snap)
@@ -120,30 +123,39 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True  # the body's end is unknown, so nothing after it can be read
             return self.reply(400, "application/json", json.dumps({"type": "error", "error": {
                 "type": "invalid_request_error", "message": "model-gateway: unreadable request body: %s" % e}}).encode())
+        body = parse_object(raw)
+        selected = ("anthropic", None, None)
+        if rt.chatgpt is not None:
+            selected = rt.chatgpt.decide(self.command, self.path, body, self.headers)
         kind = "sub" if self.headers.get("x-claude-code-agent-id") else "main"
         seq = rt.sequence.next()
-        cap = Capture(snap.capture_dir, seq, self.command, self.path, self.headers, kind, rt.log.write)
+        capture_kind = "gpt" if selected[0] == "chatgpt" else kind
+        cap = Capture(snap.capture_dir, seq, self.command, self.path, self.headers, capture_kind, rt.log.write)
         try:
-            self.exchange(rt, snap, raw, kind, seq, cap, started)
+            self.exchange(rt, snap, raw, body, selected, kind, seq, cap, started)
         finally:
             cap.close()
 
-    def exchange(self, rt, snap, raw, kind, seq, cap, started):
+    def exchange(self, rt, snap, raw, body, selected, kind, seq, cap, started):
         cap.request_body(raw)
-        body = parse_object(raw)
         meta = request_meta(body)
         ctx = Context(log=rt.log.write, log_path=rt.log.path, settings=snap.module_settings, kind=kind,
                       method=self.command, path=self.path, headers=Headers(self.headers.items()),
                       model=body.get("model") if body is not None else None, request_id=seq,
-                      capture_dir=cap.dir)
+                      capture_dir=cap.dir, route=selected[0])
         if rt.env.debug and logs_line(self.command, self.path, 0):
             metadata = body.get("metadata") if body is not None else None
             rt.log.write("    debug headers=%s metadata=%s" % (json.dumps(debug_headers(self.headers.items())),
                                                               json.dumps(metadata)[:300]))
-        sent, notes = rt.chain.run_request(ctx, Request(raw, body))
-        if sent is not raw:
+        req = Request(raw, copy.deepcopy(body) if selected[0] == "chatgpt" else body)
+        sent, notes = rt.chain.run_request(ctx, req)
+        if sent is not raw and selected[0] != "chatgpt":  # the chatgpt route captures the bytes it sends
             cap.sent_body(sent)
         note = assemble_note(kind, notes)
+        if selected[0] == "chatgpt":
+            resp = selected[2] or rt.chatgpt.exchange(req.body if sent is not raw else body,
+                                                     selected[1], self.headers, self.path, cap)
+            return self.relay(rt, ctx, resp, note, meta, cap, started, rt.chatgpt.client)
         headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # a repeated header goes as sent
         headers.append(("accept-encoding", "identity"))
         if sent or self.command in ("POST", "PUT", "PATCH"):
@@ -161,7 +173,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.relay(rt, ctx, resp, note, meta, cap, started)
 
-    def relay(self, rt, ctx, resp, note, meta, cap, started):
+    def relay(self, rt, ctx, resp, note, meta, cap, started, upstream=None):
+        upstream = rt.upstream if upstream is None else upstream
         resp_headers = tuple(resp.getheaders())
         cap.response(resp.status, resp.reason, resp_headers)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
@@ -194,12 +207,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             completed = True
         except (BrokenPipeError, ConnectionResetError):
-            rt.upstream.drop()  # the client left mid-stream; this upstream connection is spent
+            upstream.drop()  # the client left mid-stream; this upstream connection is spent
             disconnected = True
             rt.log.write("%s %s client disconnected mid-stream%s" % (self.command, self.path, note))
             self.close_connection = True
         except Exception as e:
-            rt.upstream.drop()
+            upstream.drop()
             rt.log.write("%s %s stream error %r%s" % (self.command, self.path, e, note))
             self.close_connection = True
         if sink is not None:
