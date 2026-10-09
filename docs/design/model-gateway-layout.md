@@ -37,7 +37,8 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | runtime | composing env, log, settings, middleware, upstream and drain into one object | `model_gateway/runtime.py` | assumed: changes when a new mechanism joins |
 | harness | the public middleware test harness | `model_gateway/harness.py` | assumed: changes with the hooks contract |
 | chatgpt signature | reasoning signature codec | `model_gateway/chatgpt/signature.py` | assumed: replay and stream share the codec |
-| chatgpt auth | credentials, token storage and refresh | `model_gateway/chatgpt/auth.py` | assumed: token lifecycle co-changes |
+| chatgpt auth | credential source selection, own token storage and refresh | `model_gateway/chatgpt/auth.py` | assumed: token lifecycle co-changes |
+| chatgpt Codex login | in-place Codex login reuse and guarded rotation | `model_gateway/chatgpt/codex_login.py` | assumed: shared login lifecycle co-changes |
 | chatgpt login | browser PKCE and device-code login | `model_gateway/chatgpt/login.py` | assumed: OAuth flow changes together |
 | chatgpt keychain | macOS Keychain token storage | `model_gateway/chatgpt/keychain.py` | assumed: platform storage changes alone |
 | chatgpt catalog | model parsing, fetch and last-good cache | `model_gateway/chatgpt/catalog.py` | assumed: refresh and model fields co-change |
@@ -85,7 +86,8 @@ model_gateway/runtime.py                  Runtime
 model_gateway/harness.py                  run, run_cli, load
 model_gateway/chatgpt/__init__.py         package purpose
 model_gateway/chatgpt/signature.py        reasoning signature encode, decode
-model_gateway/chatgpt/auth.py             credential store and refresh
+model_gateway/chatgpt/auth.py             credential source selection, own store and refresh
+model_gateway/chatgpt/codex_login.py      Codex login reuse, guarded refresh and write-back
 model_gateway/chatgpt/login.py            browser and device-code login
 model_gateway/chatgpt/keychain.py         macOS Keychain storage
 model_gateway/chatgpt/catalog.py          Model, parse, Catalog
@@ -113,10 +115,13 @@ tests/__init__.py
 tests/jail.py                             the test jail: scratch roots, free ports, a clean env
 tests/fakes.py                            fake upstreams (SSE, split SSE, slow SSE, JSON, error), the recording middleware, a gateway on a free port
 tests/test_gateway.py                     ↔ gateway.py
+tests/test_jail.py                        ↔ tests/jail.py
 tests/model_gateway/__init__.py
 tests/model_gateway/test_{cli,env,clock,log,settings,middleware,hooks,headers,events,capture,upstream,proxy,health,server,runtime,harness}.py
 tests/model_gateway/chatgpt/__init__.py
-tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,response}.py
+tests/model_gateway/chatgpt/test_codex_login.py
+tests/model_gateway/chatgpt/test_response.py
+tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route}.py
 tests/model_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py
@@ -202,7 +207,7 @@ There is no hand-kept list of modules, commands or knobs beside the one that def
 | spelling-predecessor | Spelling census | zero hits of the predecessor's name family, any case, every file | `FAIL path (new N)` | `spelling-predecessor.txt` |
 | spelling-old-name | Spelling census | zero hits of the predecessor's dashed, underscored and env-prefix spellings | `FAIL path (new N)` | `spelling-old-name.txt` |
 | spelling-product | Spelling census | the two words appear only as `model-gateway`, `model_gateway`, `MODEL_GATEWAY` | `FAIL path (new N)` | `spelling-product.txt` |
-| spelling-env-prefix | Spelling census | every knob a shell script defaults (`${NAME:-…}`) and every name `env.py` reads starts with `MODEL_GATEWAY_` (`HOME` excepted) | `FAIL new: NAME` | `spelling-env-prefix.txt` |
+| spelling-env-prefix | Spelling census | every knob a shell script defaults (`${NAME:-…}`) and every name `env.py` reads starts with `MODEL_GATEWAY_` (`HOME` and `CODEX_HOME` excepted: read, never defined) | `FAIL new: NAME` | `spelling-env-prefix.txt` |
 | spelling-kind | Spelling census | no `conv=` in sources | `FAIL path (new N)` | `spelling-kind.txt` |
 | dup-functions | Duplicates (free functions) | one top-level `def` per name across sources, hook names and `main` excluded | `FAIL new: name: files` | `dup-functions.txt` |
 | registry-parity | Registry parity | every `case` arm a `launchd/*.sh` dispatches appears in its usage line | `FAIL new: script:name`; `ERROR` when no arm or no usage parsed | `undocumented.txt` |

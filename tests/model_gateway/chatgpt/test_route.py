@@ -27,7 +27,7 @@ class RouteTest(unittest.TestCase):
                                 id_token="id-invented", account_id="account-invented")
         jail.write_json(self.auth_path, dict(access_token=self.token, refresh_token="refresh-invented",
                         id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
-        self.env = dict(HOME=self.home, MODEL_GATEWAY_CHATGPT="1", MODEL_GATEWAY_CHATGPT_AUTH_STORE="file",
+        self.env = jail.clean_env(self.home, MODEL_GATEWAY_CHATGPT="1", MODEL_GATEWAY_CHATGPT_AUTH_STORE="file",
                         MODEL_GATEWAY_CHATGPT_AUTH_PATH=self.auth_path, MODEL_GATEWAY_CHATGPT_ORIGIN=self.origin,
                         MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN=self.origin, MODEL_GATEWAY_CHATGPT_MODELS_PATH=self.models_path)
         self.headers = {"x-claude-code-session-id": "session-invented", "x-claude-code-agent-id": "agent-invented",
@@ -283,7 +283,7 @@ class RouteRetryTest(unittest.TestCase):
         rt, port = self.gateway()
         resp, data = self.send(port)
         self.assertEqual((resp.status, json.loads(data)["error"]["type"]), (403, "permission_error"))
-        self.assertIn("run gateway.py chatgpt-login", json.loads(data)["error"]["message"])
+        self.assertIn("run codex login, or gateway.py chatgpt-login", json.loads(data)["error"]["message"])
         self.assertEqual(resp.getheader("x-should-retry"), "false")
         for raw in (b"not json", json.dumps(dict(messages=[])).encode()):  # Anthropic validates these, as before
             with self.subTest(raw=raw):
@@ -375,3 +375,123 @@ class RouteRetryTest(unittest.TestCase):
         self.assertEqual(resp.getheader("x-should-retry"), "false")
         self.assertEqual(len(self.responses()), 5)
         self.assertEqual(json.loads(data)["error"]["message"], "chatgpt upstream: empty completion")
+
+
+class CodexRouteTest(unittest.TestCase):
+    setUp = RouteTest.setUp
+    jwt = RouteTest.jwt
+    gateway = RouteTest.gateway
+    send = RouteTest.send
+    responses = RouteTest.responses
+
+    def test_k15_codex_headers_reach_fake_without_creating_own_store(self):
+        path = os.path.join(self.home, ".codex", "auth.json")
+        os.makedirs(os.path.dirname(path))
+        access = self.jwt("codex")
+        jail.write_json(path, {"auth_mode": "chatgpt", "tokens": {
+            "access_token": access, "refresh_token": "invented-codex-refresh", "account_id": "acct-test-0001"}})
+        os.unlink(self.auth_path)
+        rt, port = self.gateway()
+        response, data = self.send(port)
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"message_stop", data)
+        self.assertGreater(len(self.responses()), 0)
+        for request in self.fake.seen:
+            headers = request["headers"]
+            self.assertEqual(headers["authorization"], "Bearer " + access)
+            self.assertEqual(headers["chatgpt-account-id"], "acct-test-0001")
+            self.assertNotIn("x-api-key", headers)
+            self.assertFalse(any(name.startswith("anthropic-") for name in headers))
+            self.assertNotIn("claude-secret", str(headers))
+        self.assertFalse(os.path.exists(self.auth_path))
+        from model_gateway.chatgpt.auth import LoginRequired
+        with patch.object(rt.chatgpt.store, "credentials", side_effect=LoginRequired(
+                "Codex login expired; run `codex login`")):
+            response, data = self.send(port)
+        self.assertEqual(response.status, 403)
+        self.assertEqual(json.loads(data)["error"]["message"],
+                         "chatgpt upstream: Codex login expired; run `codex login`")
+        os.unlink(path)
+        response, data = self.send(port)
+        self.assertEqual(response.status, 403)
+        self.assertEqual(json.loads(data)["error"]["message"],
+                         "chatgpt upstream: ChatGPT login required: run codex login, or gateway.py chatgpt-login")
+
+    def test_k17_reuses_clean_connection_drops_errors_and_recovers_stale(self):
+        import http.client
+        import threading
+        from model_gateway.chatgpt.response import Reader
+        release = threading.Event()
+        self.addCleanup(release.set)
+        # held: response.completed arrives but the stream's last chunk does not; never reuse that connection.
+        for mode, expected in (("clean", 1), ("error", 2), ("stale", 2), ("will_close", 2), ("held", 2)):
+            with self.subTest(mode=mode):
+                accepted, held = [], []
+                original_setup = fakes.ChatGPTUpstream.setup
+                original_post = fakes.ChatGPTUpstream.do_POST
+                original_header = fakes.ChatGPTUpstream.send_header
+                def setup(handler):
+                    accepted.append(handler.client_address)
+                    original_setup(handler)
+                def post(handler):
+                    if mode == "held" and handler.path == "/backend-api/codex/responses" and not held:
+                        held.append(handler.rfile.read(int(handler.headers["content-length"])))
+                        data = fakes.responses_turn()
+                        handler.send_response(200)
+                        original_header(handler, "content-type", "text/event-stream")
+                        original_header(handler, "transfer-encoding", "chunked")
+                        handler.end_headers()
+                        handler.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+                        handler.wfile.flush()
+                        release.wait(10)
+                        return
+                    original_post(handler)
+                    if mode in ("stale", "will_close"):
+                        handler.close_connection = True
+                def header(handler, name, value):
+                    original_header(handler, name, value)
+                    if name == "content-length" and mode == "will_close":
+                        original_header(handler, "Connection", "close")
+                self.fake.setup, self.fake.do_POST, self.fake.send_header = setup, post, header
+                error = (fakes.responses_event("response.output_text.delta", delta="partial") +
+                         fakes.responses_event("response.failed", response={"error": {
+                             "code": "invalid_prompt", "message": "invented failure"}}))
+                self.fake.script = [(200, error if mode == "error" else fakes.responses_turn()),
+                                    (200, fakes.responses_turn())]
+                jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
+                rt, port = self.gateway()
+                client = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                self.addCleanup(client.close)
+                readers = []
+                watch = rt.chatgpt.client.watch
+                def watched(reader):
+                    readers.append(reader.thread)
+                    watch(reader)
+                before = set(threading.enumerate())
+                connections = []
+                connection = rt.chatgpt.client.upstream.connection
+                def connected():
+                    conn = connection()
+                    connections.append(conn)
+                    return conn
+                with patch.object(rt.chatgpt.client, "watch", side_effect=watched), \
+                        patch.object(rt.chatgpt.client.upstream, "connection", side_effect=connected):
+                    for index in range(2):
+                        client.request("POST", "/v1/messages", json.dumps(self.body), self.headers)
+                        response = client.getresponse()
+                        self.assertEqual(response.status, 200)
+                        data = response.read()
+                        self.assertIn(b"event: error" if mode == "error" and index == 0 else b"message_stop", data)
+                        self.assertTrue(jail.wait_for(lambda: all(not t.is_alive() for t in readers), timeout=3))
+                self.assertEqual(len(accepted), expected)
+                if mode in ("clean", "stale"):
+                    self.assertIs(connections[0], connections[1])
+                    self.assertEqual(len(connections), 3 if mode == "stale" else 2)
+                    if mode == "stale":
+                        self.assertIsNot(connections[1], connections[2])
+                else:
+                    self.assertIsNot(connections[0], connections[1])
+                self.assertTrue(all(t not in threading.enumerate() for t in readers))
+                self.assertFalse(any(isinstance(getattr(getattr(t, "_target", None), "__self__", None), Reader)
+                                     for t in set(threading.enumerate()) - before))
+                client.close()

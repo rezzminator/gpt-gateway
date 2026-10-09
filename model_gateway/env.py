@@ -86,6 +86,8 @@ CHATGPT_MODELS_PATH = "MODEL_GATEWAY_CHATGPT_MODELS_PATH"
 CHATGPT_AUTH_ORIGIN = "MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN"
 CHATGPT_AUTH_STORE = "MODEL_GATEWAY_CHATGPT_AUTH_STORE"
 CHATGPT_AUTH_PATH = "MODEL_GATEWAY_CHATGPT_AUTH_PATH"
+CHATGPT_CODEX_AUTH = "MODEL_GATEWAY_CHATGPT_CODEX_AUTH"
+CODEX_HOME = "CODEX_HOME"
 
 
 def chatgpt_origin(environ, name, default):
@@ -102,7 +104,7 @@ def chatgpt_origin(environ, name, default):
     return origin.rstrip("/")
 
 
-def chatgpt_path(environ, name, default):
+def chatgpt_path(environ, name, default, resolve=True):
     path = value(environ, name) or default
     if path.startswith("~/"):
         home = value(environ, "HOME")
@@ -111,15 +113,17 @@ def chatgpt_path(environ, name, default):
         path = os.path.join(home, path[2:])
     if not os.path.isabs(path):
         raise EnvError("env %s: must be an absolute path" % name)
-    return os.path.realpath(path)
+    return os.path.realpath(path) if resolve else os.path.abspath(path)
 
 
 class ChatGPTEnv:
     """ChatGPT knobs; paths resolve against the supplied HOME mapping."""
 
-    def __init__(self, auth_origin, auth_path, auth_store, origin="https://chatgpt.com", models_path=None):
+    def __init__(self, auth_origin, auth_path, auth_store, origin="https://chatgpt.com", models_path=None,
+                 codex_auth=None, home=None):
         self.auth_origin, self.auth_path, self.auth_store = auth_origin, auth_path, auth_store
         self.origin, self.models_path = origin, models_path
+        self.codex_auth, self.home = codex_auth, home
 
     @classmethod
     def parse(cls, environ):
@@ -130,4 +134,12 @@ class ChatGPTEnv:
             raise EnvError("env %s: must be auto, file or keychain" % CHATGPT_AUTH_STORE)
         path = chatgpt_path(environ, CHATGPT_AUTH_PATH, "~/.local/state/model-gateway/chatgpt-auth.json")
         models = chatgpt_path(environ, CHATGPT_MODELS_PATH, "~/.local/state/model-gateway/chatgpt-models.json")
-        return cls(auth_origin, path, kind, origin, models)
+        codex = value(environ, CHATGPT_CODEX_AUTH)
+        if codex != "off":
+            default = "~/.codex/auth.json"
+            if codex is None and value(environ, CODEX_HOME):  # a bad CODEX_HOME is named as itself
+                default = os.path.join(chatgpt_path(environ, CODEX_HOME, None, resolve=False), "auth.json")
+            codex = chatgpt_path(environ, CHATGPT_CODEX_AUTH, default, resolve=False)
+        else:
+            codex = None
+        return cls(auth_origin, path, kind, origin, models, codex, value(environ, "HOME"))

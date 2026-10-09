@@ -85,7 +85,8 @@ else say spelling-product ERROR "grep could not read files"; fi
 { shs | while read -r f; do grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' "$f" | sed -E 's/^\$\{//; s/:-$//'; done
   grep -E '^[A-Z_][A-Z0-9_]* = "[A-Z_][A-Z0-9_]*"$' model_gateway/env.py | sed -E 's/.*= "//; s/"$//'; } | sort -u > "$T/knobs"
 if [ ! -s "$T/knobs" ]; then say spelling-env-prefix ERROR "no knob names parsed from launchd/*.sh or model_gateway/env.py"
-else grep -vE '^(MODEL_GATEWAY_[A-Z0-9_]+|HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
+# HOME and CODEX_HOME: read, never defined.
+else grep -vE '^(MODEL_GATEWAY_[A-Z0-9_]+|HOME|CODEX_HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
 census spelling-kind src -nE 'conv[=]'
 
 if gin "$T/raw" src -nE '^def [A-Za-z_][A-Za-z0-9_]*|^[a-z_][a-z0-9_]*\(\) *\{'; then

@@ -26,10 +26,7 @@ class Runtime:
         self.settings.load()
         self.chain = Chain(self.settings.modules, self.log.write)
         if self.settings.snapshot.chatgpt:
-            from .env import CHATGPT_AUTH_STORE, ChatGPTEnv, EnvError
-            from .chatgpt.auth import AuthError
+            from .env import ChatGPTEnv
             from .chatgpt.route import Route
-            try:
-                self.chatgpt = Route(ChatGPTEnv.parse(self.settings.env), self.log.write)
-            except AuthError as e:  # the chosen token store cannot open: a start error like a bad knob
-                raise EnvError("env %s: %s" % (CHATGPT_AUTH_STORE, e)) from None
+            # The token store opens on first use, so a Codex login never waits on a Keychain probe (K11).
+            self.chatgpt = Route(ChatGPTEnv.parse(self.settings.env), self.log.write)

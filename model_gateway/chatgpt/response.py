@@ -52,6 +52,7 @@ class Reader:
         self.queue = queue.Queue(8)
         self.stop = threading.Event()
         self.finished = False
+        self.drained = False
         self.error_head = b""
         self.transport_error = None
         self.on_end = None
@@ -72,9 +73,11 @@ class Reader:
         try:
             while not self.stop.is_set():
                 chunk = self.upstream.read1(65536)
-                self._put(chunk if chunk else EOF)
                 if not chunk:
+                    self.drained = True
+                    self._put(EOF)
                     break
+                self._put(chunk)
         except Exception as error:
             self._put(error)
         finally:
@@ -83,13 +86,20 @@ class Reader:
     def close(self):
         self.stop.set()
         self.client.drop()
+        self.thread.join(2.0)
 
     def next(self):
         """Empty means the true terminal; empty translation chunks stay inside this loop."""
         while not self.finished:
             if self.translator.terminal:
                 self.finished = True
-                self.close()
+                if self.translator.error is None:
+                    self.thread.join(2.0)
+                if (self.translator.error is None and self.drained and not self.thread.is_alive()
+                        and not self.upstream.will_close):
+                    self.stop.set()
+                else:
+                    self.close()
                 if self.on_end:
                     self.on_end()
                 return b""

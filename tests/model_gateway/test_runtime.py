@@ -45,12 +45,17 @@ class RuntimeTest(unittest.TestCase):
         rt.load()
         self.assertIsNotNone(rt.chatgpt)
         self.assertIsNone(rt.chatgpt.catalog.count())
-        env["MODEL_GATEWAY_CHATGPT_AUTH_STORE"] = "keychain"  # a start error, never a traceback out of serve
-        with patch("model_gateway.chatgpt.keychain.Keychain.available", return_value=False), \
-                self.assertRaises(Exception) as caught:
-            Runtime(env, os.path.join(d, "settings.json")).load()
-        self.assertIsInstance(caught.exception, EnvError)
-        self.assertIn("MODEL_GATEWAY_CHATGPT_AUTH_STORE: ChatGPT Keychain unavailable", str(caught.exception))
+        from model_gateway.chatgpt.auth import AuthError
+        env["MODEL_GATEWAY_CHATGPT_AUTH_STORE"] = "keychain"
+        with patch("model_gateway.chatgpt.keychain.Keychain.available", return_value=False) as probe:
+            rt = Runtime(env, os.path.join(d, "settings.json"))
+            rt.load()
+            probe.assert_not_called()
+            self.assertIsNotNone(rt.chatgpt)
+            with self.assertRaises(AuthError) as caught:
+                rt.chatgpt.store.credentials()
+            probe.assert_called_once_with()
+        self.assertEqual(str(caught.exception), "ChatGPT Keychain unavailable")
 
     def test_a_bad_env_stops_it(self):
         with self.assertRaises(EnvError):

@@ -68,6 +68,55 @@ def account_id(tokens):
     return None
 
 
+# Codex codex-rs/login/src/auth/manager.rs:1659-1667,1680-1691.
+def refresh_refused(status, reply):
+    """True when the token endpoint refused the refresh token for good; a new login is needed."""
+    error = reply.get("error")
+    code = error.get("code", error.get("type")) if isinstance(error, dict) else error
+    code = code.lower() if isinstance(code, str) else None
+    return (status == 401 or (status == 400 and code == "invalid_grant")
+            or code in ("refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"))
+
+
+def expiry_text(token):
+    """The access token's expiry as local time, or "unknown"."""
+    expiry = token_expiry(token)
+    try:
+        return clock.stamp("%Y-%m-%d %H:%M:%S %z", expiry) if expiry is not None else "unknown"
+    except (OverflowError, ValueError, OSError):
+        return "unknown"
+
+
+# Codex login/src/oauth/client.rs:76-126, rewritten atop the core's connection façade.
+def post_token(origin, path, body, form=False, timeout=30):
+    """One token request. Never replay a rotating refresh token after a transport failure."""
+    encoded = (urlencode(body) if form else json.dumps(body, separators=(",", ":"))).encode()
+    kind = "application/x-www-form-urlencoded" if form else "application/json"
+    upstream = Upstream(origin)
+    try:
+        conn = upstream.connection()
+        conn.timeout = timeout
+        conn.request("POST", path, encoded, dict(identity.headers(), **{"Content-Type": kind}))
+        response = conn.getresponse()
+        raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise AuthError("ChatGPT auth response too large")
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeError):
+            if response.status >= 400:
+                data = {}
+            else:
+                raise AuthError("Invalid ChatGPT auth response") from None
+        if not isinstance(data, dict):
+            raise AuthError("Invalid ChatGPT auth response")
+        return response.status, data
+    except (OSError, http.client.HTTPException):
+        raise AuthError("ChatGPT auth connection failed") from None
+    finally:
+        upstream.drop()
+
+
 class Store:
     """Construct with env.ChatGPTEnv.parse(mapping); all network calls use its auth_origin.
 
@@ -80,11 +129,10 @@ class Store:
         self.origin = knobs.auth_origin
         self.local = threading.local()
         self.backend = None
-        if knobs.auth_store != "file":
-            if Keychain.available():
-                self.backend = Keychain()
-            elif knobs.auth_store == "keychain":
+        if knobs.auth_store == "keychain":
+            if not Keychain.available():
                 raise AuthError("ChatGPT Keychain unavailable")
+            self.backend = Keychain()
 
     @contextmanager
     def locked(self):
@@ -155,34 +203,8 @@ class Store:
         with self.locked():
             self._write(data)
 
-    # Codex login/src/oauth/client.rs:76-126, rewritten atop the core's connection façade.
     def post(self, path, body, form=False, timeout=30):
-        """One token request. Never replay a rotating refresh token after a transport failure."""
-        encoded = (urlencode(body) if form else json.dumps(body, separators=(",", ":"))).encode()
-        kind = "application/x-www-form-urlencoded" if form else "application/json"
-        upstream = Upstream(self.origin)
-        try:
-            conn = upstream.connection()
-            conn.timeout = timeout
-            conn.request("POST", path, encoded, dict(identity.headers(), **{"Content-Type": kind}))
-            response = conn.getresponse()
-            raw = response.read(1024 * 1024 + 1)
-            if len(raw) > 1024 * 1024:
-                raise AuthError("ChatGPT auth response too large")
-            try:
-                data = json.loads(raw)
-            except (ValueError, UnicodeError):
-                if response.status >= 400:
-                    data = {}
-                else:
-                    raise AuthError("Invalid ChatGPT auth response") from None
-            if not isinstance(data, dict):
-                raise AuthError("Invalid ChatGPT auth response")
-            return response.status, data
-        except (OSError, http.client.HTTPException):
-            raise AuthError("ChatGPT auth connection failed") from None
-        finally:
-            upstream.drop()
+        return post_token(self.origin, path, body, form, timeout)
 
     @staticmethod
     def _revision(data):
@@ -209,13 +231,7 @@ class Store:
                     raise LoginRequired("ChatGPT refresh token missing; log in again with chatgpt-login")
                 status, reply = self.post("/oauth/token", {"client_id": CLIENT_ID, "grant_type": "refresh_token",
                                                           "refresh_token": data["refresh_token"]})
-                error = reply.get("error")
-                code = error.get("code", error.get("type")) if isinstance(error, dict) else error
-                # Codex codex-rs/login/src/auth/manager.rs:1659-1667,1680-1691.
-                code = code.lower() if isinstance(code, str) else None
-                permanent = (status == 401 or (status == 400 and code == "invalid_grant")
-                             or code in ("refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated"))
-                if permanent:
+                if refresh_refused(status, reply):
                     self._write({"login_required": True})
                     raise LoginRequired("ChatGPT refresh refused; log in again with chatgpt-login")
                 if status != 200:
@@ -235,9 +251,44 @@ class Store:
         if not data or data.get("login_required"):
             return "ChatGPT: not logged in"
         account = account_id(data)
-        expiry = token_expiry(data.get("access_token"))
+        return "ChatGPT: logged in; account ...%s; access expires %s" % (
+            (account or "unknown")[-4:], expiry_text(data.get("access_token")))
+
+
+class Source:
+    """Choose Codex on every call; construct the gateway's own store only when needed."""
+
+    def __init__(self, knobs):
+        from .codex_login import CodexLogin
+        self.knobs = knobs
+        self.codex = CodexLogin(knobs)
+        self.own = None
+        self.lock = threading.Lock()
+
+    def _store(self):
+        with self.lock:
+            if self.own is None:
+                self.own = Store(self.knobs)
+            return self.own
+
+    def credentials(self, force_refresh=False):
+        credentials = self.codex.credentials(force_refresh)
+        if credentials is not None:
+            return credentials
         try:
-            when = clock.stamp("%Y-%m-%d %H:%M:%S %z", expiry) if expiry is not None else "unknown"
-        except (OverflowError, ValueError, OSError):
-            when = "unknown"
-        return "ChatGPT: logged in; account ...%s; access expires %s" % ((account or "unknown")[-4:], when)
+            return self._store().credentials(force_refresh)
+        except LoginRequired:
+            raise LoginRequired("ChatGPT login required: run codex login, or gateway.py chatgpt-login") from None
+
+    def status(self):
+        status = self.codex.status()
+        if status is not None:
+            return status
+        status = self._store().status()
+        if status == "ChatGPT: not logged in":
+            status += "; run codex login, or gateway.py chatgpt-login"
+        return status
+
+
+def source(knobs):
+    return Source(knobs)

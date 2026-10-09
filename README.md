@@ -150,7 +150,7 @@ The optional ChatGPT route runs GPT models as Claude Code sub-agents over your C
 
 Enable it with `"chatgpt": true` in `settings.json`, or `MODEL_GATEWAY_CHATGPT=true` in the gateway's environment, then restart. The setting defaults to false; env overrides file, then default. Invalid env values are rejected with the variable's name. With the setting false, every model follows the existing Anthropic path and the ChatGPT modules are not loaded; ChatGPT-specific knobs are validated at gateway start only when it is enabled.
 
-Log in separately from Codex, using the installed entry point:
+Codex's login is used in place first, from `$CODEX_HOME/auth.json` when set, otherwise `~/.codex/auth.json`. Use `gateway.py chatgpt-login` only without a Codex ChatGPT login, through the installed entry point:
 
 ```sh
 /usr/bin/python3 -I ~/.local/share/model-gateway/gateway.py chatgpt-login
@@ -158,7 +158,9 @@ Log in separately from Codex, using the installed entry point:
 /usr/bin/python3 -I ~/.local/share/model-gateway/gateway.py chatgpt-status
 ```
 
-`gateway.py chatgpt-login` uses browser login; `--device` uses device-code login. Tokens live in the macOS Keychain under service `model-gateway.chatgpt` when available, otherwise in `~/.local/state/model-gateway/chatgpt-auth.json`, mode 0600. The gateway never reads `~/.codex/auth.json`: it owns its rotating refresh tokens. `gateway.py chatgpt-status` reports its login state.
+The gateway re-reads Codex's login before every refresh, refreshes on Codex's schedule (within five minutes of access expiry, or after eight days when only `last_refresh` is available), and reuses tokens that Codex has already rotated. It writes rotated tokens back in Codex's format, preserves other fields and symlinks, and never marks, blanks or deletes Codex's login on failure.
+
+`gateway.py chatgpt-login` uses browser login; `--device` uses device-code login. The gateway's own tokens live in `~/.local/state/model-gateway/chatgpt-auth.json`, mode 0600; the macOS Keychain service `model-gateway.chatgpt` is used only when explicitly selected. `gateway.py chatgpt-status` reports the active login source. A later `codex login` or `codex logout` takes effect without restarting the gateway.
 
 For a Claude Code session connected to the enabled gateway, an agent definition at `.claude/agents/gpt-worker.md` can contain:
 
@@ -186,7 +188,7 @@ Only POST requests to `/v1/messages` or `/v1/messages/count_tokens` (ignoring th
 
 The catalog loads from disk at start, without network access. A candidate request refreshes a copy older than 300 seconds; refreshes share a lock and have a 10-second timeout. A failed refresh keeps the last good copy and waits 60 seconds before another attempt. Claude requests never wait on the catalog. Each session/sub-agent pair has its own lane key for cache affinity and token estimates. The count-tokens endpoint estimates locally after translation, without a Responses call or credentials for that estimate; routing still needs a catalog copy.
 
-Before output begins, retryable failures get at most four retries after the initial attempt, with exponential backoff. A 401 triggers one token refresh per request. Rejected encrypted reasoning triggers one replay without the route's signed thinking blocks, logged as `gpt drop-reasoning`. After output begins, failures are translated into stream errors. A missing login or final 401 becomes 403 `permission_error`: `chatgpt upstream: ChatGPT login required; run gateway.py chatgpt-login`, with `x-should-retry: false`; it never becomes a client-facing 401. A transient auth failure becomes 503 `api_error` with `chatgpt upstream: {message}`. Final upstream decisions retain their mapped status, JSON error and retry headers: quota exhaustion is 429, a rejected prompt or policy refusal 400 (never retried, as in Codex), context overflow 413, overload 529, and unavailable subscription usage 403.
+Before output begins, retryable failures get at most four retries after the initial attempt, with exponential backoff. A 401 triggers one token refresh per request. Rejected encrypted reasoning triggers one replay without the route's signed thinking blocks, logged as `gpt drop-reasoning`. After output begins, failures are translated into stream errors. A missing login or final 401 becomes 403 `permission_error`: `chatgpt upstream: ChatGPT login required: run codex login, or gateway.py chatgpt-login`, with `x-should-retry: false`; it never becomes a client-facing 401. A transient auth failure becomes 503 `api_error` with `chatgpt upstream: {message}`. Final upstream decisions retain their mapped status, JSON error and retry headers: quota exhaustion is 429, a rejected prompt or policy refusal 400 (never retried, as in Codex), context overflow 413, overload 529, and unavailable subscription usage 403.
 
 Non-streaming requests drain the translated stream and return one Anthropic JSON response; an accumulated stream error returns 502. Middleware sees the Anthropic body in `on_request`, translated Anthropic events in `on_event`, and the client-facing result in `on_response_end`; `ctx.route` identifies the route and hooks cannot change the model. The middleware harness accepts `run(..., route="chatgpt")` to test this context.
 
@@ -198,7 +200,8 @@ The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator
 | --- | --- | --- |
 | `MODEL_GATEWAY_CHATGPT_ORIGIN` | ChatGPT backend origin | `https://chatgpt.com` |
 | `MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN` | OAuth origin | `https://auth.openai.com` |
-| `MODEL_GATEWAY_CHATGPT_AUTH_STORE` | `auto`, `keychain` or `file`; forced Keychain fails if unavailable | `auto` |
+| `MODEL_GATEWAY_CHATGPT_AUTH_STORE` | `auto` uses the 0600 file store on every platform; `file` selects it explicitly; `keychain` fails if unavailable | `auto` |
+| `MODEL_GATEWAY_CHATGPT_CODEX_AUTH` | Codex login file, absolute with `~` allowed, or `off` | `$CODEX_HOME/auth.json`, else `~/.codex/auth.json` |
 | `MODEL_GATEWAY_CHATGPT_AUTH_PATH` | token file path, absolute with `~` allowed | `~/.local/state/model-gateway/chatgpt-auth.json` |
 | `MODEL_GATEWAY_CHATGPT_MODELS_PATH` | catalog cache path, absolute with `~` allowed; mode 0600 | `~/.local/state/model-gateway/chatgpt-models.json` |
 

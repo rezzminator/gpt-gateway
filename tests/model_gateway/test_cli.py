@@ -3,6 +3,9 @@
 Each runs gateway.py as a process from a staged install, as run.sh does.
 """
 import os
+import io
+from contextlib import redirect_stdout
+from unittest.mock import patch
 import subprocess
 import unittest
 
@@ -166,6 +169,44 @@ class UsageTest(CliCase):
             self.assertIn("gateway.py " + name, err)
         self.assertEqual(self.run_gateway("check", "a", "b")[0], 2)
         self.assertEqual(self.run_gateway("mw")[0], 2)
+
+
+class CodexCliTest(unittest.TestCase):
+    def test_k10_status_and_login_explain_codex_precedence(self):
+        from model_gateway import clock, env
+        from model_gateway.chatgpt import auth
+        from tests.model_gateway.chatgpt.test_auth import tokens
+        home = jail.scratch(self)
+        mapping = jail.clean_env(home, MODEL_GATEWAY_CHATGPT_AUTH_STORE="file")
+        path = os.path.join(home, ".codex", "auth.json")
+        os.makedirs(os.path.dirname(path))
+        expiry = 1800000000
+        jail.write_json(path, {"tokens": dict(tokens(expiry), account_id="acct-test-0001")})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(),
+            "ChatGPT: Codex login (~/.codex/auth.json); account ...0001; access expires " +
+            clock.stamp("%Y-%m-%d %H:%M:%S %z", expiry))
+        for args, name in (([], "browser_login"), (["--device"], "device_login")):
+            out = io.StringIO()
+            with patch("model_gateway.chatgpt.login." + name) as login, redirect_stdout(out):
+                self.assertEqual(cli.main(["chatgpt-login"] + args, home, mapping), 0)
+            self.assertIsInstance(login.call_args.args[0], auth.Store)
+            self.assertEqual(out.getvalue().splitlines()[0],
+                "ChatGPT: a Codex login at ~/.codex/auth.json is used first; this login serves only without it")
+        os.unlink(path)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(),
+                        "ChatGPT: not logged in; run codex login, or gateway.py chatgpt-login")
+        store = auth.Store(env.ChatGPTEnv.parse(mapping))
+        store.save(tokens(expiry))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["chatgpt-status"], home, mapping), 0)
+        self.assertEqual(out.getvalue().strip(), store.status())
 
 
 if __name__ == "__main__":

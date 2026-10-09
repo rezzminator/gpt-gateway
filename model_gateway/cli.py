@@ -112,7 +112,12 @@ def cmd_chatgpt_login(args, install_dir, environ):
         return usage_error()
     from .chatgpt import auth, login
     try:
-        store = auth.Store(envmod.ChatGPTEnv.parse(environ))
+        knobs = envmod.ChatGPTEnv.parse(environ)
+        selected = auth.source(knobs)
+        if selected.codex.status() is not None:
+            print("ChatGPT: a Codex login at %s is used first; this login serves only without it" %
+                  selected.codex.display_path)
+        store = auth.Store(knobs)
         (login.device_login if args else login.browser_login)(store)
     except (envmod.EnvError, auth.AuthError, OSError) as error:
         return start_error(None, "ChatGPT login failed", error)
@@ -125,7 +130,7 @@ def cmd_chatgpt_status(args, install_dir, environ):
         return usage_error()
     from .chatgpt import auth
     try:
-        print(auth.Store(envmod.ChatGPTEnv.parse(environ)).status())
+        print(auth.source(envmod.ChatGPTEnv.parse(environ)).status())
     except (envmod.EnvError, auth.AuthError, OSError) as error:
         return start_error(None, "ChatGPT status failed", error)
     return 0

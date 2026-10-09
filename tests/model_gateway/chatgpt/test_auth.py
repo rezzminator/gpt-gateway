@@ -260,7 +260,7 @@ class AuthTest(unittest.TestCase):
         with patch.object(self.auth.Keychain, "available", return_value=True), \
                 patch.object(self.auth.Keychain, "read", side_effect=lambda: data.get("tokens")), \
                 patch.object(self.auth.Keychain, "write", side_effect=lambda value: data.update(tokens=value)):
-            self.knobs.auth_store = "auto"
+            self.knobs.auth_store = "keychain"
             store = self.auth.Store(self.knobs)
             store.save(tokens())
             self.assertEqual(store.credentials().account_id, "invented-1234")
@@ -278,3 +278,24 @@ class AuthTest(unittest.TestCase):
         self.store.credentials(force_refresh=True)
         self.assertEqual(other.credentials(force_refresh=True), first)
         self.assertEqual(len(self.fake.calls), 1)
+
+
+class AuthStoragePolicyTest(unittest.TestCase):
+    def test_k16_auto_and_file_are_private_file_without_keychain_probe(self):
+        from model_gateway.chatgpt import auth
+        home = jail.scratch(self)
+        knobs = env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_AUTH_STORE="auto"))
+        with patch.object(auth.Keychain, "available", return_value=True) as probe, \
+                patch.object(auth.Keychain, "write") as key_write:
+            store = auth.Store(knobs)
+            store.save(tokens(clock.now() + 3600))
+            knobs.auth_store = "file"
+            auth.Store(knobs)
+            probe.assert_not_called()
+            key_write.assert_not_called()
+        self.assertEqual(os.stat(knobs.auth_path).st_mode & 0o777, 0o600)
+        knobs.auth_store = "keychain"
+        with patch.object(auth.Keychain, "available", return_value=False) as probe:
+            with self.assertRaisesRegex(auth.AuthError, "^ChatGPT Keychain unavailable$"):
+                auth.Store(knobs)
+        probe.assert_called_once_with()

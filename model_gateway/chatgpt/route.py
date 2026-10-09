@@ -21,8 +21,8 @@ def route_error(status, kind, message, headers=None):
         "type": kind, "message": "chatgpt upstream: " + message}}, headers)
 
 
-def login_required():
-    return route_error(403, "permission_error", "ChatGPT login required; run gateway.py chatgpt-login",
+def login_required(message="ChatGPT login required: run codex login, or gateway.py chatgpt-login"):
+    return route_error(403, "permission_error", message,
                        {"x-should-retry": "false"})
 
 
@@ -41,7 +41,7 @@ def decide(catalog, method, path, body, headers):
         models = catalog.models()
     except CatalogUnavailable as error:
         if isinstance(error.__cause__, auth.LoginRequired):  # H5: a missing login is never a retryable 503
-            return "chatgpt", None, login_required()
+            return "chatgpt", None, login_required(str(error.__cause__))
         return "chatgpt", None, route_error(503, "api_error", "no model catalog (%s)" % error)
     if slug not in models:
         return "chatgpt", None, route_error(400, "invalid_request_error",
@@ -78,7 +78,7 @@ def without_reasoning(body):
 class Route:
     def __init__(self, knobs, log):
         self.log = log
-        self.store = auth.Store(knobs)
+        self.store = auth.source(knobs)
         self.client = Client(knobs, log)
         self.catalog = Catalog(knobs, self.client, self.store, log)
         self.lanes = {}
@@ -161,8 +161,8 @@ class Route:
                 self.client.drop()
                 status, head = "transport", {"message": error.message if isinstance(error, UpstreamError) else str(error)}
                 decision = errors.classify(None, head, "before-output")
-            except auth.LoginRequired:
-                return login_required()
+            except auth.LoginRequired as error:
+                return login_required(str(error))
             except auth.AuthError as error:
                 return route_error(503, "api_error", str(error))
             finally:
@@ -189,8 +189,8 @@ class Route:
                     with self.lock:
                         estimated = estimator.estimate(translation.estimate_chars, image_count(body))
                     self.log("    gpt drop-reasoning lane=%s slug=%s" % (key, model.slug))
-            except auth.LoginRequired:
-                return login_required()
+            except auth.LoginRequired as error:
+                return login_required(str(error))
             except auth.AuthError as error:
                 return route_error(503, "api_error", str(error))
             clock.sleep(errors.backoff(attempt))

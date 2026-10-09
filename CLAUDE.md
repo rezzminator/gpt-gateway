@@ -10,7 +10,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 - harness: the public middleware test harness, `run`, `run_cli`, `load` · `model_gateway/harness.py`
 - example: the smallest middleware, the contract's executable documentation · `examples/middleware/model_note.py`
 - kind: `main` or `sub` (a request carrying `x-claude-code-agent-id`); the log key is `kind=`; a ChatGPT-route capture folder carries `gpt` in its place
-- ChatGPT route: GPT models as Claude Code sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, the `gpt` log lines and `gateway.py chatgpt-stats` · `model_gateway/chatgpt/`, `README.md` § ChatGPT route; third-party licences · `THIRD_PARTY_NOTICES.md`
+- ChatGPT route: GPT models as Claude Code sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, the `gpt` log lines and `gateway.py chatgpt-stats` · `model_gateway/chatgpt/`, `README.md` § ChatGPT route; its login, Codex's `auth.json` first and the gateway's own store second · `model_gateway/chatgpt/codex_login.py`, `model_gateway/chatgpt/auth.py`; third-party licences · `THIRD_PARTY_NOTICES.md`
 - capture: one folder per exchange, off by default · `model_gateway/capture.py`
 - launchd: the supervisor, `ctl.sh`, `install.sh`, `uninstall.sh`; the installed copy is flat under `~/.local/share/model-gateway/`, a shipped package keeping its subdirectories, label `local.model-gateway` · `launchd/`
 - gates: `scripts/checks.sh` (every countable law, one `CHECK` line each), `scripts/gate.sh` (the only definition of ready), committed baselines · `scripts/baselines/`
@@ -33,7 +33,8 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 ## Live systems
 
 - No test, script or session runs `launchd/*.sh` against the real `HOME` or reaches the real launchd, the real Claude Code settings or a running gateway: tests take a scratch `HOME` from `tests/jail.py`, free ports, fake upstreams and the stub launchctl.
-- No test, script or session touches `~/.codex/auth.json`, the real Keychain entry `model-gateway.chatgpt`, the real ChatGPT token or catalog file, or OpenAI: ChatGPT-route tests take a jailed file store (`MODEL_GATEWAY_CHATGPT_AUTH_STORE=file`) and the fake ChatGPT upstream in `tests/fakes.py`.
+- No test reads or writes the real `~/.codex/auth.json`, the real Keychain entry `model-gateway.chatgpt`, the real ChatGPT token or catalog file, or reaches OpenAI: ChatGPT-route tests take a jailed `HOME` without `CODEX_HOME`, a jailed Codex login file or `MODEL_GATEWAY_CHATGPT_CODEX_AUTH=off`, a jailed file store (`MODEL_GATEWAY_CHATGPT_AUTH_STORE=file`) and the fake ChatGPT upstream in `tests/fakes.py`.
+- The gateway shares Codex's ChatGPT login in place, the way Codex shares it between its own processes: it re-reads `auth.json` before every refresh, refreshes only on Codex's schedule, writes rotated tokens back in Codex's format and never marks or blanks that file; its own store and `chatgpt-login` serve only when no Codex login exists.
 
 ## Code
 

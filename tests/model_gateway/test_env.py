@@ -3,6 +3,7 @@ import os
 import unittest
 
 from model_gateway import env
+from tests import jail
 
 
 class CoreEnvTest(unittest.TestCase):
@@ -22,6 +23,25 @@ class CoreEnvTest(unittest.TestCase):
                          ("https://chatgpt.com", "https://auth.openai.com", "auto"))
         self.assertEqual(knobs.models_path, "/invented/.local/state/model-gateway/chatgpt-models.json")
         self.assertEqual(knobs.auth_path, "/invented/.local/state/model-gateway/chatgpt-auth.json")
+
+    def test_k1_codex_path_precedence_and_symlink(self):
+        home = jail.scratch(self)
+        cases = (({}, os.path.join(home, ".codex", "auth.json")),
+                 ({"CODEX_HOME": os.path.join(home, "custom")}, os.path.join(home, "custom", "auth.json")),
+                 ({"CODEX_HOME": ""}, os.path.join(home, ".codex", "auth.json")),
+                 ({"CODEX_HOME": os.path.join(home, "custom"), "MODEL_GATEWAY_CHATGPT_CODEX_AUTH": "~/chosen"},
+                  os.path.join(home, "chosen")),
+                 ({"MODEL_GATEWAY_CHATGPT_CODEX_AUTH": "off"}, None))
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides):
+                knobs = env.ChatGPTEnv.parse(jail.clean_env(home, **overrides))
+                self.assertEqual(knobs.codex_auth, expected)
+        for name in ("MODEL_GATEWAY_CHATGPT_CODEX_AUTH", "CODEX_HOME"):  # the error names the variable set
+            with self.assertRaisesRegex(env.EnvError, "^env %s: must be an absolute path$" % name):
+                env.ChatGPTEnv.parse(jail.clean_env(home, **{name: "relative"}))
+        os.symlink(os.path.join(home, "target"), os.path.join(home, "chosen"))
+        knobs = env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_CODEX_AUTH="~/chosen"))
+        self.assertEqual(knobs.codex_auth, os.path.join(home, "chosen"))
 
     def test_defaults(self):
         core = env.CoreEnv.parse({})
