@@ -1,0 +1,89 @@
+"""Tests for model_gateway.harness: a middleware file run in process against a request and a recorded response."""
+import json
+import os
+import unittest
+
+from model_gateway.harness import load, run, run_cli
+from model_gateway.middleware import MiddlewareError
+from model_gateway.settings import SettingsError
+from tests import jail
+from tests.fakes import JSON_BODY, SSE_BODY
+
+WIDE = '''
+NAME = "wide"
+SETTINGS = {"tag": ("t", str, "MODEL_GATEWAY_WIDE_TAG")}
+
+def on_request(ctx, req):
+    if req.body is not None:
+        req.body["tag"] = ctx.settings["tag"]
+        req.mark_changed()
+    ctx.state["kind"] = ctx.kind
+    return " wide=%s" % ctx.settings["tag"]
+
+def on_event(ctx, event):
+    if event["event"] == "content_block_delta":
+        raise RuntimeError("delta")
+
+def on_response_end(ctx, result):
+    ctx.log("wide end %s %s %s" % (result.status, ctx.state["kind"], result.note.strip()))
+
+def health(ctx):
+    return "tag=" + ctx.settings["tag"]
+
+def cli(argv, ctx):
+    print("tag", ctx.settings["tag"], argv)
+    ctx.log("cli " + ",".join(argv))
+    return 4
+'''
+
+
+class HarnessTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = jail.scratch(self)
+        self.path = jail.write_middleware(self.dir, "wide", WIDE)
+
+    def test_run_returns_forwarded_bytes_log_errors_events_and_result(self):
+        out = run(self.path, body={"model": "m", "messages": []}, headers={"x-claude-code-agent-id": "a"},
+                  response=SSE_BODY, chunk_size=5, settings={"tag": "x"})
+        self.assertEqual(out.forwarded, b'{"model":"m","messages":[],"tag":"x"}')
+        self.assertTrue(out.changed)
+        self.assertEqual(out.note, " kind=sub wide=x")
+        self.assertEqual([e["event"] for e in out.events], ["message_start", "content_block_delta", "message_stop"])
+        self.assertEqual(len(out.errors), 1)
+        self.assertIn("middleware wide on_event failed: RuntimeError('delta')", out.errors[0])
+        self.assertEqual(out.log[-2:], ("POST /v1/messages -> 200 kind=sub wide=x", "wide end 200 sub kind=sub wide=x"))
+        self.assertEqual((out.result.status, out.result.completed), (200, True))
+        self.assertEqual(out.health, "wide tag=x errors=1")
+        self.assertEqual(dict(out.settings), {"tag": "x"})
+
+    def test_untouched_bytes_and_a_json_response(self):
+        plain = jail.write_middleware(self.dir, "plain", 'NAME = "plain"\n')
+        raw = b'{"model": "m",   "x": 1}'
+        out = run(plain, body=raw, response={"id": "r"}, status=429, reason="Too Many Requests")
+        self.assertIs(out.forwarded, raw)
+        self.assertFalse(out.changed)
+        self.assertEqual(out.events, ({"event": None, "data": {"id": "r"}, "raw": b'{"id": "r"}'},))
+        self.assertEqual(out.result.error_head, b'{"id": "r"}')
+        self.assertEqual(out.errors, ())
+        out = run(plain, body=raw, response=JSON_BODY, content_type="application/json")
+        self.assertEqual(out.events[0]["data"], json.loads(JSON_BODY))
+
+    def test_env_overrides_and_load_errors(self):
+        self.assertEqual(run(self.path, body=b"", env={"MODEL_GATEWAY_WIDE_TAG": "e"}).note, " kind=main wide=e")
+        with self.assertRaises(SettingsError):
+            load(self.path, settings={"nope": 1})
+        with self.assertRaises(SettingsError):
+            load(os.path.join(self.dir, "Bad-Name.py"))
+        with self.assertRaises(MiddlewareError):
+            load(os.path.join(self.dir, "absent.py"))
+
+    def test_run_cli(self):
+        log = os.path.join(self.dir, "gw.log")
+        code, out, err = run_cli(self.path, ["a", "b"], settings={"tag": "c"}, log_path=log)
+        self.assertEqual((code, out, err), (4, "tag c ['a', 'b']\n", ""))
+        with open(log) as f:
+            self.assertIn("cli a,b", f.read())
+
+
+if __name__ == "__main__":
+    unittest.main()

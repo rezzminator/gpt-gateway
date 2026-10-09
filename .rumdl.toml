@@ -1,0 +1,13 @@
+# model-gateway markdown policy, read by rumdl.
+[global]
+respect-gitignore = true
+# MD040 appends `text` to bare fences: token cost, no reader value.
+disable = ["MD040"]
+
+# No line-length gate: prose is one line per paragraph.
+[MD013]
+line-length = 100000
+
+# CLAUDE.md uses H1 section headings by design.
+[per-file-ignores]
+"CLAUDE.md" = ["MD001", "MD024", "MD025", "MD041"]
