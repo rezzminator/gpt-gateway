@@ -1,6 +1,8 @@
 """The Responses WebSocket: the response.create message, the pool's pause, and real gateway exchanges over kept sockets."""
 import json
 from pathlib import Path
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +12,7 @@ from model_gateway.chatgpt.auth import Credentials
 from tests import fakes
 from tests.model_gateway.chatgpt import test_errors as errors_tests
 from tests.model_gateway.chatgpt import test_route as route_tests
+from tests.model_gateway.chatgpt import test_turn as turn_tests
 
 CALL = dict(role="assistant", content=[dict(type="tool_use", id="call_invented", name="lookup", input={"city": "Harbor"})])
 RESULT = dict(role="user", content=[dict(type="tool_result", tool_use_id="call_invented", content="sunny")])
@@ -179,6 +182,40 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(rt.chatgpt.client.sockets.failures, 0)
         self.assertEqual(len(self.fake.upgrades), 2)
         self.assertIn("reason=ended-early", fakes.logged(rt))
+
+    def concurrent(self, port, first, second):
+        """Send `first`, then `second` while the backend still holds `first`'s answer; both statuses."""
+        statuses = {}
+        thread = threading.Thread(target=lambda: statuses.update(first=self.send(port, first)[0].status))
+        thread.start()
+        time.sleep(0.2)
+        statuses["second"] = self.send(port, second)[0].status
+        thread.join()
+        return statuses
+
+    def test_an_activity_summary_fork_waits_for_its_lanes_busy_socket_and_rides_its_cache(self):
+        # Claude Code sends the fork while the agent's request still runs; a second socket lands on another backend
+        # server, whose cache holds only the lane's opening prefix.
+        self.fake.stall = [0.8]
+        rt, port = self.gateway()
+        agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
+        fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
+        self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 1)
+        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+                         ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
+
+    def test_a_fork_whose_wait_runs_out_and_an_agent_request_open_another_socket(self):
+        self.fake.stall = [0.8, 0.8]
+        rt, port = self.gateway()
+        agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
+        fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
+        with patch("model_gateway.chatgpt.websocket.FORK_WAIT_SECONDS", 0.1):
+            self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
+        self.assertEqual(self.concurrent(port, agent, agent), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 2)
+        self.assertEqual(fakes.logged(rt).count("gpt websocket fork-wait lane="), 1)
+        self.assertIn("timed out after 0.1 s; another socket opens", fakes.logged(rt))
 
     # The route's error, retry and refresh behaviour, over the WebSocket.
     test_refresh_once_and_oauth_identity = route_tests.RouteTest.test_refresh_once_and_oauth_identity

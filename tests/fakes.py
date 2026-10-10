@@ -296,6 +296,7 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     refuse = []  # per WebSocket upgrade, a status answered in place of 101
     vanish = []  # per WebSocket message, True: the socket closes without an answer
     hangup = []  # per WebSocket message answered, True: the socket closes after the answer
+    stall = []  # per WebSocket message, seconds the answer waits
 
     def log_message(self, *args):
         pass
@@ -363,6 +364,8 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             if data is None:
                 return
             self.seen.append({"method": "WS", "path": self.path, "headers": headers, "body": data})
+            if self.stall:
+                time.sleep(self.stall.pop(0))
             if self.vanish and self.vanish.pop(0):
                 return self.connection.shutdown(socket.SHUT_RDWR)
             status, payload, *extra = self.script.pop(0) if self.script else (200, responses_turn())

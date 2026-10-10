@@ -202,7 +202,7 @@ class Route:
                     with self.lock:
                         if state.turn_state.observe(where, issued):
                             measure.turn = "issued"
-                response = self.client.responses(translation, key, credentials, token, observe)
+                response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK)
                 reused, retried, measure.transport = self.client.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status

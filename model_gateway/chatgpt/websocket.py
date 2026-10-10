@@ -4,7 +4,9 @@ Derived from openai/codex, changed (Apache-2.0; see THIRD_PARTY_NOTICES.md). Cod
 sends every request of it there (codex-rs/core/src/client.rs:605-621); replaying the same bodies, the backend serves
 a kept socket's request from the prompt cache its previous request wrote far more often than a fresh HTTP request's.
 One request is in flight per socket: a lane whose socket is busy opens another, and every idle socket goes back to
-the pool, where its lane takes the most recent one. A socket answering anything but a completed response is closed.
+the pool, where its lane takes the most recent one. Claude Code's activity-summary fork runs while its agent's request
+still does; a second socket lands on another backend server, whose cache holds only what that socket sent, so a fork
+waits for its lane's busy socket instead. A socket answering anything but a completed response is closed.
 """
 import collections
 import hashlib
@@ -33,6 +35,8 @@ KEPT_AFTER = ("response.completed", "response.incomplete")
 PAUSE_AFTER, PAUSE_SECONDS = 5, 600
 # An upgrade answered with a status meaning the backend serves no WebSocket here (Codex: 426) pauses it this long.
 UNSERVED_PAUSE_SECONDS = 3600
+# How long an activity-summary fork waits for its lane's busy socket before it opens another.
+FORK_WAIT_SECONDS = 30
 
 
 def unserved(status):
@@ -81,6 +85,7 @@ class Kept:
         self.ws, self.key, self.headers = ws, pool_key, headers
         self.opened = clock.monotonic()
         self.exchanges = 0
+        self.out = False  # checked out: one exchange owns it
 
 
 class Sockets:
@@ -89,7 +94,9 @@ class Sockets:
     def __init__(self, upstream, log):
         self.upstream, self.log = upstream, log
         self.lock = threading.Lock()
+        self.returned = threading.Condition(self.lock)  # a socket went back to the pool or closed
         self.idle = collections.OrderedDict()  # Kept -> None, oldest check-in first
+        self.busy = collections.Counter()  # pool key -> sockets checked out
         self.failures = 0
         self.paused_until = float("-inf")
 
@@ -117,14 +124,28 @@ class Sockets:
         with self.lock:
             self.failures = 0
 
-    def checkout(self, pool_key):
-        """The lane's most recent idle socket still fit for a request, or None; the unfit ones close."""
+    def checkout(self, pool_key, wait=0):
+        """The lane's most recent idle socket still fit for a request, or None; the unfit ones close. With `wait`, a
+        lane whose every socket is busy waits that many seconds for one to come back before it gets None."""
+        deadline = clock.monotonic() + wait
         while True:
             with self.lock:
-                kept = next((k for k in reversed(self.idle) if k.key == pool_key), None)
+                while True:
+                    kept = next((k for k in reversed(self.idle) if k.key == pool_key), None)
+                    remaining = deadline - clock.monotonic()
+                    if kept is not None or not self.busy[pool_key] or remaining <= 0:
+                        break
+                    self.returned.wait(remaining)
                 if kept is None:
-                    return None
-                del self.idle[kept]
+                    timed_out = wait > 0 and self.busy[pool_key] > 0
+                else:
+                    del self.idle[kept]
+                    kept.out = True
+                    self.busy[pool_key] += 1
+            if kept is None:
+                if timed_out:
+                    self.log("    gpt websocket fork-wait lane=%s timed out after %g s; another socket opens" % (pool_key[0], wait))
+                return None
             old = clock.monotonic() - kept.opened >= MAX_AGE
             if not old and kept.ws.alive():
                 return kept
@@ -132,6 +153,7 @@ class Sockets:
 
     def checkin(self, kept):
         with self.lock:
+            self._returned(kept)
             self.idle[kept] = None
             over = [self.idle.popitem(last=False)[0] for _ in range(len(self.idle) - MAX_KEPT)]
         for oldest in over:
@@ -144,9 +166,24 @@ class Sockets:
         if answer.socket is None:
             return answer
         self.log("    gpt websocket open lane=%s handshake_ms=%d" % (pool_key[0], round((clock.monotonic() - started) * 1000)))
-        return Kept(WebSocket(answer.socket, answer.pending, self.log), pool_key, answer.headers)
+        kept = Kept(WebSocket(answer.socket, answer.pending, self.log), pool_key, answer.headers)
+        with self.lock:
+            kept.out = True
+            self.busy[pool_key] += 1
+        return kept
+
+    def _returned(self, kept):
+        """Under the lock: a checked-out socket is no longer busy, and a waiting fork may take its lane's next one."""
+        if kept.out:
+            kept.out = False
+            self.busy[kept.key] -= 1
+            if not self.busy[kept.key]:
+                del self.busy[kept.key]
+            self.returned.notify_all()
 
     def close(self, kept, reason, abort=False):
+        with self.lock:
+            self._returned(kept)
         (kept.ws.abort if abort else kept.ws.close)()
         self.log("    gpt websocket close lane=%s reason=%s age_s=%d exchanges=%d" % (
             kept.key[0], reason, clock.monotonic() - kept.opened, kept.exchanges))

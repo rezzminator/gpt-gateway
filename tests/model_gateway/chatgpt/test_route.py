@@ -16,7 +16,7 @@ from tests import fakes, jail
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.home = jail.scratch(self)
-        self.fake = type("FakeChatGPT", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "tokens": {}, "upgrades": [], "refuse": [], "vanish": [], "hangup": []})
+        self.fake = type("FakeChatGPT", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "tokens": {}, "upgrades": [], "refuse": [], "vanish": [], "hangup": [], "stall": []})
         self.origin = fakes.start_upstream(self, self.fake)
         self.anthropic = fakes.start_upstream(self)
         fakes.Upstream.seen.clear()
