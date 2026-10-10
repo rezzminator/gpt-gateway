@@ -179,6 +179,59 @@ class FailureTest(ChainCase):
         self.assertIsNone(chain.event_sink(self.ctx(), "text/event-stream"))
 
 
+ANSWERS = 'NAME = "answers"\ndef on_request(ctx, req):\n    req.answer(200, "text/plain", b"here")\n    return " answers=1"\n'
+TURN = 'NAME = "turn"\ndef on_request(ctx, req):\n    last = req.last_turn_message()\n    return " turn=%s" % (last or {}).get("role")\n'
+
+
+class AnswerTest(ChainCase):
+    def test_an_answer_ends_the_chain_sends_nothing_and_names_its_module(self):
+        import sys
+        chain, modules = self.chain({"edits": EDITS, "answers": ANSWERS, "later": LATER})
+        req = self.request()
+        sent, notes = chain.run_request(self.ctx(), req)
+        self.assertEqual(notes, [" edits=1", " answers=1", " answered=answers"])
+        self.assertIs(sent, RAW)  # an earlier edit is never serialized: nothing goes upstream
+        self.assertEqual(sys.modules["model_gateway_mw_later"].RAN, [])
+        self.assertEqual((req.answered.status, req.answered.content_type, req.answered.data),
+                         (200, "text/plain", b"here"))
+        self.assertEqual([m.errors for m in modules], [0, 0, 0])
+        self.assertIsNone(self.request().answered)
+
+    def test_a_hook_that_answers_and_then_fails_leaves_no_answer(self):
+        half = 'NAME = "half"\ndef on_request(ctx, req):\n    req.answer(200, "text/plain", b"x")\n    raise RuntimeError("after")\n'
+        chain, modules = self.chain({"half": half, "later": LATER})
+        req = self.request()
+        sent, notes = chain.run_request(self.ctx(), req)
+        self.assertIn("middleware half on_request failed: RuntimeError('after')", self.lines[-1])
+        self.assertEqual((sent, notes, modules[0].errors), (RAW, [], 1))
+        self.assertIsNone(req.answered)
+
+    def test_a_malformed_answer_is_a_failure_of_its_hook(self):
+        for call, text in (('200.0, "text/plain", b""', "ValueError('answer: status must be an int from 200 to 599"),
+                           ('True, "text/plain", b""', "ValueError('answer: status must be an int from 200 to 599"),
+                           ('199, "text/plain", b""', "ValueError('answer: status must be an int from 200 to 599"),
+                           ('600, "text/plain", b""', "ValueError('answer: status must be an int from 200 to 599"),
+                           ('200, "", b""', 'ValueError("answer: content_type must be a non-empty string'),
+                           ('200, "text/plain", "text"', "TypeError('answer: data must be bytes, got str")):
+            source = 'NAME = "bad"\ndef on_request(ctx, req):\n    req.answer(%s)\n' % call
+            chain, modules = self.chain({"bad": source})
+            req = self.request()
+            self.assertIs(chain.run_request(self.ctx(), req)[0], RAW, call)
+            self.assertIn("middleware bad on_request failed: " + text, self.lines[-1], call)
+            self.assertIsNone(req.answered, call)
+
+    def test_last_turn_message_skips_the_trailing_system_notices(self):
+        chain, _ = self.chain({"turn": TURN})
+        user, assistant = {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}
+        notice = {"role": "system", "content": "a notice"}
+        for messages, role in (([user, assistant], "assistant"),
+                               ([assistant, user, notice, dict(notice, content=[])], "user"),
+                               ([notice], None), ([], None), ("not a list", None)):
+            raw = json.dumps({"model": "claude-x", "messages": messages}).encode()
+            self.assertEqual(chain.run_request(self.ctx(), self.request(raw))[1], [" turn=%s" % role], messages)
+        self.assertEqual(chain.run_request(self.ctx(), self.request(b"[1]"))[1], [" turn=None"])
+
+
 class ContextTest(ChainCase):
     def test_settings_and_state_belong_to_the_running_module(self):
         src = 'NAME = "{n}"\nGOT = []\ndef on_request(ctx, req):\n    ctx.state["k"] = "{n}"\n    GOT.append(dict(ctx.settings))\n' \

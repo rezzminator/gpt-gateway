@@ -29,9 +29,10 @@ class UninstallTest(unittest.TestCase):
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
         backups = os.path.join(h.home, ".local", "state", "model-gateway", "backups")
         (kept,) = [d for d in os.listdir(backups) if d.startswith("uninstall-")]
-        self.assertTrue(os.path.isfile(os.path.join(backups, kept, "middleware", "mine.py")))
+        for name in ("mine.py", "status_label.py"):
+            self.assertTrue(os.path.isfile(os.path.join(backups, kept, "middleware", name)), name)
         with open(os.path.join(backups, kept, "settings.json")) as f:
-            self.assertEqual(json.load(f), {"capture_dir": None, "middleware": []})
+            self.assertEqual(json.load(f), {"capture_dir": None, "middleware": [{"module": "status_label"}]})
         self.assertTrue(any(d.startswith("settings.json.pre-uninstall-") for d in os.listdir(backups)))
         self.assertTrue(os.path.exists(os.path.join(logs, "model-gateway.log")))
 

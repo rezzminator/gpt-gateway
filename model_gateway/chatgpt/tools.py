@@ -46,8 +46,7 @@ def translate_tools(body):
             registered.add(name)
             if original != name:
                 names[name] = original
-            function = {'type': 'function', 'name': name, 'description': tool.get('description', ''),
-                        'strict': False, 'parameters': schema.sanitize(tool.get('input_schema', {}))}
+            function = _function(name, tool)
             if tool.get('defer_loading') is True:
                 deferred[original] = function
             else:
@@ -55,6 +54,42 @@ def translate_tools(body):
         else:
             notes.append('dropped server tool: ' + str(kind))
     return converted, deferred, names, tuple(notes)
+
+
+def _function(name, tool):
+    return {'type': 'function', 'name': name, 'description': tool.get('description', ''),
+            'strict': False, 'parameters': schema.sanitize(tool.get('input_schema', {}))}
+
+
+def added_name(block):
+    """The original tool name a well-formed tool_addition block adds, else None."""
+    tool = block.get('tool') if block.get('type') == 'tool_addition' else None
+    definition = tool.get('definition') if isinstance(tool, dict) and tool.get('type') == 'tool_definition' else None
+    name = definition.get('name') if isinstance(definition, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def added_tools(body, taken, names):
+    """Tools Claude Code added mid-conversation through role-system tool_addition blocks: lowered function by original
+    name, in order, each once. taken: the short names already registered or deferred, which add nothing again; a different
+    original on a taken short name raises ValueError like any collision. names gains each shortened name."""
+    added, taken = {}, set(taken)
+    for message in body.get('messages', []):
+        content = message.get('content') if isinstance(message, dict) and message.get('role') == 'system' else None
+        for block in content if isinstance(content, list) else []:
+            original = added_name(block) if isinstance(block, dict) else None
+            if original is None or original in added or original == _PLACEHOLDER:
+                continue
+            name = short_name(original)
+            if name in taken:
+                if names.get(name, name) != original:
+                    raise ValueError('duplicate or colliding tool name: ' + name)
+                continue
+            taken.add(name)
+            if original != name:
+                names[name] = original
+            added[original] = _function(name, block['tool']['definition'])
+    return added
 
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:803-862.

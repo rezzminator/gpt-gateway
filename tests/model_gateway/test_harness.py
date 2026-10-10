@@ -74,6 +74,26 @@ class HarnessTest(unittest.TestCase):
         out = run(plain, body=raw, response=JSON_BODY, content_type="application/json")
         self.assertEqual(out.events[0]["data"], json.loads(JSON_BODY))
 
+    def test_an_answer_is_relayed_and_nothing_is_forwarded(self):
+        import sys
+        source = ('NAME = "answering"\nEVENTS = []\ndef on_request(ctx, req):\n'
+                  '    req.answer(200, "text/event-stream", b\'event: message_stop\\ndata: {"type":"message_stop"}\\n\\n\')\n'
+                  '    return " answering=1"\n'
+                  'def on_event(ctx, event):\n    EVENTS.append(event["event"])\n')
+        path = jail.write_middleware(self.dir, "answering", source)
+        out = run(path, body={"model": "m"}, headers={"x-claude-code-agent-id": "a"}, response=SSE_BODY, chunk_size=4)
+        self.assertEqual(out.note, " kind=sub answering=1 answered=answering")
+        self.assertEqual(out.log, ("POST /v1/messages -> 200 kind=sub answering=1 answered=answering",))
+        self.assertIsNone(out.forwarded)
+        self.assertFalse(out.changed)
+        self.assertEqual([e["event"] for e in out.events], ["message_stop"])
+        self.assertEqual(sys.modules["model_gateway_mw_answering"].EVENTS, ["message_stop"])
+        self.assertEqual((out.result.status, out.result.reason, out.result.headers, out.result.note),
+                         (200, "OK", (("content-type", "text/event-stream"),), out.note))
+        self.assertEqual((out.answer.status, out.answer.content_type, out.answer.data[:20]),
+                         (200, "text/event-stream", b"event: message_stop\n"))
+        self.assertIsNone(run(self.path, body={"model": "m"}).answer)
+
     def test_env_overrides_and_load_errors(self):
         self.assertEqual(run(self.path, body=b"", env={"MODEL_GATEWAY_WIDE_TAG": "e"}).note, " kind=main wide=e")
         with self.assertRaises(SettingsError):

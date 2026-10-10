@@ -1,8 +1,9 @@
 """One exchange: read the request (chunked included), run the hooks, forward it, relay the response.
 
 The response streams back as it arrives: each upstream chunk is written and flushed before the next
-is read, and the event hooks see it only after the client has. A request line is logged for
-POST /v1/messages and for every status >= 400; on_response_end runs after it.
+is read, and the event hooks see it only after the client has. A request a hook answered goes to no
+upstream: its answer takes the same relay. A request line is logged for POST /v1/messages and for
+every status >= 400; on_response_end runs after it.
 """
 import json
 import copy
@@ -13,6 +14,7 @@ from .capture import Capture
 from .headers import HOP, Headers, debug_headers
 from .health import HEALTH_PATH, health_line
 from .hooks import Context, Request, Result, parse_object
+from .response import Response
 from .upstream import UpstreamError
 
 MESSAGES_PATH = "/v1/messages"
@@ -152,6 +154,10 @@ class Handler(BaseHTTPRequestHandler):
         if sent is not raw and selected[0] != "chatgpt":  # the chatgpt route captures the bytes it sends
             cap.sent_body(sent)
         note = assemble_note(kind, notes)
+        if req.answered is not None:  # no upstream on either route, so no upstream connection to drop
+            answer = req.answered
+            return self.relay(rt, ctx, Response(answer.status, answer.data, {"content-type": answer.content_type}),
+                              note, meta, cap, started, None)
         if selected[0] == "chatgpt":
             resp = selected[2] or rt.chatgpt.exchange(req.body if sent is not raw else body,
                                                      selected[1], self.headers, self.path, cap, started)
@@ -171,10 +177,10 @@ class Handler(BaseHTTPRequestHandler):
             rt.chain.run_response_end(ctx, Result(502, "Bad Gateway", (), data[:ERROR_HEAD], True, False,
                                                   clock.monotonic() - started, note))
             return
-        self.relay(rt, ctx, resp, note, meta, cap, started)
+        self.relay(rt, ctx, resp, note, meta, cap, started, rt.upstream)
 
-    def relay(self, rt, ctx, resp, note, meta, cap, started, upstream=None):
-        upstream = rt.upstream if upstream is None else upstream
+    def relay(self, rt, ctx, resp, note, meta, cap, started, upstream):
+        """Relay `resp` to the client; `upstream` is the connection a broken relay spends, None for a hook's answer."""
         resp_headers = tuple(resp.getheaders())
         cap.response(resp.status, resp.reason, resp_headers)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
@@ -207,12 +213,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             completed = True
         except (BrokenPipeError, ConnectionResetError):
-            upstream.drop()  # the client left mid-stream; this upstream connection is spent
+            if upstream is not None:
+                upstream.drop()  # the client left mid-stream; this upstream connection is spent
             disconnected = True
             rt.log.write("%s %s client disconnected mid-stream%s" % (self.command, self.path, note))
             self.close_connection = True
         except Exception as e:
-            upstream.drop()
+            if upstream is not None:
+                upstream.drop()
             rt.log.write("%s %s stream error %r%s" % (self.command, self.path, e, note))
             self.close_connection = True
         if sink is not None:

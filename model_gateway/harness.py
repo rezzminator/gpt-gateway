@@ -8,8 +8,10 @@ SSE splitting and log-line assembly. A middleware's tests import it from a model
     out = run("my_mw.py", body={"model": "m", "messages": []},
               response=b'event: message_stop\\ndata: {"type":"message_stop"}\\n\\n',
               settings={"enabled": True}, chunk_size=7)
-    out.forwarded   # the bytes that would go upstream
+    out.forwarded   # the bytes that would go upstream, None when a hook answered
     out.changed     # whether they differ from the request's bytes
+    out.answer      # the Answer a hook gave (status, content_type, data), or None; when set, the
+                    # events and the result are the answer's, relayed in place of `response`
     out.log         # the gateway log lines, timestamps cut
     out.errors      # the hook failure lines among them
     out.events      # the recorded response's events, in order, as on_event is offered them
@@ -34,6 +36,7 @@ from .hooks import Chain, Context, Request, Result, parse_object
 from .log import Log
 from .middleware import load_module
 from .proxy import ERROR_HEAD, assemble_note, logs_line, request_line, request_meta
+from .response import Response
 from .settings import SettingsError, middleware_entries, module_settings
 
 STAMP = len("YYYY-mm-dd HH:MM:SS ")
@@ -50,6 +53,7 @@ class Outcome:
     result: Result
     health: str
     settings: object
+    answer: object  # the hook's Answer, or None
 
 
 def load(path, settings=None, env=None):
@@ -91,6 +95,7 @@ def run(path, *, body, headers=None, response=b"", status=200, reason="OK", cont
     headers: the request headers {name: value}; `x-claude-code-agent-id` makes the kind `sub`.
     response: the recorded response body: SSE bytes, or an object sent as JSON.
     chunk_size: relay the response in chunks of this many bytes (default: one chunk).
+    A hook's answer is relayed in place of `response`, as the gateway relays it.
     """
     module, values = load(path, settings, env)
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -98,7 +103,6 @@ def run(path, *, body, headers=None, response=b"", status=200, reason="OK", cont
         data, ctype = response, content_type or "text/event-stream"
     else:
         data, ctype = json.dumps(response).encode(), content_type or "application/json"
-    chunks = split(data, chunk_size)
     resp_headers = tuple(response_headers) + (("content-type", ctype),)
     request_headers = Headers((headers or {}).items())
     kind = "sub" if request_headers.get("x-claude-code-agent-id") else "main"
@@ -112,8 +116,15 @@ def run(path, *, body, headers=None, response=b"", status=200, reason="OK", cont
         ctx = Context(log=log.write, log_path=log.path, settings=per_module, kind=kind, method=method,
                       path=url_path, headers=request_headers, route=route,
                       model=parsed.get("model") if parsed is not None else None, request_id=request_id)
-        forwarded, notes = chain.run_request(ctx, Request(raw, parsed))
+        req = Request(raw, parsed)
+        forwarded, notes = chain.run_request(ctx, req)
         note = assemble_note(kind, notes)
+        if req.answered is not None:  # relayed in place of the recorded response, as the gateway relays it
+            given = req.answered
+            answer = Response(given.status, given.data, {"content-type": given.content_type})
+            forwarded, data, ctype = None, given.data, given.content_type
+            status, reason, resp_headers = answer.status, answer.reason, tuple(answer.getheaders())
+        chunks = split(data, chunk_size)
         sink = chain.event_sink(ctx, ctype)
         error_head = b""
         for chunk in chunks:
@@ -135,8 +146,8 @@ def run(path, *, body, headers=None, response=b"", status=200, reason="OK", cont
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     errors = tuple(line for line in lines if line.startswith("middleware ") and " failed: " in line)
-    return Outcome(forwarded, forwarded is not raw, note, tuple(lines), errors,
-                   recorded_events(chunks, ctype.lower()), result, health, values)
+    return Outcome(forwarded, forwarded is not None and forwarded is not raw, note, tuple(lines), errors,
+                   recorded_events(chunks, ctype.lower()), result, health, values, req.answered)
 
 
 def run_cli(path, argv, *, settings=None, env=None, log_path=None):

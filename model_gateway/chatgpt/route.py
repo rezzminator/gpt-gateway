@@ -11,11 +11,12 @@ import threading
 from typing import Optional
 
 from .. import clock
+from ..response import Response
 from ..upstream import UpstreamError, is_stale
 from . import auth, errors, estimate, lane, request, signature, stream, turn
 from .catalog import Catalog, CatalogUnavailable
 from .client import Client
-from .response import Reader, Response
+from .response import Reader
 
 
 def route_error(status, kind, message, headers=None):

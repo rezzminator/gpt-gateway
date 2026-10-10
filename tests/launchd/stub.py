@@ -1,4 +1,5 @@
-"""A source tree to install from, a scratch HOME, and a stub launchctl, for the launchd script tests.
+"""A source tree to install from (the shipped middleware included), a scratch HOME, and a stub launchctl,
+for the launchd script tests.
 
 The stub stands first on PATH: it records each call and reports the agent as never loaded, and
 disabled when asked, so no test reaches the real launchd or the real home.
@@ -36,7 +37,7 @@ class Host:
         self.port = jail.free_port()
         os.makedirs(os.path.dirname(self.claude))
         self.write_claude({"env": {"KEEP": "1"}})
-        for item in jail.ship_list() + ["launchd/install.sh", "launchd/uninstall.sh"]:
+        for item in jail.ship_list() + ["middleware", "launchd/install.sh", "launchd/uninstall.sh"]:
             src, target = os.path.join(jail.ROOT, item), os.path.join(self.src, item)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.isdir(src):

@@ -1,9 +1,10 @@
 #!/bin/sh
 # Installs or updates model-gateway for the current macOS user. Re-runnable.
 #
-# Copies the SHIP files to ~/.local/share/model-gateway, creates middleware/ there,
-# writes settings.json on a first install (an update validates the existing one and
-# keeps it), and writes the launchd agent. A first install turns the gateway on.
+# Copies the SHIP files to ~/.local/share/model-gateway, creates middleware/ there and
+# copies the shipped middleware into it (each file replaces only its own copy), writes
+# settings.json listing status_label on a first install (an update validates the existing
+# one and keeps it), and writes the launchd agent. A first install turns the gateway on.
 # An update keeps the current on/off state:
 #   - on: the change applies through a graceful restart, so no stream is cut;
 #   - off: only the files change, and `ctl.sh on` turns it on.
@@ -97,9 +98,15 @@ PY
   fi
 done
 chmod +x "$DEST/run.sh" "$DEST/ctl.sh"
+# The shipped middleware: each file replaces only its own copy, so the user's own modules stay.
+for f in "$SRC"/middleware/*.py; do
+  [ -f "$f" ] || continue
+  name=$(basename "$f")
+  cp "$f" "$DEST/middleware/$name.new" && mv "$DEST/middleware/$name.new" "$DEST/middleware/$name"
+done
 if [ ! -f "$DEST/settings.json" ]; then
   # The running gateway re-reads settings.json when it changes, so it is replaced whole, never edited in place.
-  printf '%s\n' '{"capture_dir": null, "middleware": []}' > "$DEST/settings.json.new"
+  printf '%s\n' '{"capture_dir": null, "middleware": [{"module": "status_label"}]}' > "$DEST/settings.json.new"
   "$PY" -I "$DEST/gateway.py" check "$DEST/settings.json.new" >/dev/null \
     || { rm -f "$DEST/settings.json.new"; echo "install.sh: the settings it built are invalid (above)" >&2; exit 1; }
   mv "$DEST/settings.json.new" "$DEST/settings.json"

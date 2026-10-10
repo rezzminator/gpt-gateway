@@ -1,24 +1,17 @@
-"""The one-relay response surface preserves commit, heartbeat and true EOF."""
+"""The reader behind the relay's Response preserves commit, heartbeat and true EOF."""
 import http.client
 import queue
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from model_gateway.chatgpt.response import EOF, Reader, Response
+from model_gateway.chatgpt.response import EOF, Reader
 from model_gateway.chatgpt.stream import Translator
+from model_gateway.response import Response
 from tests import fakes
 
 
-class ResponseTest(unittest.TestCase):
-    def test_json_case_insensitive_headers_and_small_reads(self):
-        response = Response.json(413, {"type": "error"}, {"Retry-After": "4"})
-        self.assertEqual(response.getheader("retry-after"), "4")
-        self.assertEqual(response.getheader("missing", "default"), "default")
-        self.assertEqual(response.reason, "Request Entity Too Large")
-        self.assertEqual(response.read1(2) + response.read(), b'{"type":"error"}')
-        self.assertEqual(response.read1(20), b"")
-
+class ReaderTest(unittest.TestCase):
     def test_reader_skips_empty_translations_and_finishes_once(self):
         upstream = Mock()
         upstream.read1.side_effect = [fakes.responses_event("response.created"), fakes.responses_turn(), b""]

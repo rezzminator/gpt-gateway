@@ -29,7 +29,8 @@ SETTINGS = {"enabled": (True, enabled_value, "MODEL_GATEWAY_MODEL_NOTE")}
 
 
 def on_request(ctx, req):
-    # ctx.route names the selected upstream: "anthropic" or "chatgpt".
+    # ctx.route names the selected upstream: "anthropic" or "chatgpt". A hook may also answer the request itself,
+    # req.answer(status, content_type, data); then nothing goes upstream (see middleware/status_label.py).
     if ctx.settings["enabled"]:
         return " model-note=%s" % ctx.model
     return None

@@ -3,6 +3,7 @@ import contextlib
 import http.client
 import io
 import json
+import os
 import socket
 import struct
 import time
@@ -218,27 +219,86 @@ class HookExchangeTest(unittest.TestCase):
         self.assertIn("POST /v1/json client disconnected mid-stream kind=main rec=seen", fakes.logged(rt))
 
 
+ANSWER = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+ANSWERS = ('NAME = "answers"\ndef on_request(ctx, req):\n    req.answer(200, "text/event-stream", %r)\n' % ANSWER)
+
+
+class AnswerExchangeTest(unittest.TestCase):
+    """A hook's answer goes back through the one relay, and no request leaves the gateway on either route."""
+
+    def setUp(self):
+        Upstream.seen.clear()
+        self.up = fakes.start_upstream(self)
+
+    def test_an_answered_request_never_goes_upstream_and_relays_like_one(self):
+        from model_gateway.capture import RESPONSE_BODY, SENT_BODY
+        settings = dict(chain("rec", "answers"), capture_dir=jail.scratch(self))
+        rt, port = fakes.start_gateway(self, self.up, settings=settings,
+                                       middleware={"rec": RECORDER.format(name="rec"), "answers": ANSWERS})
+        resp, data = fakes.request(port, "POST", "/v1/messages?beta=true", ODD, {"x-claude-code-agent-id": "a1"})
+        self.assertEqual((resp.status, resp.getheader("content-type"), data), (200, "text/event-stream", ANSWER))
+        self.assertEqual(Upstream.seen, [])
+        recorded = ended("rec", 1)
+        self.assertEqual([c[0] for c in recorded], ["on_request", "on_event", "on_response_end"])
+        end = recorded[-1][1]
+        self.assertEqual((end.status, end.completed, end.note), (200, True, " kind=sub rec=seen answered=answers"))
+        self.assertIn("POST /v1/messages?beta=true -> 200 kind=sub rec=seen answered=answers\n", fakes.logged(rt))
+        folder = recorded[0][1]["capture_dir"]
+        with open(os.path.join(folder, RESPONSE_BODY), "rb") as f:
+            self.assertEqual(f.read(), ANSWER)
+        self.assertFalse(os.path.exists(os.path.join(folder, SENT_BODY)))
+
+    def test_an_answer_on_the_chatgpt_route_never_reaches_the_route(self):
+        import base64
+        from model_gateway import clock
+        home = jail.scratch(self)
+        fake = type("FakeChatGPT", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "tokens": {}, "upgrades": [],
+                                                              "refuse": [], "vanish": [], "hangup": [], "stall": []})
+        origin = fakes.start_upstream(self, fake)
+        claims = base64.urlsafe_b64encode(json.dumps({"exp": clock.now() + 3600}).encode()).decode().rstrip("=")
+        auth = os.path.join(home, "auth.json")
+        jail.write_json(auth, dict(access_token="fixture.%s.signature" % claims, refresh_token="refresh-invented",
+                                   id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
+        env = jail.clean_env(home, MODEL_GATEWAY_CHATGPT="1", MODEL_GATEWAY_CHATGPT_AUTH_STORE="file",
+                             MODEL_GATEWAY_CHATGPT_TRANSPORT="http", MODEL_GATEWAY_CHATGPT_AUTH_PATH=auth,
+                             MODEL_GATEWAY_CHATGPT_ORIGIN=origin, MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN=origin,
+                             MODEL_GATEWAY_CHATGPT_MODELS_PATH=os.path.join(home, "models.json"))
+        rt, port = fakes.start_gateway(self, self.up, env=env, settings=chain("rec", "answers"),
+                                       middleware={"rec": RECORDER.format(name="rec"), "answers": ANSWERS})
+        body = json.dumps({"model": "gpt-test", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        resp, data = fakes.request(port, "POST", "/v1/messages", body.encode(),
+                                   {"x-claude-code-agent-id": "agent-invented", "x-claude-code-session-id": "session-invented"})
+        self.assertEqual((resp.status, data), (200, ANSWER))
+        self.assertEqual(ended("rec", 1)[0][1]["route"], "chatgpt")
+        self.assertEqual([x["path"] for x in fake.seen if "responses" in x["path"]], [])
+        self.assertEqual(Upstream.seen, [])
+        logged = fakes.logged(rt)
+        self.assertIn("POST /v1/messages -> 200 kind=sub rec=seen answered=answers\n", logged)
+        self.assertNotIn("gpt lane=", logged)
+
+
 class RelayRouteTest(unittest.TestCase):
     def test_disconnect_drops_only_selected_upstream(self):
         from unittest.mock import Mock
         from model_gateway import clock
         from model_gateway.proxy import Handler
-        from model_gateway.chatgpt.response import Response
+        from model_gateway.response import Response
         for failure in (BrokenPipeError(), RuntimeError("invented write failure")):
-            rt, client, cap, ctx = Mock(), Mock(), Mock(), Mock()
-            rt.chain.event_sink.return_value = None
-            handler = Handler.__new__(Handler)
-            handler.command, handler.path = "POST", "/v1/messages"
-            handler.send_response = Mock(side_effect=failure)
-            handler.close_connection = False
-            handler.relay(rt, ctx, Response.json(200, {"ok": True}), " kind=sub", "", cap,
-                          clock.monotonic(), client)
-            client.drop.assert_called_once_with()
-            rt.upstream.drop.assert_not_called()
-            self.assertTrue(handler.close_connection)
-            result = rt.chain.run_response_end.call_args.args[1]
-            self.assertFalse(result.completed)
-            self.assertEqual(result.client_disconnected, isinstance(failure, BrokenPipeError))
+            for answered in (False, True):  # a hook's answer spends no connection: the relay gets None
+                rt, client, cap, ctx = Mock(), Mock(), Mock(), Mock()
+                rt.chain.event_sink.return_value = None
+                handler = Handler.__new__(Handler)
+                handler.command, handler.path = "POST", "/v1/messages"
+                handler.send_response = Mock(side_effect=failure)
+                handler.close_connection = False
+                handler.relay(rt, ctx, Response.json(200, {"ok": True}), " kind=sub", "", cap,
+                              clock.monotonic(), None if answered else client)
+                self.assertEqual(client.drop.call_count, 0 if answered else 1)
+                rt.upstream.drop.assert_not_called()
+                self.assertTrue(handler.close_connection)
+                result = rt.chain.run_response_end.call_args.args[1]
+                self.assertFalse(result.completed)
+                self.assertEqual(result.client_disconnected, isinstance(failure, BrokenPipeError))
 
 
 if __name__ == "__main__":

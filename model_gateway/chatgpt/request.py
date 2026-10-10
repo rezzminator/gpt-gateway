@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 from typing import Optional
 
+from ..hooks import last_turn_message
 from . import signature, tools
 from .catalog import Model
 
@@ -53,9 +54,13 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     registered, deferred, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
-    items = _request_items(body.get('messages', []), model.slug, instructions, notes, deferred if model.responses_lite else {})
-    if not model.responses_lite:
-        registered = registered + list(deferred.values())
+    known = {tool['name'] for tool in registered + list(deferred.values()) if tool['type'] == 'function'}
+    added = tools.added_tools(body, known, names)
+    lite = model.responses_lite
+    items = _request_items(body.get('messages', []), model.slug, instructions, notes,
+                           deferred if lite else {}, added if lite else {})
+    if not lite:
+        registered = registered + list(deferred.values()) + list(added.values())
     if instructions:
         parts = [{'type': 'input_text', 'text': instructions}]
         if agent_contract:
@@ -99,15 +104,6 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     serialized = _compact_json(result)
     return Translation(serialized.encode('utf-8'), model.responses_lite, names, tuple(notes),
                        len(serialized) - _attachment_chars(result['input']), effort)
-
-
-def last_turn_message(body: dict):
-    """The last user or assistant message, past the harness notices Claude Code appends as trailing system messages."""
-    messages = body.get('messages')
-    for message in reversed(messages if isinstance(messages, list) else []):
-        if not isinstance(message, dict) or message.get('role') != 'system':
-            return message
-    return None
 
 
 def activity_summary(body: dict) -> bool:
@@ -162,9 +158,11 @@ def _response_message(role, parts):
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:865-980.
 # codex-rs/core/src/context/model_switch_instructions.rs:17-40.
-def _request_items(messages, slug, instructions, notes, deferred):
+def _request_items(messages, slug, instructions, notes, deferred, added):
     """deferred: tool name to lowered tool, each delivered once, as an additional_tools item right after the first
-    tool result that holds a tool_reference to it, so the first item, and the prompt prefix behind it, never changes."""
+    tool result that holds a tool_reference to it, so the first item, and the prompt prefix behind it, never changes.
+    added: tool name to lowered tool for each tool a role-system tool_addition block adds, delivered once as an item at
+    the block's position; a well-formed block leaves no text, and a model without additional_tools has them in its tools."""
     items = []
     switch_after = None
     delivered = set()
@@ -175,6 +173,15 @@ def _request_items(messages, slug, instructions, notes, deferred):
         for block in _content_blocks(message.get('content', [])):
             kind = block.get('type', 'unknown')
             item = None
+            tool = tools.added_name(block) if message['role'] == 'system' else None
+            if tool is not None:
+                if tool in added and tool not in delivered:
+                    delivered.add(tool)
+                    if parts:
+                        items.append(_response_message(role, parts))
+                        parts = []
+                    items.append({'type': 'additional_tools', 'role': 'developer', 'tools': [added[tool]]})
+                continue
             if role == 'assistant' and kind == 'thinking':
                 try:
                     decoded = signature.decode(block.get('signature'))

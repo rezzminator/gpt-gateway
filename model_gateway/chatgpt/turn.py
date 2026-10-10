@@ -7,6 +7,7 @@ A Claude Code agent's turn starts at a user message without a tool result and co
 the model's tool calls; the trailing system messages Claude Code appends (task notifications, hook feedback, the
 environment) never start one, and the activity-summary fork is no part of the turn.
 """
+from ..hooks import last_turn_message
 from . import request
 
 HEADER = "x-codex-turn-state"
@@ -17,7 +18,7 @@ def position(body):
     """FORK for the activity-summary fork, CONTINUE when the last turn message is the user's and carries a tool result, else START."""
     if request.activity_summary(body):
         return FORK
-    last = request.last_turn_message(body)
+    last = last_turn_message(body)
     content = last.get("content") if isinstance(last, dict) and last.get("role") == "user" else None
     if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
         return CONTINUE

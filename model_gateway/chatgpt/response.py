@@ -1,6 +1,4 @@
-"""Response-like JSON and translated SSE bodies consumed by the core's single relay."""
-from http import HTTPStatus
-import json
+"""The reader thread behind a translated SSE body, read by the core's relay through `model_gateway.response.Response`."""
 import queue
 import threading
 
@@ -8,40 +6,6 @@ from .. import clock
 from . import errors
 
 EOF = object()
-
-
-class Response:
-    """The HTTPResponse surface the relay uses, with either bytes or a streaming reader."""
-
-    def __init__(self, status, data=b"", headers=None, reader=None):
-        self.status = status
-        self.reason = HTTPStatus(status).phrase if status in HTTPStatus._value2member_map_ else "Error"
-        self.headers = {"content-type": "text/event-stream" if reader else "application/json", **(headers or {})}
-        self.data, self.reader = data, reader
-
-    @classmethod
-    def json(cls, status, body, headers=None):
-        return cls(status, json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(), headers)
-
-    def getheaders(self):
-        return list(self.headers.items())
-
-    def getheader(self, name, default=None):
-        return next((v for k, v in self.headers.items() if k.lower() == name.lower()), default)
-
-    def read1(self, n):
-        if not self.data and self.reader:
-            self.data = self.reader.next()
-        chunk, self.data = self.data[:n], self.data[n:]
-        return chunk
-
-    def read(self):
-        chunks = []
-        while True:
-            chunk = self.read1(65536)
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
 
 
 class Reader:

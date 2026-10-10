@@ -5,6 +5,8 @@ with its traceback's last frame, and its module's error count goes up. A failed 
 the original bytes upstream with every module's edits (and notes) discarded and skips the later
 modules' `on_request`; a failed `on_event` or `on_response_end` is skipped. No hook breaks a request
 or cuts a stream. A hook that changes `body["model"]` has failed: routing is the core's job.
+An `on_request` hook may answer the request itself (`req.answer`): the later modules' `on_request` is
+skipped, nothing goes upstream on either route, and the core relays the answer as it relays any response.
 """
 import dataclasses
 import json
@@ -63,15 +65,35 @@ class Context:
         return self._states.setdefault(self._module, {})
 
 
+@dataclasses.dataclass(frozen=True)
+class Answer:
+    """The response an on_request hook gave in place of upstream's."""
+
+    status: int
+    content_type: str
+    data: bytes
+
+
+def last_turn_message(body):
+    """The last user or assistant message of `body["messages"]`, past the trailing role-system notices Claude Code
+    appends (task notifications, hook feedback, the environment); None when there is none."""
+    messages = body.get("messages") if isinstance(body, dict) else None
+    for message in reversed(messages if isinstance(messages, list) else []):
+        if not isinstance(message, dict) or message.get("role") != "system":
+            return message
+    return None
+
+
 class Request:
     """The request body as hooks see it: `raw` bytes (read-only) and `body`, the parsed object or None."""
 
-    __slots__ = ("_raw", "_body", "_changed")
+    __slots__ = ("_raw", "_body", "_changed", "_answer")
 
     def __init__(self, raw, body):
         self._raw = raw
         self._body = body
         self._changed = False
+        self._answer = None
 
     @property
     def raw(self):
@@ -85,10 +107,29 @@ class Request:
     def changed(self):
         return self._changed
 
+    @property
+    def answered(self):
+        """The Answer an on_request hook gave, or None."""
+        return self._answer
+
     def mark_changed(self):
         if self._body is None:
             raise ValueError("mark_changed: this request has no JSON object body")
         self._changed = True
+
+    def answer(self, status, content_type, data):
+        """Answer the request here: the core relays this response and sends nothing upstream."""
+        if isinstance(status, bool) or not isinstance(status, int) or not 200 <= status <= 599:
+            raise ValueError("answer: status must be an int from 200 to 599, got %r" % (status,))
+        if not isinstance(content_type, str) or not content_type:
+            raise ValueError("answer: content_type must be a non-empty string, got %r" % (content_type,))
+        if not isinstance(data, bytes):
+            raise TypeError("answer: data must be bytes, got %s" % type(data).__name__)
+        self._answer = Answer(status, content_type, data)
+
+    def last_turn_message(self):
+        """The body's last user or assistant message, past Claude Code's trailing role-system notices, or None."""
+        return last_turn_message(self._body)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,7 +187,11 @@ class Chain:
             ctx._module = None
 
     def run_request(self, ctx, req):
-        """(bytes to send upstream, notes): the original bytes unless a hook marked a change."""
+        """(bytes to send upstream, notes): the original bytes unless a hook marked a change.
+
+        A hook that answers ends the run: the original bytes, nothing serialized, the notes closed by
+        ` answered={NAME}`; a hook that fails leaves no answer.
+        """
         model = req.body.get("model", _MISSING) if req.body is not None else _MISSING
         notes, marker = [], None
         for m in self.modules:
@@ -161,9 +206,13 @@ class Chain:
                 ok = False
                 self.fail(m, "on_request", TypeError("returned %s, not str or None" % type(note).__name__))
             if not ok:
+                req._answer = None
                 return req.raw, []
             if note:
                 notes.append(note)
+            if req.answered is not None:
+                notes.append(" answered=%s" % m.NAME)
+                return req.raw, notes
             if req.changed and not was_changed:
                 marker = m
         if not req.changed:

@@ -62,3 +62,25 @@ class ToolsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tools.translate_tools({'tools': [{'name': 'a', 'input_schema': {}},
                                              {'name': 'a', 'input_schema': {}, 'defer_loading': True}]})
+
+    def test_added_tools_are_lowered_in_order_once_and_skip_taken_names(self):
+        long = 'mcp__' + 'x' * 85
+
+        def block(name, **extra):
+            return {'type': 'tool_addition', 'tool': {'type': 'tool_definition', 'definition': dict(
+                name=name, description='Does it.', input_schema={'type': 'object'}, **extra)}}
+        body = {'messages': [
+            {'role': 'user', 'content': [block('ignored_user')]},
+            {'role': 'system', 'content': 'plain text'},
+            {'role': 'system', 'content': [{'type': 'text', 'text': 'x'}, block('first'), block(long), block('first'),
+                                           block('inline'), block('DeferredToolPlaceholder'), {'type': 'tool_addition'}]}]}
+        reverse = {}
+        added = tools.added_tools(body, {'inline'}, reverse)
+        self.assertEqual(list(added), ['first', long])
+        self.assertEqual(added['first'], {'type': 'function', 'name': 'first', 'description': 'Does it.', 'strict': False,
+                                          'parameters': {'type': 'object', 'properties': {}}})
+        self.assertEqual(added[long]['name'], tools.short_name(long))
+        self.assertEqual(reverse, {tools.short_name(long): long})
+        self.assertEqual(tools.added_name(block('first')), 'first')
+        self.assertIsNone(tools.added_name({'type': 'tool_addition', 'tool': {'type': 'tool_definition'}}))
+        self.assertIsNone(tools.added_name({'type': 'text', 'text': 'x'}))

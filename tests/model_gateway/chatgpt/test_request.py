@@ -323,6 +323,67 @@ class RequestTest(unittest.TestCase):
                          ['message', 'message', 'function_call', 'function_call_output', 'message'])
 
 
+    def addition_body(self, *additions, text='Docs connected.'):
+        """A Claude Code request whose system message mid-conversation holds a text block and tool_addition blocks."""
+        def addition(name, schema=None):
+            return {'type': 'tool_addition', 'tool': {'type': 'tool_definition', 'definition': {
+                'name': name, 'description': 'Does ' + name + '.', 'input_schema': schema or {'type': 'object'}}}}
+        blocks = [{'type': 'text', 'text': text}] + [addition(*(a if isinstance(a, tuple) else (a,))) for a in additions]
+        return {'tools': [{'name': 'Bash', 'description': 'Run.', 'input_schema': {'type': 'object'}}], 'system': 'Help.',
+                'messages': [{'role': 'user', 'content': 'Start.'}, {'role': 'system', 'content': blocks},
+                             {'role': 'user', 'content': 'Go on.'}]}
+
+    def test_tool_additions_become_additional_tools_items_at_their_position(self):
+        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+        schema = {'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id']}
+        body = self.addition_body(('docs_batch', schema), 'docs_guide')
+        value, translated = self.result(body, **lite)
+        self.assertEqual([x['type'] for x in value['input']],
+                         ['additional_tools', 'message', 'message', 'message', 'additional_tools', 'additional_tools',
+                          'message'])
+        self.assertEqual(value['input'][3]['content'], [{'type': 'input_text', 'text': 'Docs connected.'}])
+        self.assertEqual(value['input'][4], {'type': 'additional_tools', 'role': 'developer', 'tools': [
+            {'type': 'function', 'name': 'docs_batch', 'description': 'Does docs_batch.', 'strict': False,
+             'parameters': schema}]})
+        self.assertEqual([t['name'] for t in value['input'][5]['tools']], ['docs_guide'])
+        self.assertNotIn('[unsupported', translated.body_bytes.decode())
+        before = dict(body, messages=body['messages'][:1])
+        first, _ = self.result(before, **lite)
+        self.assertEqual(first['input'][:2], value['input'][:2])
+        self.assertEqual(first['input'][0]['tools'], value['input'][0]['tools'])
+
+    def test_tool_additions_in_a_model_without_lite_join_its_tools_and_leave_no_text(self):
+        body = self.addition_body('docs_batch', 'docs_guide')
+        body['messages'][1]['content'] = body['messages'][1]['content'][1:]
+        value, translated = self.result(body)
+        self.assertEqual([t['name'] for t in value['tools']], ['Bash', 'docs_batch', 'docs_guide'])
+        self.assertEqual([x['type'] for x in value['input']], ['message', 'message', 'message'])
+        self.assertNotIn('[unsupported', translated.body_bytes.decode())
+
+    def test_a_tool_addition_is_delivered_once_stays_reversible_and_collides_loudly(self):
+        long = 'mcp__' + 'z' * 85
+        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+        body = self.addition_body(long, 'Bash', 'docs_batch')
+        body['messages'].append(dict(body['messages'][1]))
+        value, translated = self.result(body, **lite)
+        added = [t['name'] for x in value['input'][1:] if x['type'] == 'additional_tools' for t in x['tools']]
+        self.assertEqual(added, [tools.short_name(long), 'docs_batch'])
+        self.assertEqual(translated.tool_names, {tools.short_name(long): long})
+        clash = self.addition_body(long)
+        clash['tools'].append({'name': tools.short_name(long), 'input_schema': {'type': 'object'}})
+        with self.assertRaises(ValueError):
+            self.result(clash, **lite)
+
+    def test_a_malformed_tool_addition_stays_a_placeholder(self):
+        for block in [{'type': 'tool_addition'}, {'type': 'tool_addition', 'tool': {'type': 'tool_definition',
+                                                                                    'definition': {'name': ''}}}]:
+            with self.subTest(block=block):
+                body = {'messages': [{'role': 'system', 'content': [block]}]}
+                value, _ = self.result(body, slug='gpt-6-sol', responses_lite=True)
+                self.assertEqual(value['input'], [{'type': 'message', 'role': 'developer', 'content': [
+                    {'type': 'input_text', 'text': '[unsupported tool_addition]'}]}])
+
+
 class AgentContractRouteTest(unittest.TestCase):
     setUp = route_tests.RouteTest.setUp
     jwt = route_tests.RouteTest.jwt

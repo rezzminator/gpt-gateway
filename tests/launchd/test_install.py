@@ -7,7 +7,7 @@ import unittest
 from tests import jail
 from tests.launchd.stub import Host
 
-FIRST_SETTINGS = {"capture_dir": None, "middleware": []}
+FIRST_SETTINGS = {"capture_dir": None, "middleware": [{"module": "status_label"}]}
 
 
 class InstallTest(unittest.TestCase):
@@ -25,6 +25,7 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(h.dest, "middleware")))
         with open(os.path.join(h.dest, "settings.json")) as f:
             self.assertEqual(json.load(f), FIRST_SETTINGS)
+        self.assertEqual(self.shipped(h), self.source("status_label.py"))
         self.assertEqual(h.plist_value("Label"), "local.model-gateway")
         self.assertEqual(h.plist_value("EnvironmentVariables.MODEL_GATEWAY_PORT"), str(h.port))
         self.assertEqual(h.plist_value("EnvironmentVariables.MODEL_GATEWAY_LOG"),
@@ -47,11 +48,21 @@ class InstallTest(unittest.TestCase):
                 with open(installed, "rb") as actual, open(os.path.join(jail.ROOT, name), "rb") as source:
                     self.assertEqual(actual.read(), source.read())
 
+    def shipped(self, h, name="status_label.py"):
+        with open(os.path.join(h.dest, "middleware", name), "rb") as f:
+            return f.read()
+
+    def source(self, name):
+        with open(os.path.join(jail.ROOT, "middleware", name), "rb") as f:
+            return f.read()
+
     def test_an_update_keeps_a_valid_settings_file_with_its_middleware(self):
         h = Host(self)
         self.assertEqual(h.install()[0], 0)
         with open(os.path.join(h.dest, "middleware", "model_note.py"), "w") as f:
             f.write('NAME = "model-note"\n')
+        with open(os.path.join(h.dest, "middleware", "status_label.py"), "w") as f:
+            f.write('NAME = "status-label"\n# an older copy\n')
         mine = {"capture_dir": None, "middleware": [{"module": "model_note"}]}
         with open(os.path.join(h.dest, "settings.json"), "w") as f:
             json.dump(mine, f)
@@ -59,7 +70,8 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         with open(os.path.join(h.dest, "settings.json")) as f:
             self.assertEqual(json.load(f), mine)
-        self.assertTrue(os.path.isfile(os.path.join(h.dest, "middleware", "model_note.py")))
+        self.assertEqual(self.shipped(h, "model_note.py"), b'NAME = "model-note"\n')
+        self.assertEqual(self.shipped(h), self.source("status_label.py"))
 
     def test_an_invalid_settings_file_stops_the_update(self):
         h = Host(self)
