@@ -74,7 +74,7 @@ facade env model_gateway/env.py '\bos\.environ\b|\bgetenv\(|from os import .*env
 facade clock model_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter)\(|^[[:space:]]*from time import'
 facade log model_gateway/log.py '^[[:space:]]*(import|from) logging\b|\blogging\.|open\([^)]*["'"'"']a[b+]?["'"'"']'
 facade settings model_gateway/settings.py '["'"'"']settings\.json["'"'"']'
-facade upstream model_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\('
+facade upstream model_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\(|\bcreate_connection\('
 facade capture model_gateway/capture.py '[1-5]-(request|response)(\.sent)?\.(json|body)'
 
 census spelling-predecessor all -noiE 'adv[i]sor'

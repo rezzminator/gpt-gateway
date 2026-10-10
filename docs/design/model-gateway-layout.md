@@ -30,7 +30,8 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | headers | the secret headers, the hop-by-hop set, the read-only `ctx.headers` mapping, the debug header pick | `model_gateway/headers.py` | assumed: the secret set changes once, for capture and hooks alike |
 | events | splitting an SSE stream into events across chunk boundaries; the one-call JSON event | `model_gateway/events.py` | assumed: changes only with the SSE wire format |
 | capture | the capture folder layout, secret redaction, sequence numbers | `model_gateway/capture.py` | assumed: the layout and its file names change together |
-| upstream | the per-thread upstream connection, the one fresh retry, TLS | `model_gateway/upstream.py` | assumed: never co-changes with the hooks |
+| upstream | the per-thread upstream connection, the one fresh retry, TLS, the WebSocket upgrade | `model_gateway/upstream.py` | assumed: never co-changes with the hooks |
+| frames | RFC 6455 frames on an upgraded socket: masking, fragments, pings, closes, the idle check | `model_gateway/frames.py` | assumed: the wire format changes alone |
 | proxy | one exchange: read the body (chunked included), run the hooks, forward, relay chunk by chunk, the request log line | `model_gateway/proxy.py` | assumed: the exchange's steps co-change, so they are one unit (see § Tree, flow order) |
 | health | the health line | `model_gateway/health.py` | assumed: changes with the health contract only |
 | server | the listening socket with `SO_REUSEPORT`, in-flight tracking, SIGTERM drain | `model_gateway/server.py` | assumed: graceful restart and drain change together |
@@ -51,7 +52,8 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt errors | error decisions and retry backoff | `model_gateway/chatgpt/errors.py` | assumed: status and retry policy co-change |
 | chatgpt estimate | per-lane token estimate calibration | `model_gateway/chatgpt/estimate.py` | assumed: measurement and estimate co-change |
 | chatgpt identity | Codex client version and identity headers | `model_gateway/chatgpt/identity.py` | assumed: OAuth and backend share identity |
-| chatgpt client | Responses and models HTTP requests | `model_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
+| chatgpt client | Responses over the WebSocket or HTTP, and models requests | `model_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
+| chatgpt websocket | the Responses WebSocket: per-lane socket pool, response.create, the answer the route reads | `model_gateway/chatgpt/websocket.py` | assumed: socket lifecycle and Codex's WebSocket contract co-change |
 | chatgpt route | routing decision, attempts, stream commit, lanes | `model_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
 | chatgpt response | the response-like object the relay reads, its reader thread | `model_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
 | example | the minimal middleware, the contract's executable documentation | `examples/middleware/model_note.py` | assumed: changes with the contract |
@@ -79,7 +81,8 @@ model_gateway/hooks.py                    Context, Request, Result, Chain
 model_gateway/headers.py                  Headers, SECRET, HOP, debug_headers
 model_gateway/events.py                   EventSplitter, json_event
 model_gateway/capture.py                  façade: Capture, Sequence
-model_gateway/upstream.py                 façade: Upstream, UpstreamError
+model_gateway/upstream.py                 façade: Upstream, UpstreamError, Upgrade
+model_gateway/frames.py                   WebSocket, mask, parse_frame: RFC 6455 frames on an upgraded socket
 model_gateway/proxy.py                    Handler
 model_gateway/health.py                   health_line
 model_gateway/server.py                   Server, Drain, serve
@@ -102,6 +105,7 @@ model_gateway/chatgpt/errors.py           Decision, classify, backoff
 model_gateway/chatgpt/estimate.py         Estimator
 model_gateway/chatgpt/identity.py         CODEX_CLIENT_VERSION, headers
 model_gateway/chatgpt/client.py           separate ChatGPT Upstream, responses and models
+model_gateway/chatgpt/websocket.py        Sockets, Answer, Refusal, message: the Responses WebSocket
 model_gateway/chatgpt/route.py            decision, retries, Lane: estimator and turn state
 model_gateway/chatgpt/response.py         Response, Reader: the relay's response object and reader thread
 examples/middleware/model_note.py         NAME "model-note", SETTINGS enabled, on_request
@@ -119,11 +123,11 @@ tests/fakes.py                            fake upstreams (SSE, split SSE, slow S
 tests/test_gateway.py                     ↔ gateway.py
 tests/test_jail.py                        ↔ tests/jail.py
 tests/model_gateway/__init__.py
-tests/model_gateway/test_{cli,env,clock,log,settings,middleware,hooks,headers,events,capture,upstream,proxy,health,server,runtime,harness}.py
+tests/model_gateway/test_{cli,env,clock,log,settings,middleware,hooks,headers,events,capture,upstream,frames,proxy,health,server,runtime,harness}.py
 tests/model_gateway/chatgpt/__init__.py
 tests/model_gateway/chatgpt/test_codex_login.py
 tests/model_gateway/chatgpt/test_response.py
-tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route}.py
+tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,websocket}.py
 tests/model_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py
@@ -171,13 +175,13 @@ The census of the product spelling exempts this document alone, since its glossa
 | clock | `model_gateway/clock.py` | `time.time`, `time.sleep`, `time.strftime`, `time.localtime`, `time.monotonic` |
 | logging | `model_gateway/log.py` | appending to the log file, rotation, the `logging` module |
 | settings | `model_gateway/settings.py` | reading `settings.json` and its file name |
-| upstream HTTP | `model_gateway/upstream.py` | `http.client.HTTPConnection`, `HTTPSConnection`, `ssl.create_default_context` |
+| upstream HTTP | `model_gateway/upstream.py` | `http.client.HTTPConnection`, `HTTPSConnection`, `ssl.create_default_context`, `socket.create_connection` |
 | capture writes | `model_gateway/capture.py` | the capture file names and their writes |
 | test scratch root | `tests/jail.py` | `tempfile.mkdtemp`, `mkstemp`, `TemporaryDirectory`, `NamedTemporaryFile` in tests |
 
 The harness creates its own temporary log file through `tempfile`; it is production code, so the test-jail count does not cover it.
 
-The ChatGPT route introduces no new primitive façade: it uses `model_gateway/upstream.py` for its separate HTTP client, `model_gateway/env.py` for its knobs and `model_gateway/clock.py` for time and backoff. Logging and capture continue through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
+The ChatGPT route introduces no new primitive façade: it uses `model_gateway/upstream.py` for its separate HTTP client and its WebSocket upgrades, `model_gateway/env.py` for its knobs and `model_gateway/clock.py` for time and backoff. Logging and capture continue through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
 
 ## 5. Registries
 

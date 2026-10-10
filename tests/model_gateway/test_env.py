@@ -69,6 +69,13 @@ class CoreEnvTest(unittest.TestCase):
                 env.CoreEnv.parse({name: raw})
             self.assertIn("env " + name, str(cm.exception))
 
+    def test_the_chatgpt_transport_is_websocket_unless_set_to_http(self):
+        home = jail.scratch(self)
+        self.assertEqual(env.ChatGPTEnv.parse(jail.clean_env(home)).transport, "websocket")
+        self.assertEqual(env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_TRANSPORT=" http ")).transport, "http")
+        with self.assertRaisesRegex(env.EnvError, "^env MODEL_GATEWAY_CHATGPT_TRANSPORT: must be websocket or http$"):
+            env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_TRANSPORT="sse"))
+
     def test_snapshot_is_a_copy(self):
         snap = env.snapshot()
         snap["MODEL_GATEWAY_TEST_ONLY"] = "1"

@@ -16,7 +16,7 @@ from tests import fakes, jail
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.home = jail.scratch(self)
-        self.fake = type("FakeChatGPT", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "tokens": {}})
+        self.fake = type("FakeChatGPT", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "tokens": {}, "upgrades": [], "refuse": [], "vanish": [], "hangup": []})
         self.origin = fakes.start_upstream(self, self.fake)
         self.anthropic = fakes.start_upstream(self)
         fakes.Upstream.seen.clear()
@@ -28,7 +28,7 @@ class RouteTest(unittest.TestCase):
                                 id_token="id-invented", account_id="account-invented")
         jail.write_json(self.auth_path, dict(access_token=self.token, refresh_token="refresh-invented",
                         id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
-        self.env = jail.clean_env(self.home, MODEL_GATEWAY_CHATGPT="1", MODEL_GATEWAY_CHATGPT_AUTH_STORE="file",
+        self.env = jail.clean_env(self.home, MODEL_GATEWAY_CHATGPT="1", MODEL_GATEWAY_CHATGPT_AUTH_STORE="file", MODEL_GATEWAY_CHATGPT_TRANSPORT="http",
                         MODEL_GATEWAY_CHATGPT_AUTH_PATH=self.auth_path, MODEL_GATEWAY_CHATGPT_ORIGIN=self.origin,
                         MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN=self.origin, MODEL_GATEWAY_CHATGPT_MODELS_PATH=self.models_path)
         self.headers = {"x-claude-code-session-id": "session-invented", "x-claude-code-agent-id": "agent-invented",
@@ -498,7 +498,7 @@ class CodexRouteTest(unittest.TestCase):
                                      for t in set(threading.enumerate()) - before))
                 lines = self.gpt_lines(rt)
                 if mode == "stale":  # Upstream.send's own fresh retry marks the answer stale
-                    self.assertEqual([line[-16:] for line in lines], ["reused=0 stale=0", "reused=0 stale=1"])
+                    self.assertEqual([line[-31:] for line in lines], ["reused=0 stale=0 transport=http", "reused=0 stale=1 transport=http"])
                 if mode == "held":  # the client had message_stop before the reader's 2 s join gave up
                     self.assertLess(int(re.search(r" total_ms=(\d+) ", lines[0]).group(1)), 2000, lines[0])
                 client.close()
@@ -533,9 +533,9 @@ class CodexRouteTest(unittest.TestCase):
         self.assertNotIn("gpt error", log)
         first, second = self.gpt_lines(rt)
         self.assertIn("attempts=1 ", first)
-        self.assertTrue(first.endswith("reused=0 stale=0"), first)
+        self.assertTrue(first.endswith("reused=0 stale=0 transport=http"), first)
         self.assertIn("attempts=1 ", second)
-        self.assertTrue(second.endswith("reused=0 stale=1"), second)
+        self.assertTrue(second.endswith("reused=0 stale=1 transport=http"), second)
 
     def test_a_fresh_failure_a_body_byte_or_a_second_failure_is_an_ordinary_retry(self):
         turn, cut, byte = ((200, fakes.responses_turn()), (200, fakes.CLOSE_AFTER_HEADERS),
@@ -555,7 +555,7 @@ class CodexRouteTest(unittest.TestCase):
                 self.assertIn("status=transport attempt=1 action=retry body=b'IncompleteRead(0 bytes read)'", log)
                 line = self.gpt_lines(rt)[-1]
                 self.assertIn("attempts=2 ", line)
-                self.assertTrue(line.endswith("reused=0 stale=" + stale), line)
+                self.assertTrue(line.endswith("reused=0 stale=%s transport=http" % stale), line)
 
     def test_gpt_line_ends_with_the_measurement_fields(self):
         self.fake.script = [(200, fakes.responses_turn(reasoning=3)), (200, fakes.responses_turn())]
@@ -563,7 +563,7 @@ class CodexRouteTest(unittest.TestCase):
         rt, port = self.gateway()
         self.keepalive(port, 2)
         pattern = re.compile(r"input=100 cached=60 ratio=0\.600 attempts=1 out=8 reasoning=(\S+) ttfb_ms=(\d+) "
-                             r"upstream_ms=(\d+) total_ms=(\d+) reused=([01]) stale=0$")
+                             r"upstream_ms=(\d+) total_ms=(\d+) reused=([01]) stale=0 transport=http$")
         first, second = (pattern.search(line) for line in self.gpt_lines(rt))
         self.assertEqual((first.group(1), first.group(5)), ("3", "0"))
         self.assertEqual((second.group(1), second.group(5)), ("-", "1"))
@@ -588,7 +588,7 @@ class CodexRouteTest(unittest.TestCase):
             route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1, notes=("a \"b\"",)),
                             translator, estimator, 1, 200, reader, None, measure)
         self.assertEqual(lines, ["    gpt lane=lane slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1 out=8 "
-                                 'reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1 notes=["a \\"b\\""]'])
+                                 'reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1 transport=http notes=["a \\"b\\""]'])
 
     def test_ttfb_counts_from_the_gateway_receipt_of_the_request(self):
         jail.write_json(self.models_path, fakes.CHATGPT_MODELS)

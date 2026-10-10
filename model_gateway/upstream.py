@@ -1,4 +1,4 @@
-"""The upstream API: one connection per serving thread, kept alive, with one fresh retry.
+"""The upstream API: one connection per serving thread, kept alive, with one fresh retry; and WebSocket upgrades.
 
 A pooled connection idle past IDLE_SECONDS is closed before use, never sent on. A pooled connection
 the server closed fails on its next use; the request is retried once on a new
@@ -6,8 +6,13 @@ connection; `reuse()` reports whether the last send rode a kept-alive connection
 fired. Any other connection error, and a response http.client cannot parse, is final, and the caller
 answers 502. Request headers go as an ordered list of pairs, so a header sent twice goes twice. Every socket
 probes its path with TCP keepalive, so a path that died without a FIN or RST fails the read in seconds.
+`websocket()` upgrades a fresh connection (RFC 6455) and hands the caller the socket to keep; its frames are
+`model_gateway/frames.py`'s.
 """
+import base64
+import hashlib
 import http.client
+import os
 import socket
 import ssl
 import sys
@@ -33,6 +38,9 @@ KEEPALIVE_OPTIONS = tuple((option, value) for option, value in (
     (getattr(socket, "TCP_KEEPCNT", None), KEEPALIVE_PROBES)) if option is not None)
 RETRYABLE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError,
              http.client.CannotSendRequest, http.client.ResponseNotReady)
+ACCEPT_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 § 1.3
+CONNECT_SECONDS = 15  # codex-rs/model-provider-info/src/lib.rs:71, DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS
+HEAD_LIMIT = 65536  # an upgrade answer's headers, and the part of a refusal's body kept
 
 
 def is_stale(error):
@@ -50,19 +58,24 @@ class UpstreamError(Exception):
         self.message = message
 
 
+def keepalive(sock, log):
+    """Turn TCP keepalive on for `sock`; a refused option is logged, never fatal."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for option, value in KEEPALIVE_OPTIONS:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+    except OSError as e:
+        log("    upstream keepalive failed: %r" % (e,))
+
+
 class _Keepalive:
-    """Turns TCP keepalive on for the connection's socket as it connects; a refused option is logged, never fatal."""
+    """Turns TCP keepalive on for the connection's socket as it connects."""
 
     log = staticmethod(lambda line: None)
 
     def connect(self):
         super().connect()
-        try:
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            for option, value in KEEPALIVE_OPTIONS:
-                self.sock.setsockopt(socket.IPPROTO_TCP, option, value)
-        except OSError as e:
-            self.log("    upstream keepalive failed: %r" % (e,))
+        keepalive(self.sock, self.log)
 
 
 class KeepaliveHTTPConnection(_Keepalive, http.client.HTTPConnection):
@@ -71,6 +84,68 @@ class KeepaliveHTTPConnection(_Keepalive, http.client.HTTPConnection):
 
 class KeepaliveHTTPSConnection(_Keepalive, http.client.HTTPSConnection):
     pass
+
+
+class Upgrade:
+    """A WebSocket upgrade's answer: on 101 the upgraded `socket` and the bytes read past the answer (`pending`);
+    otherwise its status, headers and up to HEAD_LIMIT body bytes."""
+
+    def __init__(self, status, headers, body=b"", socket=None, pending=b""):
+        self.status, self.headers, self.body, self.socket, self.pending = status, headers, body, socket, pending
+
+
+def header(headers, name):
+    """The first value of `name` in (name, value) pairs, case-insensitively, or None."""
+    return next((v for k, v in headers if k.lower() == name), None)
+
+
+def _answer_head(head):
+    lines = head.decode("latin-1").split("\r\n")
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        raise UpstreamError("upstream protocol error: status line %r" % lines[0][:100])
+    pairs = [line.partition(":") for line in lines[1:] if line]
+    return int(parts[1]), [(name.strip(), value.strip()) for name, _, value in pairs]
+
+
+def _answer_body(sock, data, headers):
+    data = bytearray(data)
+
+    def more():
+        try:
+            got = sock.recv(65536)
+        except (OSError, socket.timeout):
+            return False  # the status and headers already arrived; a body cut short is still their answer
+        data.extend(got)
+        return bool(got)
+
+    length = header(headers, "content-length")
+    if length is not None and length.isdigit():
+        while len(data) < min(int(length), HEAD_LIMIT) and more():
+            pass
+        return bytes(data[:min(int(length), HEAD_LIMIT)])
+    if "chunked" not in (header(headers, "transfer-encoding") or "").lower():
+        while len(data) < HEAD_LIMIT and more():
+            pass
+        return bytes(data[:HEAD_LIMIT])
+    body, at = bytearray(), 0
+    while len(body) < HEAD_LIMIT:
+        end = data.find(b"\r\n", at)
+        if end < 0:
+            if more():
+                continue
+            break
+        try:
+            size = int(bytes(data[at:end]).split(b";")[0], 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        while len(data) < end + 2 + size and more():
+            pass
+        body += data[end + 2:end + 2 + size]
+        at = end + 4 + size
+    return bytes(body[:HEAD_LIMIT])
 
 
 class Upstream:
@@ -155,3 +230,48 @@ class Upstream:
             except http.client.HTTPException as e:
                 self.drop()
                 raise UpstreamError("upstream protocol error: %r" % e)
+
+    def websocket(self, path, headers):
+        """An Upgrade for `path` on a fresh connection, or UpstreamError when none answered.
+
+        headers: ((name, value), ...) after the upgrade's own; the socket, once upgraded, reads with TIMEOUT_SECONDS.
+        """
+        host = self.origin.hostname
+        port = self.origin.port or (443 if self.tls is not None else 80)
+        key = base64.b64encode(os.urandom(16)).decode()
+        lines = ["GET %s HTTP/1.1" % path, "Host: " + (host if self.origin.port is None else "%s:%d" % (host, port)),
+                 "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: " + key, "Sec-WebSocket-Version: 13"]
+        lines += ["%s: %s" % pair for pair in headers]
+        sock = None
+        try:
+            sock = socket.create_connection((host, port), timeout=CONNECT_SECONDS)
+            keepalive(sock, self.log)
+            if self.tls is not None:
+                sock = self.tls.wrap_socket(sock, server_hostname=host)
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            data = bytearray()
+            while b"\r\n\r\n" not in data:
+                if len(data) > HEAD_LIMIT:
+                    raise UpstreamError("upstream protocol error: upgrade answer headers exceed 64 KiB")
+                got = sock.recv(65536)
+                if not got:
+                    raise UpstreamError("upstream connection failed: closed before the upgrade answer")
+                data += got
+            head, _, rest = bytes(data).partition(b"\r\n\r\n")
+            status, answer = _answer_head(head)
+            if status != 101:
+                return Upgrade(status, answer, _answer_body(sock, rest, answer))
+            accept = base64.b64encode(hashlib.sha1(key.encode() + ACCEPT_GUID).digest()).decode()
+            if header(answer, "sec-websocket-accept") != accept:
+                raise UpstreamError("upstream protocol error: the upgrade answer's Sec-WebSocket-Accept is wrong")
+            sock.settimeout(TIMEOUT_SECONDS)
+            upgraded, sock = sock, None
+            return Upgrade(101, answer, socket=upgraded, pending=rest)
+        except (OSError, socket.timeout) as e:
+            raise UpstreamError("upstream unreachable: %r" % e)
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError as e:
+                    self.log("    upstream close failed: %r" % (e,))

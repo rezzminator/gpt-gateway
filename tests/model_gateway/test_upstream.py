@@ -1,12 +1,12 @@
 """Tests for model_gateway.upstream: a pooled connection the server closed gets one fresh retry; every socket probes
-its path with TCP keepalive."""
+its path with TCP keepalive; a WebSocket upgrade follows RFC 6455."""
 import json
 import socket
 import threading
 import unittest
 import unittest.mock
 
-from model_gateway import upstream
+from model_gateway import frames, upstream
 from model_gateway.upstream import Upstream, UpstreamError
 from tests import fakes, jail
 from tests.fakes import ClosingUpstream
@@ -44,7 +44,7 @@ class UpstreamTest(unittest.TestCase):
 
     def test_a_kept_alive_connection_idle_past_the_limit_is_replaced_before_use(self):
         from unittest import mock
-        from model_gateway import upstream
+        from model_gateway import frames, upstream
 
         class Keeping(ClosingUpstream):
             def do_POST(self):
@@ -163,6 +163,31 @@ class UpstreamTest(unittest.TestCase):
     def test_https_gets_a_tls_context(self):
         self.assertIsNotNone(Upstream("https://example.invalid").tls)
         self.assertIsNone(Upstream("http://example.invalid").tls)
+
+
+
+class UpgradeTest(unittest.TestCase):
+    def test_upgrade_checks_the_accept_key_and_returns_a_refusal_with_its_body(self):
+        fake = type("UpgradeFake", (fakes.ChatGPTUpstream,), {"seen": [], "script": [], "upgrades": [], "refuse": [426],
+                                                              "vanish": [], "hangup": []})
+        origin = fakes.start_upstream(self, fake)
+        up = Upstream(origin)
+        refused = up.websocket("/backend-api/codex/responses", (("x-invented", "1"),))
+        self.assertEqual((refused.status, refused.body, refused.socket), (426, b'{"detail":"upgrade refused"}', None))
+        upgraded = up.websocket("/backend-api/codex/responses", (("x-invented", "2"),))
+        self.addCleanup(upgraded.socket.close)
+        self.assertEqual(upgraded.status, 101)
+        self.assertEqual(upstream.header(upgraded.headers, "upgrade"), "websocket")
+        self.assertEqual([(h["x-invented"], h["upgrade"], h["sec-websocket-version"]) for h in fake.upgrades],
+                         [("1", "websocket", "13"), ("2", "websocket", "13")])
+        ws = frames.WebSocket(upgraded.socket, upgraded.pending)
+        ws.send(b'{"type":"response.create"}')
+        self.assertEqual(json.loads(ws.receive())["type"], "response.created")
+        with unittest.mock.patch("model_gateway.upstream.ACCEPT_GUID", b"wrong-guid"):
+            with self.assertRaisesRegex(UpstreamError, "Sec-WebSocket-Accept is wrong"):
+                up.websocket("/backend-api/codex/responses", ())
+        with self.assertRaisesRegex(UpstreamError, "unreachable"):
+            Upstream("http://127.0.0.1:%d" % jail.free_port()).websocket("/", ())
 
 
 if __name__ == "__main__":

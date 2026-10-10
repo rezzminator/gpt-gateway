@@ -13,7 +13,7 @@ from tests import fakes
 class ClientTest(unittest.TestCase):
     def test_responses_and_models_use_codex_headers(self):
         fake = type("ClientFake", (fakes.ChatGPTUpstream,), {"seen": [], "script": []})
-        client = Client(SimpleNamespace(origin=fakes.start_upstream(self, fake)), lambda line: None)
+        client = Client(SimpleNamespace(origin=fakes.start_upstream(self, fake), transport="http"), lambda line: None)
         self.addCleanup(client.drop)
         creds = Credentials("invented-bearer", "invented-account")
         for lite in (True, False):
@@ -29,7 +29,7 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
 
     def test_drop_cancels_the_reader_before_closing_connection(self):
-        client = Client(SimpleNamespace(origin="http://127.0.0.1:1"), lambda line: None)
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
         reader = Mock()
         client.watch(reader)
         client.drop()

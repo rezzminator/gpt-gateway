@@ -1,12 +1,17 @@
 """Fake upstreams, recording middleware, and an in-process gateway serving against them."""
+import base64
+import hashlib
 import http.client
 import json
 import os
+import socket
+import struct
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from model_gateway import frames
 from model_gateway.runtime import Runtime
 from model_gateway.server import Server
 from tests import jail
@@ -265,8 +270,20 @@ def responses_turn(tool=False, reasoning=None):
     return b"".join(frames)
 
 
+RFC6455_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 § 1.3, independent of the code under test
+
+
+def sse_data(stream):
+    """The JSON texts of an SSE stream's data lines, in order."""
+    return [line[6:] for block in stream.split(b"\n\n") for line in block.split(b"\n") if line.startswith(b"data: ")]
+
+
 class ChatGPTUpstream(BaseHTTPRequestHandler):
-    """Invented catalog, scripted Responses and OAuth; each test supplies an isolated subclass."""
+    """Invented catalog, scripted Responses and OAuth; each test supplies an isolated subclass.
+
+    A GET upgrading /backend-api/codex/responses to a WebSocket serves the same script, one response.create message
+    per entry: a status other than 200 as a wrapped error event, a Cut as its events and then a hang-up, an issued
+    turn-state token as a response.metadata event first. `seen` records each message with its upgrade's headers."""
 
     protocol_version = "HTTP/1.1"
     seen = []
@@ -275,6 +292,10 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     models_body = CHATGPT_MODELS
     tokens = {}
     issued = []  # per Responses request, the x-codex-turn-state its response sends, or None
+    upgrades = []  # per WebSocket upgrade, its request headers
+    refuse = []  # per WebSocket upgrade, a status answered in place of 101
+    vanish = []  # per WebSocket message, True: the socket closes without an answer
+    hangup = []  # per WebSocket message answered, True: the socket closes after the answer
 
     def log_message(self, *args):
         pass
@@ -314,4 +335,80 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    do_GET = do_POST
+    def do_GET(self):
+        if (self.headers.get("upgrade") or "").lower() == "websocket":
+            return self.websocket()
+        return self.do_POST()
+
+    def websocket(self):
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        self.upgrades.append(headers)
+        self.close_connection = True
+        if self.refuse:
+            data = b'{"detail":"upgrade refused"}'
+            self.send_response(self.refuse.pop(0))
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        accept = base64.b64encode(hashlib.sha1(headers["sec-websocket-key"].encode() + RFC6455_GUID).digest())
+        self.send_response(101)
+        for name, value in (("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Accept", accept.decode())):
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.flush()
+        while True:
+            data = self.ws_receive()
+            if data is None:
+                return
+            self.seen.append({"method": "WS", "path": self.path, "headers": headers, "body": data})
+            if self.vanish and self.vanish.pop(0):
+                return self.connection.shutdown(socket.SHUT_RDWR)
+            status, payload, *extra = self.script.pop(0) if self.script else (200, responses_turn())
+            if isinstance(payload, Cut):
+                for text in sse_data(payload.sent):
+                    self.ws_send(text)
+                return self.connection.shutdown(socket.SHUT_RDWR)
+            if status != 200:
+                event = dict(payload if isinstance(payload, dict) else {"detail": str(payload)}, type="error", status=status)
+                if extra:
+                    event["headers"] = extra[0]
+                self.ws_send(json.dumps(event).encode())
+                continue
+            token = self.issued.pop(0) if self.issued else None
+            if token:
+                self.ws_send(json.dumps({"type": "response.metadata", "headers": {"x-codex-turn-state": token}}).encode())
+            for text in sse_data(payload):
+                self.ws_send(text)
+            if self.hangup and self.hangup.pop(0):
+                return self.connection.shutdown(socket.SHUT_RDWR)
+
+    def ws_receive(self):
+        """The next whole message a client sent masked, or None once it closed, hung up or sent an unmasked frame."""
+        parts = []
+        while True:
+            head = self.rfile.read(2)
+            if len(head) < 2 or not head[1] & 0x80:
+                return None
+            length = head[1] & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self.rfile.read(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self.rfile.read(8))[0]
+            key = self.rfile.read(4)
+            payload = frames.mask(self.rfile.read(length), key)
+            opcode = head[0] & 0x0F
+            if opcode == frames.CLOSE:
+                return None
+            if opcode in (frames.PING, frames.PONG):
+                continue
+            parts.append(payload)
+            if head[0] & 0x80:
+                return b"".join(parts)
+
+    def ws_send(self, data, opcode=frames.TEXT):
+        n = len(data)
+        size = bytes([n]) if n < 126 else (bytes([126]) + struct.pack("!H", n) if n < 65536 else bytes([127]) + struct.pack("!Q", n))
+        self.wfile.write(bytes([0x80 | opcode]) + size + data)
+        self.wfile.flush()

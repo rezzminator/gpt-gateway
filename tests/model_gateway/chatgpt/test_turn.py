@@ -52,16 +52,16 @@ class TurnRouteTest(unittest.TestCase):
         other = dict(self.headers, **{"x-claude-code-agent-id": "agent-other"})
         unavailable = (503, {"error": {"message": "unavailable"}})
         steps = [  # messages, ingress headers, (status, issued token) per attempt, the gpt line's ending
-            (START, None, [(200, "ts-1")], "stale=0 turn_state=issued"),
-            (START + [CALL, RESULT], None, [(200, "ts-2")], "stale=0 turn_state=sent"),
-            (START + [CALL, RESULT, CALL, RESULT, NOTICE], None, [(200, "ts-notice")], "stale=0 turn_state=sent"),
-            (START + [CALL, RESULT, CALL, FORK, NOTICE], None, [(200, "ts-fork-notice")], "stale=0"),
-            (START + [CALL, FORK], None, [(200, "ts-fork")], "stale=0"),
-            (START + [CALL, RESULT], other, [(200, None)], "stale=0"),
-            (START + [CALL, RESULT, CALL, RESULT], None, [(503, "ts-error"), (200, None)], "stale=0 turn_state=sent"),
-            (NEXT, None, [(200, None)], "stale=0"),
-            (NEXT + [CALL, RESULT], None, [(200, "ts-3")], "stale=0 turn_state=issued"),
-            (NEXT + [CALL, RESULT, CALL, RESULT], None, [(200, None)], "stale=0 turn_state=sent")]
+            (START, None, [(200, "ts-1")], "stale=0 turn_state=issued transport=http"),
+            (START + [CALL, RESULT], None, [(200, "ts-2")], "stale=0 turn_state=sent transport=http"),
+            (START + [CALL, RESULT, CALL, RESULT, NOTICE], None, [(200, "ts-notice")], "stale=0 turn_state=sent transport=http"),
+            (START + [CALL, RESULT, CALL, FORK, NOTICE], None, [(200, "ts-fork-notice")], "stale=0 transport=http"),
+            (START + [CALL, FORK], None, [(200, "ts-fork")], "stale=0 transport=http"),
+            (START + [CALL, RESULT], other, [(200, None)], "stale=0 transport=http"),
+            (START + [CALL, RESULT, CALL, RESULT], None, [(503, "ts-error"), (200, None)], "stale=0 turn_state=sent transport=http"),
+            (NEXT, None, [(200, None)], "stale=0 transport=http"),
+            (NEXT + [CALL, RESULT], None, [(200, "ts-3")], "stale=0 turn_state=issued transport=http"),
+            (NEXT + [CALL, RESULT, CALL, RESULT], None, [(200, None)], "stale=0 turn_state=sent transport=http")]
         sent = [None, "ts-1", "ts-1", None, None, None, "ts-1", "ts-1", None, None, "ts-3"]  # the header each Responses request carried
         attempts = [attempt for step in steps for attempt in step[2]]
         self.fake.script = [(200, fakes.responses_turn()) if status == 200 else unavailable for status, _ in attempts]

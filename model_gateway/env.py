@@ -87,6 +87,7 @@ CHATGPT_AUTH_ORIGIN = "MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN"
 CHATGPT_AUTH_STORE = "MODEL_GATEWAY_CHATGPT_AUTH_STORE"
 CHATGPT_AUTH_PATH = "MODEL_GATEWAY_CHATGPT_AUTH_PATH"
 CHATGPT_CODEX_AUTH = "MODEL_GATEWAY_CHATGPT_CODEX_AUTH"
+CHATGPT_TRANSPORT = "MODEL_GATEWAY_CHATGPT_TRANSPORT"
 CODEX_HOME = "CODEX_HOME"
 
 
@@ -120,10 +121,11 @@ class ChatGPTEnv:
     """ChatGPT knobs; paths resolve against the supplied HOME mapping."""
 
     def __init__(self, auth_origin, auth_path, auth_store, origin="https://chatgpt.com", models_path=None,
-                 codex_auth=None, home=None):
+                 codex_auth=None, home=None, transport="websocket"):
         self.auth_origin, self.auth_path, self.auth_store = auth_origin, auth_path, auth_store
         self.origin, self.models_path = origin, models_path
         self.codex_auth, self.home = codex_auth, home
+        self.transport = transport
 
     @classmethod
     def parse(cls, environ):
@@ -142,4 +144,7 @@ class ChatGPTEnv:
             codex = chatgpt_path(environ, CHATGPT_CODEX_AUTH, default, resolve=False)
         else:
             codex = None
-        return cls(auth_origin, path, kind, origin, models, codex, value(environ, "HOME"))
+        transport = value(environ, CHATGPT_TRANSPORT) or "websocket"
+        if transport not in ("websocket", "http"):
+            raise EnvError("env %s: must be websocket or http" % CHATGPT_TRANSPORT)
+        return cls(auth_origin, path, kind, origin, models, codex, value(environ, "HOME"), transport)
