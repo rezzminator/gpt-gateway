@@ -20,7 +20,7 @@ class Model:
     reasoning_levels: Tuple[str, ...]
     default_reasoning: Optional[str]
     default_verbosity: Optional[str]
-    supports_summaries: bool
+    reasoning_summary: Optional[str]  # the summary a request names; None sends none
     responses_lite: bool
     service_tiers: Tuple[str, ...]
 
@@ -51,10 +51,18 @@ def parse(models_json) -> dict:
         verbosity = _catalog_string(entry.get('default_verbosity'), 'default_verbosity', nullable=True)
         summaries = _catalog_bool(entry, 'supports_reasoning_summaries', True)
         summary_parameter = _catalog_bool(entry, 'supports_reasoning_summary_parameter', True)
+        summary = _catalog_string(entry.get('default_reasoning_summary', 'auto'), 'default_reasoning_summary')
+        if summary not in _SUMMARIES:
+            raise ValueError('default_reasoning_summary must be one of ' + ', '.join(_SUMMARIES))
         # The bridge's family fallback applies only when the catalog omits its flag.
         lite = _catalog_bool(entry, 'use_responses_lite', slug.rsplit('-', 1)[-1] in ('sol', 'terra', 'luna', 'astra'))
-        models[slug] = Model(slug, window, levels, default, verbosity, summaries and summary_parameter, lite, tiers)
+        sent = summary if summaries and summary_parameter and summary != 'none' else None
+        models[slug] = Model(slug, window, levels, default, verbosity, sent, lite, tiers)
     return models
+
+
+# codex-rs/protocol/src/config_types.rs:65-72 ReasoningSummary; serde default Auto.
+_SUMMARIES = ('auto', 'concise', 'detailed', 'none')
 
 
 # codex-rs/protocol/src/openai_models.rs:195-202,228-232.

@@ -17,7 +17,7 @@ FIXTURES = Path(__file__).parent / 'fixtures'
 class RequestTest(unittest.TestCase):
     def setUp(self):
         self.model = catalog.Model('gpt-example', 272000, ('minimal', 'low', 'medium', 'high', 'xhigh'),
-                                   'medium', 'low', True, False, ('priority',))
+                                   'medium', 'low', 'auto', False, ('priority',))
 
     def result(self, body, **model_changes):
         translation = request.translate(body, dataclasses.replace(self.model, **model_changes), 'lane-example')
@@ -112,7 +112,9 @@ class RequestTest(unittest.TestCase):
                 self.assertEqual(list(value)[:4], ['model', 'stream', 'service_tier', 'input'])
         value, _ = self.result({'output_config': {'effort': 'max'}}, reasoning_levels=('low', 'medium'))
         self.assertEqual(value.get('reasoning'), {'effort': 'medium', 'summary': 'auto'})
-        value, _ = self.result({}, supports_summaries=False, default_verbosity=None, default_reasoning=None)
+        value, _ = self.result({}, reasoning_summary='concise')
+        self.assertEqual(value.get('reasoning'), {'effort': 'medium', 'summary': 'concise'})
+        value, _ = self.result({}, reasoning_summary=None, default_verbosity=None, default_reasoning=None)
         self.assertEqual(value.get('reasoning'), {})
         self.assertEqual(value['text'], {})
 

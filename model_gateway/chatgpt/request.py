@@ -45,8 +45,8 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
     effort = _request_effort(body, model, notes)
     if effort is not None:
         reasoning['effort'] = effort
-    if model.supports_summaries:
-        reasoning['summary'] = 'auto'
+    if model.reasoning_summary is not None:  # codex-rs/core/src/client.rs:880-882
+        reasoning['summary'] = model.reasoning_summary
     if model.responses_lite:
         reasoning['context'] = 'all_turns'
     choice = body.get('tool_choice', {})

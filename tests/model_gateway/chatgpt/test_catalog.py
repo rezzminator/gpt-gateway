@@ -17,7 +17,7 @@ class CatalogTest(unittest.TestCase):
         for envelope in ({'models': [entry]}, {'models': [entry], 'etag': 'synthetic', 'identity': {}}):
             with self.subTest(envelope=envelope):
                 self.assertEqual(catalog.parse(envelope), {'gpt-example': catalog.Model(
-                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', True, False, ('priority',))})
+                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', False, ('priority',))})
 
     def test_lite_fallback_and_explicit_false_and_summary_flags(self):
         for slug in ('gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.5'):
@@ -30,9 +30,22 @@ class CatalogTest(unittest.TestCase):
                 self.assertIn(slug, result)
                 model = result[slug]
                 self.assertEqual(model.responses_lite, slug != 'gpt-5.5' if override is None else override)
-                self.assertFalse(model.supports_summaries)
+                self.assertIsNone(model.reasoning_summary)
         entry = self.entry(supports_reasoning_summaries=True, supports_reasoning_summary_parameter=False)
-        self.assertFalse(catalog.parse({'models': [entry]})['gpt-example'].supports_summaries)
+        self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)
+
+    def test_default_reasoning_summary_is_sent_unless_none(self):
+        # codex-rs/core/src/client.rs:880-882: the request names a summary only when the resolved one is not none.
+        for fields, expected in (({}, 'auto'), ({'default_reasoning_summary': 'none'}, None),
+                                 ({'default_reasoning_summary': 'concise'}, 'concise'),
+                                 ({'default_reasoning_summary': 'detailed', 'supports_reasoning_summary_parameter': False},
+                                  None)):
+            with self.subTest(fields=fields):
+                self.assertEqual(catalog.parse({'models': [self.entry(**fields)]})['gpt-example'].reasoning_summary,
+                                 expected)
+        for bad in ('loud', '', 7, None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                catalog.parse({'models': [self.entry(default_reasoning_summary=bad)]})
 
     def test_nullable_defaults_and_future_effort(self):
         entry = self.entry()
