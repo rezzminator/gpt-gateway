@@ -319,6 +319,8 @@ class RequestTest(unittest.TestCase):
         value, _ = self.result(body)
         self.assertEqual([t['name'] for t in value['tools']],
                          ['Bash', 'ToolSearch', 'WebFetch', 'Monitor', tools.short_name(long)])
+        self.assertEqual([x['type'] for x in value['input']],
+                         ['message', 'message', 'function_call', 'function_call_output', 'message'])
 
 
 class AgentContractRouteTest(unittest.TestCase):

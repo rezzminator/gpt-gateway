@@ -86,6 +86,11 @@ class InstallTest(unittest.TestCase):
         backups = os.path.join(h.home, ".local", "state", "model-gateway", "backups")
         (backup,) = os.listdir(backups)
         self.assertTrue(backup.startswith("settings.json.pre-install-"))
+        chosen = Host(self)
+        chosen.write_claude({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ENABLE_TOOL_SEARCH": "auto:5"}})
+        code, out = chosen.install()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(chosen.read_claude()["env"], {"ENABLE_TOOL_SEARCH": "auto:5"})
 
     def test_bad_options_are_refused(self):
         h = Host(self)

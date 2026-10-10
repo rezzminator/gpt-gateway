@@ -51,6 +51,7 @@ class ToolsTest(unittest.TestCase):
         long = 'mcp__' + 'x' * 85
         body = {'tools': [{'name': 'inline', 'input_schema': {}},
                           {'name': 'late', 'input_schema': {}, 'defer_loading': True},
+                          {'name': 'DeferredToolPlaceholder', 'input_schema': {}, 'defer_loading': True},
                           {'name': long, 'input_schema': {}, 'defer_loading': True},
                           {'name': 'off', 'input_schema': {}, 'defer_loading': False}]}
         converted, deferred, reverse, _ = tools.translate_tools(body)

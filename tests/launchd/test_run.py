@@ -27,11 +27,15 @@ class RunTest(unittest.TestCase):
         self.addCleanup(self.stop)
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.kill()
-            self.proc.wait()
-        if self.proc:
-            self.proc.stderr.close()
+        """Kills run.sh's whole process group: run.sh, its gateways, serving, draining or starting, and their sleeps."""
+        if self.proc is None:
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:  # every process of the group has already exited
+            pass
+        self.proc.wait()
+        self.proc.stderr.close()
 
     def write_settings(self, env):
         with open(self.settings, "w") as f:
@@ -47,7 +51,7 @@ class RunTest(unittest.TestCase):
                              MODEL_GATEWAY_PORT=str(self.port), MODEL_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
                              MODEL_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
         self.proc = subprocess.Popen(["/bin/sh", os.path.join(self.app, "run.sh"), "serve"], env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
 
     def healthy(self):
         try:
@@ -83,6 +87,14 @@ class RunTest(unittest.TestCase):
         settings = self.read_settings()
         self.assertEqual((settings["env"], settings["model"]), ({"KEEP": "1"}, "opus"))
         self.assertFalse(self.healthy())
+
+    def test_the_cleanup_stops_the_gateway_run_sh_started(self):
+        self.write_settings({})
+        self.start()
+        self.assertTrue(jail.wait_for(self.linked), "never linked")
+        gateway = self.health_pid()
+        self.stop()  # the cleanup, run while run.sh still serves, as when an assertion fails mid-test
+        self.assertTrue(jail.wait_for(lambda: self.health_pid() != gateway, 5), "gateway %s outlived its test" % gateway)
 
     def test_missing_python_fails_open(self):
         self.write_settings({"ANTHROPIC_BASE_URL": self.url, "ENABLE_TOOL_SEARCH": "true", "KEEP": "1"})

@@ -43,7 +43,7 @@ edit() {
 }
 
 # Tool search rides the link: Claude Code turns it off behind a non-Anthropic base URL unless this is set. A value the
-# user chose is kept, linked or not; only the "true" this script wrote is removed with the URL.
+# user chose is kept, linked or not; a "true" reads as the one this script wrote and is removed with the URL.
 tool_search() { "$JQ" -r '.env.ENABLE_TOOL_SEARCH // ""' "$SETTINGS" 2>/dev/null; }
 
 link() {
