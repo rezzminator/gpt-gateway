@@ -1,5 +1,5 @@
 """Codex turn-state stickiness: request positions, one lane's token, and the token's life through a real gateway;
-the activity-summary fork's effort through a real gateway."""
+the activity-summary fork's and the compaction request's effort through a real gateway."""
 import json
 import unittest
 from unittest.mock import patch
@@ -12,6 +12,9 @@ ASK = "Describe your most recent action in 3-5 words using present tense (-ing).
 CALL = dict(role="assistant", content=[dict(type="tool_use", id="call_invented", name="lookup", input={})])
 RESULT = dict(role="user", content=[dict(type="tool_result", tool_use_id="call_invented", content="Harbor is sunny")])
 FORK = dict(role="user", content=RESULT["content"] + [dict(type="text", text=ASK)])
+# Claude Code's compaction request: its summary prompt opens with this preamble, after the last tool result or alone.
+COMPACT_ASK = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool."
+COMPACT = dict(role="user", content=RESULT["content"] + [dict(type="text", text=COMPACT_ASK)])
 START = [dict(role="user", content="Look up Harbor")]
 NEXT = START + [CALL, RESULT, dict(role="assistant", content="Sunny."), dict(role="user", content="Now Quay")]
 # Claude Code appends harness notices (a background task finished, hook feedback, the environment) as trailing
@@ -103,6 +106,23 @@ class TurnRouteTest(unittest.TestCase):
                 self.assertEqual(self.send(port, body, headers, path)[0].status, 200)
         self.assertEqual([json.loads(x["body"])["reasoning"].get("effort") for x in self.responses()], sent)
         self.assertIn("gpt drop-reasoning lane=", fakes.logged(rt))
+
+    def test_a_compaction_sends_its_lanes_last_effort_and_never_moves_it(self):
+        # Claude Code sends every compaction request at effort high whatever effort the agent runs at; the backend's
+        # prompt cache keys on effort, so at another effort the summary re-reads the agent's whole context uncached.
+        levels = [dict(effort=effort, description=effort) for effort in ("low", "medium", "high")]
+        self.fake.models_body = dict(models=[dict(fakes.CHATGPT_MODELS["models"][0], supported_reasoning_levels=levels)])
+        jail.write_json(self.models_path, self.fake.models_body)
+        steps = [(START, "low"), (START + [CALL, COMPACT], "high"), (START + [CALL, FORK, NOTICE], "high"),
+                 ([dict(role="user", content=COMPACT_ASK)], "high"), ([dict(role="user", content="Summary: Harbor")], "medium"),
+                 (START + [CALL, RESULT, dict(role="user", content=[dict(type="text", text="Please " + COMPACT_ASK)])], "high")]
+        self.fake.script = [(200, fakes.responses_turn()) for _ in steps]
+        _, port = self.gateway()
+        for messages, effort in steps:
+            body = dict(self.body, messages=messages, output_config=dict(effort=effort))
+            self.assertEqual(self.send(port, body)[0].status, 200)
+        sent = [json.loads(x["body"])["reasoning"].get("effort") for x in self.responses()]
+        self.assertEqual(sent, ["low", "low", "low", "low", "medium", "high"])
 
 
 if __name__ == "__main__":

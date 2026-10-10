@@ -97,9 +97,9 @@ class Lane:
     """What the route keeps per lane key: the token estimator, the turn-state token and the lane's effort."""
     estimator: estimate.Estimator = field(default_factory=estimate.Estimator)
     turn_state: turn.Turn = field(default_factory=turn.Turn)
-    # The effort the lane's last Messages request outside the activity-summary fork sent. Claude Code sends the fork at
-    # the agent's declared effort, which an effort tag may have changed for its turns; the backend's prompt cache keys
-    # on effort, so the fork sends this one and rides the lane's cache.
+    # The effort the lane's last Messages request outside the activity-summary fork and the compaction request sent.
+    # Claude Code sends the fork at the agent's declared effort, which an effort tag may have changed for its turns, and
+    # every compaction at high; the backend's prompt cache keys on effort, so both send this one and ride the lane's cache.
     effort: Optional[str] = None
 
 
@@ -170,8 +170,9 @@ class Route:
         estimator = state.estimator
         try:
             where = turn.position(body)
+            summary = where == turn.FORK or request.compaction(body)  # sent at another effort than the lane's turns
             with self.lock:
-                pinned = state.effort if where == turn.FORK else None
+                pinned = state.effort if summary else None
             translation = request.translate(body, model, key, pinned)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
@@ -181,7 +182,7 @@ class Route:
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
         with self.lock:
-            if where != turn.FORK:
+            if not summary:
                 state.effort = translation.effort
             state.turn_state.begin(where)
         refreshed = dropped = False

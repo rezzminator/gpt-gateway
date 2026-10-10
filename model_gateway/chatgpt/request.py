@@ -15,6 +15,8 @@ _EFFORTS = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
 _IMAGE_MEDIA = ('image/png', 'image/jpeg', 'image/gif', 'image/webp')
 # Claude Code's activity-summary fork: a 3-5 word label of the agent's last action, asked as the last user text.
 _SUMMARY_ASK = 'Describe your most recent action in 3-5 words'
+# Claude Code's compaction request: every summary prompt it sends opens with this preamble, asked as the last user text.
+_COMPACTION_ASK = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.'
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,8 @@ def _compact_json(value):
 def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None) -> Translation:
     """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded.
 
-    effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork to its lane."""
+    effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork or a compaction
+    request to its lane."""
     registered, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
@@ -94,6 +97,15 @@ def last_turn_message(body: dict):
 
 def activity_summary(body: dict) -> bool:
     """True when the last turn message is the user's, and its own text, never a tool result's, opens with the summary ask."""
+    return _last_user_text_opens(body, _SUMMARY_ASK)
+
+
+def compaction(body: dict) -> bool:
+    """True when the last turn message is the user's, and its own text, never a tool result's, opens with the compaction ask."""
+    return _last_user_text_opens(body, _COMPACTION_ASK)
+
+
+def _last_user_text_opens(body, opening):
     last = last_turn_message(body)
     if not isinstance(last, dict) or last.get('role') != 'user':
         return False
@@ -101,7 +113,7 @@ def activity_summary(body: dict) -> bool:
     blocks = [{'type': 'text', 'text': content}] if isinstance(content, str) else content
     return isinstance(blocks, list) and any(
         isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str)
-        and block['text'].startswith(_SUMMARY_ASK) for block in blocks)
+        and block['text'].startswith(opening) for block in blocks)
 
 
 # claude-code-proxy/src/providers/kimi/count_tokens.rs:7: an image is a flat allowance, never its payload;
