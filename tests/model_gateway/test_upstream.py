@@ -1,9 +1,12 @@
-"""Tests for model_gateway.upstream: a pooled connection the server closed gets one fresh retry."""
+"""Tests for model_gateway.upstream: a pooled connection the server closed gets one fresh retry; every socket probes
+its path with TCP keepalive."""
 import json
 import socket
 import threading
 import unittest
+import unittest.mock
 
+from model_gateway import upstream
 from model_gateway.upstream import Upstream, UpstreamError
 from tests import fakes, jail
 from tests.fakes import ClosingUpstream
@@ -125,6 +128,37 @@ class UpstreamTest(unittest.TestCase):
             up.send("POST", "/x", b"{}", HEADERS)
         self.assertTrue(cm.exception.message.startswith("upstream unreachable: ConnectionRefusedError"))
         self.assertIsNone(up.local.conn)
+
+    def test_every_connection_probes_its_path_with_tcp_keepalive(self):
+        # A path that dies without a FIN or RST (a Wi-Fi roam, a dropped NAT mapping) leaves a read waiting on silence:
+        # three upstream streams sat 300 s on one at 07:41:57. The kernel's probes fail such a socket after
+        # KEEPALIVE_IDLE + KEEPALIVE_INTERVAL x KEEPALIVE_PROBES seconds, while a live peer that is only slow
+        # (a model reasoning before its first token) still answers them.
+        class Keeping(ClosingUpstream):
+            def do_POST(self):
+                super().do_POST()
+                self.close_connection = False
+        lines = []
+        up = Upstream(fakes.start_upstream(self, Keeping), lines.append)
+        up.send("POST", "/x", b"{}", HEADERS).read()
+        sock = up.local.conn.sock
+        self.assertNotEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0)
+        options = dict(upstream.KEEPALIVE_OPTIONS)
+        self.assertEqual(sorted(options.values()), sorted((upstream.KEEPALIVE_IDLE, upstream.KEEPALIVE_INTERVAL,
+                                                           upstream.KEEPALIVE_PROBES)))
+        for option, value in options.items():
+            with self.subTest(option=option):
+                self.assertEqual(sock.getsockopt(socket.IPPROTO_TCP, option), value)
+        self.assertEqual(lines, [])
+        self.assertIn(upstream.KeepaliveHTTPSConnection, type(Upstream("https://example.invalid").connection()).__mro__)
+
+    def test_a_keepalive_option_the_kernel_refuses_is_logged_and_the_request_goes_on(self):
+        lines = []
+        up = Upstream(fakes.start_upstream(self, ClosingUpstream), lines.append)
+        with unittest.mock.patch.object(upstream, "KEEPALIVE_OPTIONS", ((0x7FFF, 1),)):
+            self.assertEqual(json.loads(up.send("POST", "/x", b"{}", HEADERS).read())["n"] > 0, True)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("upstream keepalive failed: OSError", lines[0])
 
     def test_https_gets_a_tls_context(self):
         self.assertIsNotNone(Upstream("https://example.invalid").tls)
