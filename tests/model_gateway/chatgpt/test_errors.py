@@ -72,6 +72,17 @@ class ErrorsTest(unittest.TestCase):
                     self.assertEqual(events[0]["data"]["error"]["type"],
                                      "api_error" if status == 401 else kind)
 
+    def test_a_context_overflow_names_the_context_window_so_claude_code_compacts(self):
+        # Claude Code (2.1.296) turns a 413 into its reactive compaction only when the message names the context
+        # window; any other 413 is a final "request too large".
+        for body in ({"error": {"code": "context_length_exceeded", "message": "too big"}},
+                     {"error": {"code": "context_length_exceeded"}},
+                     {"type": "response.failed", "response": {"error": {"code": "context_length_exceeded"}}}):
+            with self.subTest(body=body):
+                result = errors.classify(400, body, "before-output")
+                self.assertEqual(result.client_status, 413)
+                self.assertIn("context window", result.client_body["error"]["message"].lower())
+
     def test_limit_headers_and_body_forms(self):
         body = {"error": {"type": "usage_limit_reached", "resets_at": 1060}}
         with patch("model_gateway.clock.now", return_value=1000.25):

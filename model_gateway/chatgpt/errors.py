@@ -89,6 +89,8 @@ def classify(status, body_head, phase, headers=None):
             pass
     elif "context_length_exceeded" in lower or "context window" in lower:
         client_status, kind = 413, "request_too_large"
+        if "context window" not in message.lower():  # Claude Code compacts on a 413 only when its message names it
+            message = "context window exceeded: " + message
     elif stream_limit:  # codex-rs/protocol/src/error.rs:395-457: RateLimitExceeded is always retried
         client_status, kind, retry = 429, "rate_limit_error", True
     elif "server_is_overloaded" in lower or "slow_down" in lower or status == 529:
