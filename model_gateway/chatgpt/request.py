@@ -17,6 +17,14 @@ _IMAGE_MEDIA = ('image/png', 'image/jpeg', 'image/gif', 'image/webp')
 _SUMMARY_ASK = 'Describe your most recent action in 3-5 words'
 # Claude Code's compaction request: every summary prompt it sends opens with this preamble, asked as the last user text.
 _COMPACTION_ASK = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.'
+# Claude Code's sub-agent delivery, which GPT models do not infer from its system text: appended to that developer item.
+AGENT_CONTRACT = (
+    'When another agent spawned you with a task: your final message is your return. Claude Code hands it to that agent '
+    'whole, so put the entire result there. Text you write before it stays in your transcript, and no one reads it '
+    'while you work. SendMessage wakes its recipient and costs it a full turn: send one only when your instructions '
+    'explicitly require it, or when you are blocked on a decision only the recipient can make. Never send one for '
+    'progress, interim findings, corrections, or a preview of your final message. An agent you spawn answers you '
+    'through its own final message.')
 
 
 @dataclass(frozen=True)
@@ -35,17 +43,22 @@ def _compact_json(value):
 
 # codex-rs/codex-api/src/common.rs:278-304; core/src/client.rs:947-1071.
 # claude-code-proxy/src/providers/codex/translate/request.rs:480-549.
-def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None) -> Translation:
+def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None,
+              agent_contract: bool = False) -> Translation:
     """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded.
 
     effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork or a compaction
-    request to its lane."""
+    request to its lane. agent_contract appends AGENT_CONTRACT to the system text's developer item, a second part so
+    the system text itself, and the model-switch text quoting it, stay byte-identical."""
     registered, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
     items = _request_items(body.get('messages', []), model.slug, instructions, notes)
     if instructions:
-        items.insert(0, _response_message('developer', [{'type': 'input_text', 'text': instructions}]))
+        parts = [{'type': 'input_text', 'text': instructions}]
+        if agent_contract:
+            parts.append({'type': 'input_text', 'text': AGENT_CONTRACT})
+        items.insert(0, _response_message('developer', parts))
     if model.responses_lite and registered:
         items.insert(0, {'type': 'additional_tools', 'role': 'developer', 'tools': registered})
     reasoning = {}

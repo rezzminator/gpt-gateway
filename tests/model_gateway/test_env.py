@@ -76,6 +76,13 @@ class CoreEnvTest(unittest.TestCase):
         with self.assertRaisesRegex(env.EnvError, "^env MODEL_GATEWAY_CHATGPT_TRANSPORT: must be websocket or http$"):
             env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_TRANSPORT="sse"))
 
+    def test_the_chatgpt_agent_contract_is_on_unless_set_to_off(self):
+        home = jail.scratch(self)
+        self.assertTrue(env.ChatGPTEnv.parse(jail.clean_env(home)).agent_contract)
+        self.assertFalse(env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT=" off ")).agent_contract)
+        with self.assertRaisesRegex(env.EnvError, "^env MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT: must be on or off$"):
+            env.ChatGPTEnv.parse(jail.clean_env(home, MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT="yes"))
+
     def test_snapshot_is_a_copy(self):
         snap = env.snapshot()
         snap["MODEL_GATEWAY_TEST_ONLY"] = "1"

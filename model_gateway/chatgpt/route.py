@@ -111,6 +111,7 @@ def milliseconds(seconds):
 class Route:
     def __init__(self, knobs, log):
         self.log = log
+        self.agent_contract = knobs.agent_contract
         self.store = auth.source(knobs)
         self.client = Client(knobs, log)
         self.catalog = Catalog(knobs, self.client, self.store, log)
@@ -174,7 +175,7 @@ class Route:
             summary = where == turn.FORK or request.compaction(body)  # sent at another effort than the lane's turns
             with self.lock:
                 pinned = state.effort if summary else None
-            translation = request.translate(body, model, key, pinned)
+            translation = request.translate(body, model, key, pinned, self.agent_contract)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
@@ -266,7 +267,7 @@ class Route:
                 if decision.drop_reasoning:
                     dropped = True
                     body = without_reasoning(body)
-                    translation = request.translate(body, model, key, pinned)
+                    translation = request.translate(body, model, key, pinned, self.agent_contract)
                     cap.sent_body(translation.body_bytes)
                     with self.lock:
                         estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))

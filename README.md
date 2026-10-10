@@ -205,6 +205,7 @@ The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator
 | `MODEL_GATEWAY_CHATGPT_AUTH_PATH` | token file path, absolute with `~` allowed | `~/.local/state/model-gateway/chatgpt-auth.json` |
 | `MODEL_GATEWAY_CHATGPT_MODELS_PATH` | catalog cache path, absolute with `~` allowed; mode 0600 | `~/.local/state/model-gateway/chatgpt-models.json` |
 | `MODEL_GATEWAY_CHATGPT_TRANSPORT` | `websocket` keeps a Responses WebSocket per lane, as Codex does; `http` sends every request as an HTTP POST with an SSE answer | `websocket` |
+| `MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT` | `on` appends Claude Code's sub-agent delivery contract to the developer message carrying its system text, as a second part: the final message is the return, and SendMessage is for what the instructions require or only the recipient can settle, never progress; GPT models do not infer it from Claude Code's prompt and message the agent that spawned them instead. `off` sends the system text alone | `on` |
 
 ### Transport
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import unittest
 
 from model_gateway.chatgpt import catalog, request, signature, tools
+from tests.model_gateway.chatgpt import test_route as route_tests
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
@@ -76,6 +77,31 @@ class RequestTest(unittest.TestCase):
         body['messages'] += [{'role': 'assistant', 'content': 'New reply.'}, {'role': 'user', 'content': 'More.'}]
         later, _ = self.result(body)
         self.assertEqual(later['input'][:len(value['input'])], value['input'])
+
+    def test_agent_contract_rides_the_system_developer_item_only(self):
+        body = {'system': 'Review the package.', 'messages': [
+            {'role': 'assistant', 'content': [
+                {'type': 'thinking', 'signature': signature.encode('old-slug', 'rs_old', 'opaque')},
+                {'type': 'text', 'text': 'Prior reply.'}]}, {'role': 'user', 'content': 'Continue.'}]}
+        bare = json.loads(request.translate(body, self.model, 'lane-example').body_bytes)
+        value = json.loads(request.translate(body, self.model, 'lane-example', agent_contract=True).body_bytes)
+        self.assertEqual(value['input'][0]['content'],
+                         [{'type': 'input_text', 'text': 'Review the package.'},
+                          {'type': 'input_text', 'text': request.AGENT_CONTRACT}])
+        self.assertEqual(value['input'][1:], bare['input'][1:])
+        switch = [x for x in value['input'] if '<model_switch>' in json.dumps(x)][0]
+        self.assertNotIn(request.AGENT_CONTRACT, json.dumps(switch, ensure_ascii=False))
+        self.assertIn('SendMessage', request.AGENT_CONTRACT)
+        lite = json.loads(request.translate(dict(body, tools=[{'name': 'Read', 'input_schema': {'type': 'object'}}]),
+                                            dataclasses.replace(self.model, slug='gpt-6-sol', responses_lite=True),
+                                            'lane-example', agent_contract=True).body_bytes)
+        self.assertEqual(lite['input'][1]['content'][-1]['text'], request.AGENT_CONTRACT)
+        body['messages'] += [{'role': 'assistant', 'content': 'New reply.'}, {'role': 'user', 'content': 'More.'}]
+        later = json.loads(request.translate(body, self.model, 'lane-example', agent_contract=True).body_bytes)
+        self.assertEqual(later['input'][:len(value['input'])], value['input'])
+        no_system = json.loads(request.translate({'messages': [{'role': 'user', 'content': 'Hi.'}]}, self.model,
+                                                 'lane-example', agent_contract=True).body_bytes)
+        self.assertNotIn(request.AGENT_CONTRACT, json.dumps(no_system, ensure_ascii=False))
 
     def test_prefix_survives_empty_thinking_and_later_tool_history(self):
         body = {'system': [{'type': 'text', 'text': 'Stable instructions.'}], 'messages': [
@@ -225,3 +251,20 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(value['input'], [{'type': 'message', 'role': 'assistant', 'content': [
             {'type': 'output_text', 'text': '[unsupported redacted_thinking]'},
             {'type': 'output_text', 'text': '[unsupported document]'}]}])
+
+
+class AgentContractRouteTest(unittest.TestCase):
+    setUp = route_tests.RouteTest.setUp
+    jwt = route_tests.RouteTest.jwt
+    gateway = route_tests.RouteTest.gateway
+    send = route_tests.RouteTest.send
+    responses = route_tests.RouteTest.responses
+
+    def test_the_route_sends_the_agent_contract_as_its_knob_says(self):
+        for knob, parts in [(None, ['Review it.', request.AGENT_CONTRACT]), ('off', ['Review it.'])]:
+            with self.subTest(knob=knob):
+                _, port = self.gateway(**({'MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT': knob} if knob else {}))
+                self.assertEqual(self.send(port, dict(self.body, system='Review it.'))[0].status, 200)
+                sent = next(x for x in json.loads(self.responses()[-1]['body'])['input']
+                            if x['type'] == 'message' and x['role'] == 'developer')
+                self.assertEqual([part['text'] for part in sent['content']], parts)
