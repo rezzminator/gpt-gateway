@@ -13,11 +13,11 @@ class Estimator:
         self.ratio = 0.25
 
     # claude-code-proxy/src/providers/kimi/count_tokens.rs:7; image allowance.
-    def estimate(self, chars, images=0):
-        """Ceiling of characters times the measured ratio, plus 2000 per image."""
-        if chars < 0 or images < 0:
-            raise ValueError("character and image counts must be nonnegative")
-        return math.ceil(chars * self.ratio) + 2000 * images
+    def estimate(self, chars, attachments=0):
+        """Ceiling of characters times the measured ratio, plus 2000 per attachment (a base64 image or PDF)."""
+        if chars < 0 or attachments < 0:
+            raise ValueError("character and attachment counts must be nonnegative")
+        return math.ceil(chars * self.ratio) + 2000 * attachments
 
     def observe(self, chars, input_tokens):
         """Use total upstream input (including cached tokens); ignore zero characters."""

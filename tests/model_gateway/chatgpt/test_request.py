@@ -157,6 +157,32 @@ class RequestTest(unittest.TestCase):
             with self.subTest(nested=nested):
                 self.assertEqual(len(sizes), 1, sizes)
 
+    def test_pdf_documents_become_input_files(self):
+        pdf = {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': 'JVBERi0x'}}
+        part = {'type': 'input_file', 'filename': 'document.pdf', 'file_data': 'data:application/pdf;base64,JVBERi0x'}
+        call = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'c', 'name': 'read', 'input': {}}]}]
+        value, _ = self.result({'messages': call + [{'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'c', 'content': [{'type': 'text', 'text': 'PDF file read'}, pdf]}]}]})
+        self.assertEqual(value['input'][1]['output'], [{'type': 'input_text', 'text': 'PDF file read'}, part])
+        value, _ = self.result({'messages': [{'role': 'user', 'content': [pdf]}]})
+        self.assertEqual(value['input'][0]['content'], [part])
+        # Only a base64 PDF maps; any other document keeps its placeholder.
+        for source in ({'type': 'base64', 'media_type': 'text/plain', 'data': 'aGk='},
+                       {'type': 'text', 'media_type': 'text/plain', 'data': 'hi'},
+                       {'type': 'url', 'url': 'https://example.invalid/a.pdf'}):
+            with self.subTest(source=source['type'] + ' ' + source.get('media_type', '')):
+                value, _ = self.result({'messages': [{'role': 'user', 'content': [{'type': 'document', 'source': source}]}]})
+                self.assertEqual(value['input'][0]['content'], [{'type': 'input_text', 'text': '[unsupported document]'}])
+        # A PDF is priced flat per attachment by the estimator, so its payload never counts as characters.
+        for nested in (False, True):
+            sizes = set()
+            for data in ('AA==', 'A' * 40000):
+                doc = dict(pdf, source=dict(pdf['source'], data=data))
+                content = [{'type': 'tool_result', 'tool_use_id': 'c', 'content': [doc]}] if nested else [doc]
+                sizes.add(self.result({'messages': call + [{'role': 'user', 'content': content}]})[1].estimate_chars)
+            with self.subTest(nested=nested):
+                self.assertEqual(len(sizes), 1, sizes)
+
     def test_unmapped_assistant_blocks_are_placeholders(self):
         value, _ = self.result({'messages': [{'role': 'assistant', 'content': [
             {'type': 'redacted_thinking', 'data': 'opaque'}, {'type': 'document'}]}]})

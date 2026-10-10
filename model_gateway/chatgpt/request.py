@@ -30,7 +30,7 @@ def _compact_json(value):
 # codex-rs/codex-api/src/common.rs:278-304; core/src/client.rs:947-1071.
 # claude-code-proxy/src/providers/codex/translate/request.rs:480-549.
 def translate(body: dict, model: Model, lane_key: str) -> Translation:
-    """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image data excluded."""
+    """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded."""
     registered, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
@@ -74,16 +74,20 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
     result['text'] = text
     serialized = _compact_json(result)
     return Translation(serialized.encode('utf-8'), model.responses_lite, names, tuple(notes),
-                       len(serialized) - _image_chars(result['input']))
+                       len(serialized) - _attachment_chars(result['input']))
 
 
-# claude-code-proxy/src/providers/kimi/count_tokens.rs:7: an image is a flat allowance, never its payload.
-def _image_chars(items):
+# claude-code-proxy/src/providers/kimi/count_tokens.rs:7: an image is a flat allowance, never its payload;
+# a PDF takes the same allowance.
+_PAYLOAD_KEYS = {'input_image': 'image_url', 'input_file': 'file_data'}
+
+
+def _attachment_chars(items):
     parts = []
     for item in items:
         value = item.get('content') if item['type'] == 'message' else item.get('output')
         parts.extend(value if isinstance(value, list) else [])
-    return sum(len(part['image_url']) for part in parts if part.get('type') == 'input_image')
+    return sum(len(part[_PAYLOAD_KEYS[part['type']]]) for part in parts if part.get('type') in _PAYLOAD_KEYS)
 
 
 # claude-code-proxy/src/providers/translate_shared.rs:36-58.
@@ -165,6 +169,12 @@ def _content_part(block, role='user'):
         source = block.get('source', {})
         if source.get('type') == 'base64' and source.get('media_type') in _IMAGE_MEDIA:
             return {'type': 'input_image', 'image_url': 'data:' + source['media_type'] + ';base64,' + source['data']}
+    # Responses API input_file: inline file_data is a data URL and needs a filename.
+    if kind == 'document' and role != 'assistant':
+        source = block.get('source', {})
+        if source.get('type') == 'base64' and source.get('media_type') == 'application/pdf':
+            return {'type': 'input_file', 'filename': 'document.pdf',
+                    'file_data': 'data:application/pdf;base64,' + source['data']}
     return {'type': text_type, 'text': '[unsupported ' + kind + ']'}
 
 
@@ -173,7 +183,7 @@ def _tool_output(block):
     parts = [_content_part(part) for part in _content_blocks(block.get('content', []))]
     if block.get('is_error'):
         parts.insert(0, {'type': 'input_text', 'text': '[tool execution error]'})
-    if any(part['type'] == 'input_image' for part in parts):
+    if any(part['type'] in ('input_image', 'input_file') for part in parts):
         return parts
     return '\n'.join(part['text'] for part in parts)
 

@@ -174,9 +174,10 @@ class RouteTest(unittest.TestCase):
         jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
         os.unlink(self.auth_path)
         rt, port = self.gateway()
-        resp, data = self.send(port, path="/v1/messages/count_tokens?beta=1")
+        pdf = dict(type="document", source=dict(type="base64", media_type="application/pdf", data="A" * 40000))
+        resp, data = self.send(port, dict(self.body, messages=[dict(role="user", content=[pdf])]), path="/v1/messages/count_tokens?beta=1")
         self.assertEqual(resp.status, 200)
-        self.assertGreater(json.loads(data)["input_tokens"], 0)
+        self.assertTrue(2000 <= json.loads(data)["input_tokens"] < 2500, "a PDF is one flat attachment, never its payload: %s" % data)
         self.assertEqual(self.fake.seen, [])
         line = fakes.request(port, "GET", "/__gateway/health")[1]
         self.assertIn(b" chatgpt=on catalog=1 models middleware=", line)

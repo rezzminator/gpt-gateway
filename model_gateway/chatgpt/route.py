@@ -52,8 +52,8 @@ def decide(catalog, method, path, body, headers):
     return "chatgpt", models[slug], None
 
 
-def image_count(body):
-    """Base64 images in user content or nested tool_result content."""
+def attachment_count(body):
+    """Base64 images and base64 PDF documents in user content or nested tool_result content."""
     def count(value):
         if isinstance(value, list):
             return sum(count(item) for item in value)
@@ -61,6 +61,10 @@ def image_count(body):
             return 0
         if value.get("type") == "image":
             return int(isinstance(value.get("source"), dict) and value["source"].get("type") == "base64")
+        if value.get("type") == "document":
+            source = value.get("source")
+            return int(isinstance(source, dict) and source.get("type") == "base64"
+                       and source.get("media_type") == "application/pdf")
         return count(value.get("content"))
     return sum(count(message) for message in body.get("messages", []))
 
@@ -151,7 +155,7 @@ class Route:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
         with self.lock:
-            estimated = estimator.estimate(translation.estimate_chars, image_count(body))
+            estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
         refreshed = dropped = False
@@ -224,7 +228,7 @@ class Route:
                     translation = request.translate(body, model, key)
                     cap.sent_body(translation.body_bytes)
                     with self.lock:
-                        estimated = estimator.estimate(translation.estimate_chars, image_count(body))
+                        estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
                     self.log("    gpt drop-reasoning lane=%s slug=%s" % (key, model.slug))
             except auth.LoginRequired as error:
                 return login_required(str(error))
