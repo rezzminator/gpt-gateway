@@ -3,10 +3,11 @@
 Derived from openai/codex, changed (Apache-2.0; see THIRD_PARTY_NOTICES.md). Codex keeps one socket per session and
 sends every request of it there (codex-rs/core/src/client.rs:605-621); replaying the same bodies, the backend serves
 a kept socket's request from the prompt cache its previous request wrote far more often than a fresh HTTP request's.
-One request is in flight per socket: a lane whose socket is busy opens another, and every idle socket goes back to
-the pool, where its lane takes the most recent one. Claude Code's activity-summary fork runs while its agent's request
-still does; a second socket lands on another backend server, whose cache holds only what that socket sent, so a fork
-waits for its lane's busy socket instead. A socket answering anything but a completed response is closed.
+One request is in flight per socket, and a lane keeps one socket: a second lands on another backend server, whose cache
+holds only what that socket sent. Claude Code's activity-summary fork runs while its agent's request still does, and
+the agent's next request can arrive while the fork runs, so a request whose lane's socket is busy waits for it and
+opens another only once that wait runs out; every socket coming back goes to the pool as its lane's one idle socket,
+and a spare the lane already holds there closes. A socket answering anything but a completed response is closed.
 """
 import collections
 import hashlib
@@ -35,8 +36,8 @@ KEPT_AFTER = ("response.completed", "response.incomplete")
 PAUSE_AFTER, PAUSE_SECONDS = 5, 600
 # An upgrade answered with a status meaning the backend serves no WebSocket here (Codex: 426) pauses it this long.
 UNSERVED_PAUSE_SECONDS = 3600
-# How long an activity-summary fork waits for its lane's busy socket before it opens another.
-FORK_WAIT_SECONDS = 30
+# How long a request waits for its lane's busy socket before it opens another.
+LANE_WAIT_SECONDS = 30
 
 
 def unserved(status):
@@ -144,7 +145,7 @@ class Sockets:
                     self.busy[pool_key] += 1
             if kept is None:
                 if timed_out:
-                    self.log("    gpt websocket fork-wait lane=%s timed out after %g s; another socket opens" % (pool_key[0], wait))
+                    self.log("    gpt websocket lane-wait lane=%s timed out after %g s; another socket opens" % (pool_key[0], wait))
                 return None
             old = clock.monotonic() - kept.opened >= MAX_AGE
             if not old and kept.ws.alive():
@@ -152,10 +153,17 @@ class Sockets:
             self.close(kept, "age" if old else "closed-while-idle")
 
     def checkin(self, kept):
+        """Back to the pool as its lane's one idle socket; a spare the lane already holds there, left by a wait that
+        ran out, closes."""
         with self.lock:
             self._returned(kept)
+            spares = [k for k in self.idle if k.key == kept.key]
+            for spare in spares:
+                del self.idle[spare]
             self.idle[kept] = None
             over = [self.idle.popitem(last=False)[0] for _ in range(len(self.idle) - MAX_KEPT)]
+        for spare in spares:
+            self.close(spare, "lane-spare")
         for oldest in over:
             self.close(oldest, "pool-full")
 
@@ -173,7 +181,7 @@ class Sockets:
         return kept
 
     def _returned(self, kept):
-        """Under the lock: a checked-out socket is no longer busy, and a waiting fork may take its lane's next one."""
+        """Under the lock: a checked-out socket is no longer busy, and a waiting request may take its lane's next one."""
         if kept.out:
             kept.out = False
             self.busy[kept.key] -= 1

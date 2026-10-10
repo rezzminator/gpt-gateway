@@ -205,17 +205,33 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
                          ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
 
-    def test_a_fork_whose_wait_runs_out_and_an_agent_request_open_another_socket(self):
-        self.fake.stall = [0.8, 0.8]
+    def test_an_agent_request_waits_for_the_fork_holding_its_lanes_socket(self):
+        # The agent's next request can arrive while the fork still holds the socket; a second socket would read the
+        # lane's whole prefix uncached and stay in the pool serving later requests from a stale one.
+        self.fake.stall = [0.8]
         rt, port = self.gateway()
         agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
-        with patch("model_gateway.chatgpt.websocket.FORK_WAIT_SECONDS", 0.1):
+        self.assertEqual(self.concurrent(port, fork, agent), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 1)
+        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+                         ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
+
+    def test_a_wait_that_runs_out_opens_another_socket_and_the_lane_keeps_the_one_back_last(self):
+        self.fake.stall = [0.8]
+        rt, port = self.gateway()
+        agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
+        fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
+        with patch("model_gateway.chatgpt.websocket.LANE_WAIT_SECONDS", 0.1):
             self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 2)
+        self.fake.stall = [0.8]
         self.assertEqual(self.concurrent(port, agent, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 2)
-        self.assertEqual(fakes.logged(rt).count("gpt websocket fork-wait lane="), 1)
-        self.assertIn("timed out after 0.1 s; another socket opens", fakes.logged(rt))
+        logged = fakes.logged(rt)
+        self.assertEqual(logged.count("gpt websocket lane-wait lane="), 1)
+        self.assertIn("timed out after 0.1 s; another socket opens", logged)
+        self.assertEqual(logged.count("reason=lane-spare"), 1)
 
     # The route's error, retry and refresh behaviour, over the WebSocket.
     test_refresh_once_and_oauth_identity = route_tests.RouteTest.test_refresh_once_and_oauth_identity
