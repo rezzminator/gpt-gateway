@@ -12,6 +12,8 @@ from .catalog import Model
 
 _EFFORTS = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
 _IMAGE_MEDIA = ('image/png', 'image/jpeg', 'image/gif', 'image/webp')
+# Claude Code's activity-summary fork: a 3-5 word label of the agent's last action, asked as the last user text.
+_SUMMARY_ASK = 'Describe your most recent action in 3-5 words'
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,10 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
         items.insert(0, {'type': 'additional_tools', 'role': 'developer', 'tools': registered})
     reasoning = {}
     effort = _request_effort(body, model, notes)
+    lowest = [level for level in _EFFORTS if level in model.reasoning_levels]
+    if lowest and activity_summary(body):
+        effort = lowest[0]
+        notes.append('activity summary at ' + effort)
     if effort is not None:
         reasoning['effort'] = effort
     if model.supports_summaries:
@@ -75,6 +81,19 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
     serialized = _compact_json(result)
     return Translation(serialized.encode('utf-8'), model.responses_lite, names, tuple(notes),
                        len(serialized) - _attachment_chars(result['input']))
+
+
+def activity_summary(body: dict) -> bool:
+    """True when the last message is a user turn whose own text, never a tool result's, opens with the summary ask."""
+    messages = body.get('messages')
+    last = messages[-1] if isinstance(messages, list) and messages else None
+    if not isinstance(last, dict) or last.get('role') != 'user':
+        return False
+    content = last.get('content')
+    blocks = [{'type': 'text', 'text': content}] if isinstance(content, str) else content
+    return isinstance(blocks, list) and any(
+        isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str)
+        and block['text'].startswith(_SUMMARY_ASK) for block in blocks)
 
 
 # claude-code-proxy/src/providers/kimi/count_tokens.rs:7: an image is a flat allowance, never its payload;

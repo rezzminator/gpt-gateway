@@ -585,10 +585,10 @@ class CodexRouteTest(unittest.TestCase):
         measure = Measure(started=100.0, sent_at=100.5, reused=True, stale=True)
         estimator = SimpleNamespace(observe=lambda *args: None)
         with patch.object(clock, "monotonic", return_value=104.5):
-            route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1), translator,
-                            estimator, 1, 200, reader, None, measure)
-        self.assertEqual(lines, ["    gpt lane=lane slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1 "
-                                 "out=8 reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1"])
+            route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1, notes=("a \"b\"",)),
+                            translator, estimator, 1, 200, reader, None, measure)
+        self.assertEqual(lines, ["    gpt lane=lane slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1 out=8 "
+                                 'reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1 notes=["a \\"b\\""]'])
 
     def test_ttfb_counts_from_the_gateway_receipt_of_the_request(self):
         jail.write_json(self.models_path, fakes.CHATGPT_MODELS)

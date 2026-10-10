@@ -134,14 +134,15 @@ class Route:
                     estimator.observe(translation.estimate_chars, translator.input_tokens)
             reasoning = "-" if translator.reasoning_tokens is None else translator.reasoning_tokens
             self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d out=%d reasoning=%s "
-                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d" %
+                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s" %
                      (key, model.slug, status, translator.input_tokens,
                       translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt,
                       translator.usage["output_tokens"], reasoning,
                       milliseconds(reader.first_byte_at - measure.started),
                       milliseconds(reader.terminal_at - measure.sent_at),
                       milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
-                      measure.reused, measure.stale))
+                      measure.reused, measure.stale,
+                      " notes=" + json.dumps(list(translation.notes)) if translation.notes else ""))
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
     def exchange(self, body, model, headers, path, cap, started=None):
