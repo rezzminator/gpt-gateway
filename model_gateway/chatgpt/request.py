@@ -6,6 +6,7 @@ Permission notices: THIRD_PARTY_NOTICES.md.
 """
 from dataclasses import dataclass
 import json
+from typing import Optional
 
 from . import signature, tools
 from .catalog import Model
@@ -23,6 +24,7 @@ class Translation:
     tool_names: dict
     notes: tuple
     estimate_chars: int
+    effort: Optional[str] = None  # the reasoning effort the body sends, None when it names none
 
 
 def _compact_json(value):
@@ -31,8 +33,10 @@ def _compact_json(value):
 
 # codex-rs/codex-api/src/common.rs:278-304; core/src/client.rs:947-1071.
 # claude-code-proxy/src/providers/codex/translate/request.rs:480-549.
-def translate(body: dict, model: Model, lane_key: str) -> Translation:
-    """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded."""
+def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None) -> Translation:
+    """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded.
+
+    effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork to its lane."""
     registered, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
@@ -42,7 +46,7 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
     if model.responses_lite and registered:
         items.insert(0, {'type': 'additional_tools', 'role': 'developer', 'tools': registered})
     reasoning = {}
-    effort = _request_effort(body, model, notes)
+    effort = _request_effort(body, model, notes, effort)
     if effort is not None:
         reasoning['effort'] = effort
     if model.reasoning_summary is not None:  # codex-rs/core/src/client.rs:880-882
@@ -76,7 +80,7 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
     result['text'] = text
     serialized = _compact_json(result)
     return Translation(serialized.encode('utf-8'), model.responses_lite, names, tuple(notes),
-                       len(serialized) - _attachment_chars(result['input']))
+                       len(serialized) - _attachment_chars(result['input']), effort)
 
 
 def last_turn_message(body: dict):
@@ -225,9 +229,9 @@ def _normalize_calls(items):
     return normalized
 
 
-def _request_effort(body, model, notes):
-    """Apply the design's budget thresholds, then choose a catalog-supported effort."""
-    requested = body.get('output_config', {}).get('effort')
+def _request_effort(body, model, notes, pinned=None):
+    """Apply the design's budget thresholds, then choose a catalog-supported effort; a pinned effort replaces the asked one."""
+    requested = pinned if pinned is not None else body.get('output_config', {}).get('effort')
     if requested is None:
         budget = body.get('thinking', {}).get('budget_tokens')
         requested = model.default_reasoning if budget is None else (

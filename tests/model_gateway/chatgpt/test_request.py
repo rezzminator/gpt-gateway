@@ -118,6 +118,15 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(value.get('reasoning'), {})
         self.assertEqual(value['text'], {})
 
+    def test_a_pinned_effort_replaces_the_asked_one_within_the_catalog(self):
+        # The route pins an activity-summary fork to its lane's effort; Translation.effort is what the body sends.
+        for pinned, levels, sent in (('medium', ('low', 'medium', 'high'), 'medium'), (None, ('low', 'medium', 'high'), 'high'),
+                                     ('xhigh', ('low', 'high'), 'high'), ('medium', (), None)):
+            with self.subTest(pinned=pinned, levels=levels):
+                translated = request.translate({'output_config': {'effort': 'high'}},
+                                               dataclasses.replace(self.model, reasoning_levels=levels), 'lane-example', pinned)
+                self.assertEqual((json.loads(translated.body_bytes)['reasoning'].get('effort'), translated.effort), (sent, sent))
+
     def test_activity_summary_keeps_its_agents_effort(self):
         # The backend's prompt cache keys on reasoning effort: a fork at another effort re-reads its lane's prefix uncached.
         ask = 'Describe your most recent action in 3-5 words using present tense (-ing). Do not use tools.'

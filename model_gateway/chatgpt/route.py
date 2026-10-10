@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import json
 import http.client
 import threading
+from typing import Optional
 
 from .. import clock
 from ..upstream import UpstreamError, is_stale
@@ -92,9 +93,13 @@ class Measure:
 
 @dataclass
 class Lane:
-    """What the route keeps per lane key: the token estimator and the turn-state token."""
+    """What the route keeps per lane key: the token estimator, the turn-state token and the lane's effort."""
     estimator: estimate.Estimator = field(default_factory=estimate.Estimator)
     turn_state: turn.Turn = field(default_factory=turn.Turn)
+    # The effort the lane's last Messages request outside the activity-summary fork sent. Claude Code sends the fork at
+    # the agent's declared effort, which an effort tag may have changed for its turns; the backend's prompt cache keys
+    # on effort, so the fork sends this one and rides the lane's cache.
+    effort: Optional[str] = None
 
 
 def milliseconds(seconds):
@@ -160,7 +165,10 @@ class Route:
         state = self.lane_state(key)
         estimator = state.estimator
         try:
-            translation = request.translate(body, model, key)
+            where = turn.position(body)
+            with self.lock:
+                pinned = state.effort if where == turn.FORK else None
+            translation = request.translate(body, model, key, pinned)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
@@ -168,8 +176,9 @@ class Route:
             estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
-        where = turn.position(body)
         with self.lock:
+            if where != turn.FORK:
+                state.effort = translation.effort
             state.turn_state.begin(where)
         refreshed = dropped = False
         credentials = None
@@ -244,7 +253,7 @@ class Route:
                 if decision.drop_reasoning:
                     dropped = True
                     body = without_reasoning(body)
-                    translation = request.translate(body, model, key)
+                    translation = request.translate(body, model, key, pinned)
                     cap.sent_body(translation.body_bytes)
                     with self.lock:
                         estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))

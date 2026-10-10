@@ -1,9 +1,11 @@
-"""Codex turn-state stickiness: request positions, one lane's token, and the token's life through a real gateway."""
+"""Codex turn-state stickiness: request positions, one lane's token, and the token's life through a real gateway;
+the activity-summary fork's effort through a real gateway."""
+import json
 import unittest
 from unittest.mock import patch
 
 from model_gateway.chatgpt import turn
-from tests import fakes
+from tests import fakes, jail
 from tests.model_gateway.chatgpt import test_route as route_tests
 
 ASK = "Describe your most recent action in 3-5 words using present tense (-ing). Do not use tools."
@@ -74,6 +76,33 @@ class TurnRouteTest(unittest.TestCase):
         for line, step in zip(lines, steps):
             with self.subTest(step=steps.index(step)):
                 self.assertTrue(line.endswith(step[3]), line)
+
+    def test_a_fork_sends_its_lanes_last_effort_and_an_estimate_never_moves_it(self):
+        # Claude Code sends the activity-summary fork at the agent's declared effort while an effort tag can run the
+        # agent's turns at another; the backend's prompt cache keys on effort, so the fork rides its lane's cache only
+        # at the effort the lane's last request sent.
+        levels = [dict(effort=effort, description=effort) for effort in ("low", "medium", "high")]
+        self.fake.models_body = dict(models=[dict(fakes.CHATGPT_MODELS["models"][0], supported_reasoning_levels=levels)])
+        jail.write_json(self.models_path, self.fake.models_body)
+        other = dict(self.headers, **{"x-claude-code-agent-id": "agent-other"})
+        steps = [  # messages, effort asked, ingress headers, path, status of each Responses attempt
+            (START, "medium", None, "/v1/messages", [200]),
+            (START + [CALL, FORK], "high", None, "/v1/messages", [200]),
+            (START + [CALL, RESULT], "low", None, "/v1/messages/count_tokens", []),
+            (START + [CALL, RESULT, CALL, FORK, NOTICE], "high", None, "/v1/messages", [400, 200]),
+            (START + [CALL, FORK], "high", other, "/v1/messages", [200]),
+            (START + [CALL, RESULT], "low", None, "/v1/messages", [200]),
+            (START + [CALL, RESULT, CALL, FORK], "high", None, "/v1/messages", [200])]
+        sent = ["medium", "medium", "medium", "medium", "high", "low", "low"]  # each Responses attempt's effort
+        dropped = (400, {"error": {"code": "invalid_encrypted_content"}})  # the retry drops reasoning, keeps the pin
+        self.fake.script = [dropped if status == 400 else (200, fakes.responses_turn()) for step in steps for status in step[4]]
+        rt, port = self.gateway()
+        with patch("model_gateway.chatgpt.errors.backoff", return_value=0):
+            for messages, effort, headers, path, _ in steps:
+                body = dict(self.body, messages=messages, output_config=dict(effort=effort))
+                self.assertEqual(self.send(port, body, headers, path)[0].status, 200)
+        self.assertEqual([json.loads(x["body"])["reasoning"].get("effort") for x in self.responses()], sent)
+        self.assertIn("gpt drop-reasoning lane=", fakes.logged(rt))
 
 
 if __name__ == "__main__":
