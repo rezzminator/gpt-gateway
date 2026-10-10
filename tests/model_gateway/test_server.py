@@ -4,14 +4,18 @@ import errno
 import http.client
 import json
 import os
+import select
 import signal
+import socket
 import subprocess
 import threading
 import time
 import unittest
 
-from model_gateway import db
-from model_gateway.server import Drain
+from unittest import mock
+
+from model_gateway import db, handles, proxy
+from model_gateway.server import Drain, Server
 from tests import fakes, jail
 
 
@@ -131,6 +135,115 @@ class DrainStateTest(unittest.TestCase):
         failed = [line for line in lines if "shutdown" in line]
         self.assertEqual(len(failed), 1, lines)
         self.assertIn("OSError(%d, " % errno.EBADF, failed[0])
+
+
+HEALTH = b"GET /__gateway/health HTTP/1.1\r\nhost: x\r\n\r\n"
+
+
+def answer(sock):
+    """The status line and headers of one health reply on `sock`, read to the end of its body."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        got = sock.recv(4096)
+        if not got:
+            raise AssertionError("closed before an answer: %r" % data)
+        data += got
+    head, _, rest = data.partition(b"\r\n\r\n")
+    length = int(head.lower().split(b"content-length: ")[1].split()[0])
+    while len(rest) < length:
+        rest += sock.recv(4096)
+    return head
+
+
+class IdleClientTest(unittest.TestCase):
+    def test_a_client_idle_past_the_limit_is_closed_and_each_request_restarts_the_clock(self):
+        with mock.patch.object(proxy, "CLIENT_IDLE_SECONDS", 0.6, create=True):
+            rt, port = fakes.start_gateway(self, fakes.start_upstream(self, fakes.SlowUpstream))
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            self.addCleanup(sock.close)
+            for _ in range(3):  # 0.9 s in all, never 0.6 s between two requests
+                sock.sendall(HEALTH)
+                self.assertNotIn(b"keep-alive", answer(sock).lower())  # no Keep-Alive hint: the reply's headers are the upstream's
+                time.sleep(0.3)
+            sock.settimeout(3)
+            try:
+                closed = sock.recv(1) == b""
+            except socket.timeout:
+                closed = False
+            self.assertTrue(closed, "the gateway kept an idle client connection open")
+            # A reply streaming for longer than the limit is in flight, not idle.
+            resp, data = fakes.request(port, "POST", "/v1/messages", b'{"model":"m"}')
+            self.assertIn(b"message_stop", data)
+
+
+class BurstTest(unittest.TestCase):
+    def test_a_burst_of_100_simultaneous_connects_is_served_without_a_reset(self):
+        rt, _ = fakes.start_gateway(self)
+        server = Server(("127.0.0.1", 0), rt)  # listening, not yet serving: every connect waits in the backlog
+        self.addCleanup(server.server_close)
+        port = server.server_address[1]
+        socks = []
+        self.addCleanup(lambda: [s.close() for s in socks])
+        for _ in range(100):
+            s = socket.socket()
+            s.setblocking(False)
+            s.connect_ex(("127.0.0.1", port))
+            socks.append(s)
+        waiting = list(socks)
+        deadline = time.time() + 3
+        while waiting and time.time() < deadline:
+            _, ready, _ = select.select([], waiting, [], 0.2)
+            waiting = [s for s in waiting if s not in ready]
+        self.assertEqual(len(waiting), 0, "%d of 100 connects were not accepted into the backlog" % len(waiting))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        failed = []
+        for s in socks:
+            s.setblocking(True)
+            s.settimeout(10)
+            try:
+                s.sendall(HEALTH)
+                if answer(s).split(b"\r\n")[0] != b"HTTP/1.1 200 OK":
+                    failed.append("not a 200")
+            except (OSError, AssertionError) as error:
+                failed.append(repr(error))
+        self.assertEqual((len(failed), failed[:2]), (0, []), "of 100 simultaneous connects")
+
+
+class AcceptFailureTest(unittest.TestCase):
+    def setUp(self):
+        handles.THROTTLE.clear()
+
+    def serve_after(self, failures):
+        """A health answer from a gateway whose first accepts raise `failures`, and its events."""
+        pending = list(failures)
+        real = socket.socket._accept
+
+        def flaky(sock):
+            if pending:
+                raise pending.pop(0)
+            return real(sock)
+        rt, port = fakes.start_gateway(self)
+        with mock.patch.object(socket.socket, "_accept", flaky):
+            resp, data = fakes.request(port, "GET", "/__gateway/health")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(pending, [])
+        return rt
+
+    def test_running_out_of_descriptors_at_accept_is_one_event_per_window(self):
+        rt = self.serve_after([OSError(errno.EMFILE, "Too many open files")] * 3)
+        found = fakes.events(rt, "fd_exhausted")
+        self.assertEqual([e["fields"]["where"] for e in found], ["accept"])
+        event = found[0]
+        self.assertIn("Too many open files", event["fields"]["error"])
+        self.assertEqual(fakes.events(rt, "accept_failed"), [])
+
+    def test_any_other_accept_failure_is_an_event_too(self):
+        rt = self.serve_after([OSError(errno.ECONNABORTED, "Software caused connection abort")])
+        found = fakes.events(rt, "accept_failed")
+        self.assertEqual(len(found), 1)
+        self.assertIn("Software caused connection abort", found[0]["fields"]["error"])
+        self.assertEqual(fakes.events(rt, "fd_exhausted"), [])
 
 
 if __name__ == "__main__":

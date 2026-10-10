@@ -70,6 +70,29 @@ class ChatGPTStatsTest(unittest.TestCase):
             "slug=gpt-test timed=4 ttfb_ms p50=200 p95=400 total_ms p50=2000 p95=4000"], ""))
 
 
+    def test_claude_route_timings_follow_the_chatgpt_lines_and_stand_alone_without_them(self):
+        d = jail.scratch(self)
+        path = os.path.join(d, "gateway.db")
+        claude = {"route": "anthropic", "kind": "main", "slug": None}
+        self.seed(path, {"lane": "a", "input_tokens": 20, "cache_read_tokens": 0, "ttfb_ms": 50, "total_ms": 700},
+                  *[dict(claude, model="claude-x", ttfb_ms=n * 100, upstream_ms=n * 1000, total_ms=n * 1000 + 5)
+                    for n in (4, 1, 3, 2)],
+                  dict(claude, model="claude-y", ttfb_ms=70, upstream_ms=900, total_ms=910),
+                  dict(claude, model="claude-x"),  # no timings: not counted
+                  dict(claude, model="claude-x", ttfb_ms=9000, upstream_ms=9000, total_ms=9005, started=clock.now() - 7200))
+        lines = self.stats(d, path, "--since", "1h")[1]
+        self.assertEqual(lines[-2:], [
+            "anthropic model=claude-x timed=4 ttfb_ms p50=200 p95=400 upstream_ms p50=2000 p95=4000 total_ms p50=2005 p95=4005",
+            "anthropic model=claude-y timed=1 ttfb_ms p50=70 p95=70 upstream_ms p50=900 p95=900 total_ms p50=910 p95=910"])
+        self.assertEqual(len(lines), 5, lines)  # the lane, the total and the slug line, then the two models
+        only = os.path.join(d, "only.db")
+        self.seed(only, dict(claude, model="claude-x", ttfb_ms=100, upstream_ms=300, total_ms=310))
+        self.assertEqual(self.stats(d, only), (0, [
+            "no gpt responses in " + only,
+            "anthropic model=claude-x timed=1 ttfb_ms p50=100 p95=100 upstream_ms p50=300 p95=300 total_ms p50=310 p95=310"],
+            ""))
+
+
 MW_CLI = '''
 NAME = "tool"
 SETTINGS = {"greeting": ("hi", str, "MODEL_GATEWAY_TOOL_GREETING")}

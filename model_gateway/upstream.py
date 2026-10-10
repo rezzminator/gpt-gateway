@@ -1,13 +1,16 @@
-"""The upstream API: one connection per serving thread, kept alive, with one fresh retry; and WebSocket upgrades.
+"""The upstream API: a shared pool of kept-alive connections, each leased to one request at a time, with one fresh
+retry; and WebSocket upgrades.
 
-A pooled connection idle past IDLE_SECONDS is closed before use, never sent on. A pooled connection
-the server closed fails on its next use; the request is retried once on a new
-connection; `reuse()` reports whether the last send rode a kept-alive connection and whether that retry
-fired. Any other connection error, and a response http.client cannot parse, is final, and the caller
-answers 502. Request headers go as an ordered list of pairs, so a header sent twice goes twice. Every socket
-probes its path with TCP keepalive, so a path that died without a FIN or RST fails the read in seconds.
-`websocket()` upgrades a fresh connection (RFC 6455) and hands the caller the socket to keep; its frames are
-`model_gateway/frames.py`'s.
+A connection goes back to the pool the moment its response body is complete, never earlier; a response cut short
+spends its connection. The pool keeps at most MAX_IDLE idle connections and a reaper closes those idle past
+IDLE_SECONDS, so open sockets follow the requests in flight plus a bounded reserve, never the number of clients. A
+pooled connection the server closed fails on its next use; the request is retried once on a new connection;
+`reuse()` reports whether the last send rode a kept-alive connection and whether that retry fired. Any other
+connection error, and a response http.client cannot parse, is final, and the caller answers 502; one that is the
+process running out of file handles says so (`model_gateway/handles.py`). Request headers go as an ordered list of
+pairs, so a header sent twice goes twice. Every socket probes its path with TCP keepalive, so a path that died
+without a FIN or RST fails the read in seconds. `websocket()` upgrades a fresh connection (RFC 6455) and hands the
+caller the socket to keep; its frames are `model_gateway/frames.py`'s.
 """
 import base64
 import hashlib
@@ -19,12 +22,10 @@ import sys
 import threading
 from urllib.parse import urlsplit
 
-from . import clock
+from . import handles
+from .pool import Pool, PooledResponse
 
 TIMEOUT_SECONDS = 900
-# reqwest's default pool idle timeout. Past it a NAT or the edge may have dropped the connection without a
-# FIN, and a request sent on it waits out the TCP retransmission timeout before failing.
-IDLE_SECONDS = 90
 # Past KEEPALIVE_IDLE seconds without traffic the kernel probes the peer every KEEPALIVE_INTERVAL seconds and fails
 # the socket after KEEPALIVE_PROBES unanswered probes. A peer that is only slow (a model reasoning before its first
 # token) still answers them, so only a dead path (a Wi-Fi roam, a dropped NAT mapping) ends the read: in about 35 s,
@@ -69,13 +70,25 @@ def keepalive(sock, event):
 
 
 class _Keepalive:
-    """Turns TCP keepalive on for the connection's socket as it connects."""
+    """Turns TCP keepalive on for the connection's socket as it connects, and leases it to a pool."""
 
     event = staticmethod(lambda kind, **fields: None)
+    response_class = PooledResponse
+    pool = holder = owner = None  # the pool it returns to; the thread whose request it serves now; the last such thread
+    idle_since = 0.0
 
     def connect(self):
         super().connect()
         keepalive(self.sock, self.event)
+
+    def getresponse(self):
+        resp = super().getresponse()
+        resp.lease = self
+        resp.settle()  # a response with no body is complete already
+        return resp
+
+    def give_back(self):
+        self.pool.give(self)
 
 
 class KeepaliveHTTPConnection(_Keepalive, http.client.HTTPConnection):
@@ -152,35 +165,42 @@ class Upstream:
     def __init__(self, origin, event=None):
         self.origin = urlsplit(origin)
         self.event = event if event is not None else (lambda kind, **fields: None)
-        self.local = threading.local()
+        self.pool = Pool(lambda kind, **fields: self.event(kind, **fields))
+        self.local = threading.local()  # `conn`: the connection this thread leased last, its if the pool says so
         self.tls = ssl.create_default_context() if self.origin.scheme == "https" else None
 
-    def connection(self):
-        conn = getattr(self.local, "conn", None)
-        # Idle runs from the last response's headers, so a long stream counts toward it: reconnecting early
-        # costs one handshake, reusing a dead connection costs the TCP timeout.
-        if conn is not None and conn.sock is not None and clock.monotonic() - getattr(self.local, "answered", float("-inf")) > IDLE_SECONDS:
-            self.drop()
-            conn = None
+    def connection(self, fresh=False):
+        """A connection leased to this thread: the newest idle one (never when `fresh`), else a new one. A lease this
+        thread still holds, a response it never finished, is spent."""
+        self.forget(idle=False)
+        conn = None if fresh else self.pool.take()
         if conn is None:
             host, port = self.origin.hostname, self.origin.port
             if self.tls is not None:
                 conn = KeepaliveHTTPSConnection(host, port or 443, timeout=TIMEOUT_SECONDS, context=self.tls)
             else:
                 conn = KeepaliveHTTPConnection(host, port or 80, timeout=TIMEOUT_SECONDS)
-            conn.event = self.event
-            self.local.conn = conn
+            me = threading.current_thread()
+            conn.event, conn.pool, conn.holder, conn.owner = self.event, self.pool, me, me
+        self.local.conn = conn
         return conn
 
-    def drop(self):
-        """Close this thread's connection; the next request opens a fresh one."""
+    def forget(self, idle):
+        """Close this thread's connection if it still has it in its hands: it holds the lease, or (`idle`) it finished
+        the last response and no other thread has taken the connection from the pool since."""
         conn = getattr(self.local, "conn", None)
         self.local.conn = None
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception as e:
-                self.event("upstream_socket", what="close", error=repr(e))
+        if conn is not None and self.pool.revoke(conn, idle):
+            self.pool.close([conn])
+
+    def drop(self):
+        """Spend this thread's connection, a failed or abandoned exchange's, unless another thread has it now."""
+        self.forget(idle=True)
+
+    def close(self):
+        """Close this thread's connection and every idle one."""
+        self.drop()
+        self.pool.clear()
 
     def reuse(self):
         """(reused, stale) of this thread's last send: the answering attempt rode a kept-alive connection;
@@ -188,37 +208,48 @@ class Upstream:
         return getattr(self.local, "reused", False), getattr(self.local, "stale", False)
 
     def abort(self):
-        """Shut this thread's socket down, so a reader blocked on its response returns, then drop it."""
+        """Shut this thread's socket down, so a reader blocked on its response returns, then drop it. A connection
+        whose lease ended, its response read to the end, is no longer this thread's to shut. The lease ends before the
+        shutdown, so a reader finishing the body meanwhile cannot hand the connection to another request."""
         conn = getattr(self.local, "conn", None)
-        if conn is not None and conn.sock is not None:
-            try:
-                conn.sock.shutdown(socket.SHUT_RDWR)
-            except OSError as e:
-                self.event("upstream_socket", what="shutdown", error=repr(e))
+        if conn is not None and self.pool.revoke(conn, idle=False):
+            self.local.conn = None
+            if conn.sock is not None:
+                try:
+                    conn.sock.shutdown(socket.SHUT_RDWR)
+                except OSError as e:
+                    self.event("upstream_socket", what="shutdown", error=repr(e))
+            self.pool.close([conn])
         self.drop()
+
+    def unreachable(self, error, where):
+        """The UpstreamError for a connection that could not be made, naming a shortage of file handles as one."""
+        shortage = handles.diagnose(error)
+        if shortage is None:
+            return UpstreamError("upstream unreachable: %r" % error)
+        handles.announce(self.event, "fd_exhausted", where=where, error=repr(error), open=shortage.open,
+                       limit=shortage.limit)
+        return UpstreamError(shortage.message + " (%r)" % error)
 
     def send(self, method, path, body, headers, timeout=None):
         """The upstream response, or UpstreamError after the one fresh retry.
 
         headers: ((name, value), ...) in the client's order; Host comes from the origin.
-        timeout: seconds for this thread's connection from now on, when given.
+        timeout: seconds this request reads and writes with, TIMEOUT_SECONDS when None.
         """
         self.local.reused = self.local.stale = False
         for attempt in (1, 2):
             try:
-                conn = self.connection()
+                conn = self.connection(fresh=attempt == 2)
                 self.local.reused = conn.sock is not None
-                if timeout is not None:
-                    conn.timeout = timeout
-                    if conn.sock is not None:
-                        conn.sock.settimeout(timeout)
+                conn.timeout = TIMEOUT_SECONDS if timeout is None else timeout  # a pooled connection keeps no earlier request's
+                if conn.sock is not None:
+                    conn.sock.settimeout(conn.timeout)
                 conn.putrequest(method, path, skip_accept_encoding=True)
                 for name, value in headers:
                     conn.putheader(name, value)
                 conn.endheaders(body)
-                resp = conn.getresponse()
-                self.local.answered = clock.monotonic()
-                return resp
+                return conn.getresponse()
             except RETRYABLE as e:
                 self.local.stale = self.local.stale or self.local.reused
                 self.drop()
@@ -226,7 +257,7 @@ class Upstream:
                     raise UpstreamError("upstream connection failed: %r" % e)
             except (OSError, socket.timeout) as e:
                 self.drop()
-                raise UpstreamError("upstream unreachable: %r" % e)
+                raise self.unreachable(e, "upstream")
             except http.client.HTTPException as e:
                 self.drop()
                 raise UpstreamError("upstream protocol error: %r" % e)
@@ -268,7 +299,7 @@ class Upstream:
             upgraded, sock = sock, None
             return Upgrade(101, answer, socket=upgraded, pending=rest)
         except (OSError, socket.timeout) as e:
-            raise UpstreamError("upstream unreachable: %r" % e)
+            raise self.unreachable(e, "websocket")
         finally:
             if sock is not None:
                 try:

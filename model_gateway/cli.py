@@ -5,6 +5,7 @@ import sys
 from . import clock
 from . import db as dbmod
 from . import env as envmod
+from . import handles
 from . import server as servermod
 from .hooks import Chain, Context
 from .log import Log
@@ -33,6 +34,7 @@ def cmd_serve(args, install_dir, environ):
         return start_error(rt.log, "settings error", e)
     except MiddlewareError as e:
         return start_error(rt.log, "middleware error", e)
+    handles.raise_limit(rt.db.event, rt.log.write)  # before the first socket: the listener, then every client and upstream
     try:
         server = servermod.bind(rt)
     except OSError as e:
@@ -170,6 +172,7 @@ def cmd_chatgpt_stats(args, install_dir, environ):
     try:
         path = envmod.CoreEnv.parse(environ).db_path
         responses = dbmod.chatgpt_responses(path, since)
+        claude = dbmod.anthropic_timings(path, since)
     except (dbmod.DbError, envmod.EnvError) as error:
         print("model-gateway: chatgpt-stats: %s" % error, file=sys.stderr)
         return 1
@@ -185,18 +188,26 @@ def cmd_chatgpt_stats(args, install_dir, environ):
             whole.append(response["total_ms"])
     if not lanes:
         print("no gpt responses in %s%s" % (path, " in the last " + args[1] if match else ""))
-        return 0
-    total = [0, 0, 0]
-    for key, row in sorted(lanes.items()):
-        print("%s responses=%d input=%d cached=%d hit=%.3f" %
-              (key, *row, row[2] / row[1] if row[1] else 0))
-        total = [a + b for a, b in zip(total, row)]
-    print("total responses=%d input=%d cached=%d hit=%.3f" %
-          (*total, total[2] / total[1] if total[1] else 0))
-    for slug, (ttfb, whole) in sorted(timed.items()):
-        print("slug=%s timed=%d ttfb_ms p50=%d p95=%d total_ms p50=%d p95=%d" %
-              (slug, len(ttfb), percentile(ttfb, 50), percentile(ttfb, 95), percentile(whole, 50),
-               percentile(whole, 95)))
+    else:
+        total = [0, 0, 0]
+        for key, row in sorted(lanes.items()):
+            print("%s responses=%d input=%d cached=%d hit=%.3f" %
+                  (key, *row, row[2] / row[1] if row[1] else 0))
+            total = [a + b for a, b in zip(total, row)]
+        print("total responses=%d input=%d cached=%d hit=%.3f" %
+              (*total, total[2] / total[1] if total[1] else 0))
+        for slug, (ttfb, whole) in sorted(timed.items()):
+            print("slug=%s timed=%d ttfb_ms p50=%d p95=%d total_ms p50=%d p95=%d" %
+                  (slug, len(ttfb), percentile(ttfb, 50), percentile(ttfb, 95), percentile(whole, 50),
+                   percentile(whole, 95)))
+    models = {}
+    for row in claude:
+        for column, values in zip(("ttfb_ms", "upstream_ms", "total_ms"), models.setdefault(row["model"] or "-", ([], [], []))):
+            values.append(row[column])
+    for model, columns in sorted(models.items()):
+        print("anthropic model=%s timed=%d %s" % (model, len(columns[0]), " ".join(
+            "%s p50=%d p95=%d" % (name, percentile(values, 50), percentile(values, 95))
+            for name, values in zip(("ttfb_ms", "upstream_ms", "total_ms"), columns))))
     return 0
 
 

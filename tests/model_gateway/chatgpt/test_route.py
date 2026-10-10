@@ -113,7 +113,7 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(gpt["headers"]["content-length"], str(len(gpt["body"])))
         self.assertEqual((gpt["headers"]["authorization"], gpt["headers"]["x-api-key"]), ("Bearer claude-secret", "claude-key"))
         self.assertEqual(self.fake.seen, [])
-        rows = re.compile(r" db_rows=\d+")  # a row still queued may land between the two
+        rows = re.compile(r" (db_rows|fds)=\S+")  # a row still queued may land between the two, a handle open for one
         self.assertEqual(rows.sub("", fakes.request(port, "GET", "/__gateway/health")[1].decode()),
                          rows.sub("", health_line(rt.settings.current(), rt)))
 
@@ -473,8 +473,8 @@ class CodexRouteTest(unittest.TestCase):
                 before = set(threading.enumerate())
                 connections = []
                 connection = rt.chatgpt.client.upstream.connection
-                def connected():
-                    conn = connection()
+                def connected(**kwargs):
+                    conn = connection(**kwargs)
                     connections.append(conn)
                     return conn
                 with patch.object(rt.chatgpt.client, "watch", side_effect=watched), \

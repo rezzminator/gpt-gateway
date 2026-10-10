@@ -19,6 +19,10 @@ from .upstream import UpstreamError
 from .usage import Meter
 
 MESSAGES_PATH = "/v1/messages"
+# A client connection that sends nothing for this long is closed. Twice the 5-minute prompt-cache TTL: a chat that
+# is still inside its cache window, and a pause as long again, keep their connection; a closed one is reopened by the
+# client, and a request that crosses the close is a connection failure Claude Code's SDK retries.
+CLIENT_IDLE_SECONDS = 600
 ERROR_HEAD = 600
 CHUNK = 65536
 
@@ -104,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         self.server.runtime.drain.connected(self.connection)
 
     def finish(self):
-        # One thread serves one client connection; its upstream connection ends with it.
+        # One thread serves one client connection; an upstream connection it still leases, a response never finished, ends with it.
         rt = self.server.runtime
         rt.drain.disconnected(self.connection)
         try:
@@ -113,6 +117,11 @@ class Handler(BaseHTTPRequestHandler):
             rt.upstream.drop()
             if rt.chatgpt is not None:
                 rt.chatgpt.client.drop()
+
+    def handle_one_request(self):
+        # Waiting for the next request is the only wait this bounds; stdlib answers the timeout by closing the connection.
+        self.connection.settimeout(CLIENT_IDLE_SECONDS)
+        super().handle_one_request()
 
     def log_message(self, *args):
         pass  # the database records each exchange itself
@@ -146,6 +155,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_any(self):
         rt = self.server.runtime
+        self.connection.settimeout(None)  # the request is in; the idle limit does not cut its body, hooks or stream
         snap = rt.settings.current()  # one settings snapshot per request
         if self.path == HEALTH_PATH:
             return self.reply(200, "text/plain", health_line(snap, rt).encode())
@@ -219,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
         headers.append(("accept-encoding", "identity"))
         if sent or self.command in ("POST", "PUT", "PATCH"):
             headers.append(("content-length", str(len(sent))))
+        sent_at = clock.monotonic()
         try:
             resp = rt.upstream.send(self.command, self.path, sent or None, headers)
         except UpstreamError as e:
@@ -230,11 +241,12 @@ class Handler(BaseHTTPRequestHandler):
             rt.chain.run_response_end(ctx, Result(502, "Bad Gateway", (), data[:ERROR_HEAD], True, False,
                                                   clock.monotonic() - started, note))
             return
-        self.relay(rt, ctx, resp, note, body, cap, started, rt.upstream, row)
+        self.relay(rt, ctx, resp, note, body, cap, started, rt.upstream, row, sent_at)
 
-    def relay(self, rt, ctx, resp, note, body, cap, started, upstream, row):
+    def relay(self, rt, ctx, resp, note, body, cap, started, upstream, row, sent_at=None):
         """Relay `resp` to the client and record its row; `upstream` is the connection a broken relay spends,
-        None for a hook's answer."""
+        None for a hook's answer; `sent_at` is when the Anthropic route sent the request, for the row's timings."""
+        first = last = None
         resp_headers = tuple(resp.getheaders())
         cap.response(resp.status, resp.reason, resp_headers)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
@@ -249,6 +261,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("content-length", "0")
                 self.end_headers()
                 resp.read()
+                first = last = clock.monotonic()
             else:
                 self.send_header("transfer-encoding", "chunked")
                 self.end_headers()
@@ -256,7 +269,11 @@ class Handler(BaseHTTPRequestHandler):
                 while True:
                     chunk = resp.read1(CHUNK)
                     if not chunk:
+                        last = clock.monotonic()
+                        first = last if first is None else first
                         break
+                    if first is None:
+                        first = clock.monotonic()
                     cap.chunk(chunk)
                     if resp.status >= 400 and len(error_head) < ERROR_HEAD:
                         error_head += chunk[:ERROR_HEAD - len(error_head)]
@@ -281,6 +298,10 @@ class Handler(BaseHTTPRequestHandler):
         if sink is not None:
             sink.close(completed)
         meter.finish()
+        if sent_at is not None and first is not None:  # the upstream's own answer, by clock reads beside the relay
+            row.update(ttfb_ms=clock.milliseconds(first - started))
+            if last is not None:
+                row.update(upstream_ms=clock.milliseconds(last - sent_at))
         self.finish_row(rt, row, resp, completed, disconnected, failure, error_head, meter, body, resp_headers)
         self.record(rt, row, started)
         rt.chain.run_response_end(ctx, Result(resp.status, resp.reason, resp_headers,

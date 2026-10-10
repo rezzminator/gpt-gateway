@@ -144,6 +144,45 @@ class ClosingUpstream(BaseHTTPRequestHandler):
         self.close_connection = True
 
 
+class KeepingUpstream(BaseHTTPRequestHandler):
+    """Keeps every connection alive and answers a fixed-length body (`/big`: 100000 bytes, `/hold`: after `release` is
+    set); `ports` lists each request's client port in arrival order, `live` the connections open now. Use `keeping()`."""
+
+    protocol_version = "HTTP/1.1"
+    ports, live, lock, release = [], [0], threading.Lock(), threading.Event()
+
+    def log_message(self, *a):
+        pass
+
+    def setup(self):
+        super().setup()
+        with self.lock:
+            self.live[0] += 1
+
+    def finish(self):
+        with self.lock:
+            self.live[0] -= 1
+        super().finish()
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.ports.append(self.client_address[1])
+        if self.path == "/hold":
+            self.release.wait(10)
+        data = b"x" * 100000 if self.path == "/big" else JSON_BODY
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def keeping():
+    """A fresh KeepingUpstream class, so one test's `ports`, `live` and `release` are its own."""
+    return type("Keeping", (KeepingUpstream,), {"ports": [], "live": [0], "lock": threading.Lock(),
+                                                "release": threading.Event()})
+
+
 RECORDER = '''
 NAME = "{name}"
 CALLS = []

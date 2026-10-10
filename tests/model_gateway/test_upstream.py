@@ -1,12 +1,13 @@
 """Tests for model_gateway.upstream: a pooled connection the server closed gets one fresh retry; every socket probes
 its path with TCP keepalive; a WebSocket upgrade follows RFC 6455."""
+import errno
 import json
 import socket
 import threading
 import unittest
 import unittest.mock
 
-from model_gateway import frames, upstream
+from model_gateway import frames, handles, pool, upstream
 from model_gateway.upstream import Upstream, UpstreamError
 from tests import fakes, jail
 from tests.fakes import ClosingUpstream
@@ -44,7 +45,6 @@ class UpstreamTest(unittest.TestCase):
 
     def test_a_kept_alive_connection_idle_past_the_limit_is_replaced_before_use(self):
         from unittest import mock
-        from model_gateway import frames, upstream
 
         class Keeping(ClosingUpstream):
             def do_POST(self):
@@ -52,14 +52,14 @@ class UpstreamTest(unittest.TestCase):
                 self.close_connection = False
         up = Upstream(fakes.start_upstream(self, Keeping))
         t = [1000.0]
-        with mock.patch.object(upstream.clock, "monotonic", lambda: t[0]):
+        with mock.patch.object(pool.clock, "monotonic", lambda: t[0]):
             up.send("POST", "/x", b"{}", HEADERS).read()
             first = up.local.conn
-            t[0] += upstream.IDLE_SECONDS
+            t[0] += pool.IDLE_SECONDS
             up.send("POST", "/x", b"{}", HEADERS).read()
             self.assertEqual(up.reuse(), (True, False))  # idle exactly the limit: still reused
             self.assertIs(up.local.conn, first)
-            t[0] += upstream.IDLE_SECONDS + 1
+            t[0] += pool.IDLE_SECONDS + 1
             up.send("POST", "/x", b"{}", HEADERS).read()
             self.assertEqual(up.reuse(), (False, False))  # idle past it: a fresh connection, no stale retry
             self.assertIsNot(up.local.conn, first)
@@ -111,6 +111,8 @@ class UpstreamTest(unittest.TestCase):
 
     def test_a_close_that_fails_is_recorded(self):
         class Broken:
+            holder = threading.current_thread()
+
             def close(self):
                 raise OSError(9, "Bad file descriptor")
         events = []
@@ -162,6 +164,27 @@ class UpstreamTest(unittest.TestCase):
     def test_https_gets_a_tls_context(self):
         self.assertIsNotNone(Upstream("https://example.invalid").tls)
         self.assertIsNone(Upstream("http://example.invalid").tls)
+
+
+
+class OutOfHandlesTest(unittest.TestCase):
+    def test_an_upstream_that_cannot_open_a_socket_says_why_and_records_it_once(self):
+        handles.THROTTLE.clear()
+        self.addCleanup(handles.THROTTLE.clear)
+        events = []
+        up = Upstream("http://127.0.0.1:9", lambda kind, **fields: events.append((kind, fields)))
+        refuse = OSError(errno.EMFILE, "Too many open files")
+        with unittest.mock.patch.object(handles, "open_count", return_value=62), \
+                unittest.mock.patch.object(handles, "soft_limit", return_value=64), \
+                unittest.mock.patch("model_gateway.upstream.KeepaliveHTTPConnection.connect", side_effect=refuse):
+            for _ in range(3):
+                with self.assertRaises(UpstreamError) as caught:
+                    up.send("POST", "/x", b"{}", HEADERS)
+        self.assertIn("out of file handles", caught.exception.message)
+        self.assertIn("62 open of 64", caught.exception.message)
+        self.assertNotIn("unreachable", caught.exception.message)
+        self.assertEqual([(kind, fields["where"], fields["open"], fields["limit"]) for kind, fields in events],
+                         [("fd_exhausted", "upstream", 62, 64)])
 
 
 

@@ -11,8 +11,11 @@ import sys
 import threading
 from http.server import ThreadingHTTPServer
 
-from . import clock
+from . import clock, handles
 from .proxy import Handler
+
+REQUEST_QUEUE_SIZE = 256  # the listen backlog; the stdlib's 5 reset a burst of simultaneous connects (the kernel caps it)
+ACCEPT_BACKOFF = 0.1  # seconds to wait after a failed accept, so a listener that cannot accept does not spin
 
 
 class Drain:
@@ -73,6 +76,7 @@ class Drain:
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = REQUEST_QUEUE_SIZE
 
     def __init__(self, address, runtime, handler=Handler):
         self.runtime = runtime
@@ -81,6 +85,20 @@ class Server(ThreadingHTTPServer):
     def server_bind(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         super().server_bind()
+
+    def get_request(self):
+        # socketserver swallows an accept failure; a process out of descriptors is the one that matters.
+        try:
+            return super().get_request()
+        except OSError as error:
+            shortage = handles.diagnose(error)
+            if shortage is None:
+                handles.announce(self.runtime.db.event, "accept_failed", error=repr(error))
+            else:
+                handles.announce(self.runtime.db.event, "fd_exhausted", where="accept", error=repr(error),
+                               open=shortage.open, limit=shortage.limit)
+                clock.sleep(ACCEPT_BACKOFF)
+            raise
 
     def handle_error(self, request, client_address):
         # Claude Code drops idle keep-alive connections; that is not an error worth a traceback.

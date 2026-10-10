@@ -1,5 +1,7 @@
 """Tests for model_gateway.health: the exact health line, with and without middleware, and its database fields."""
 import os
+import re
+import resource
 import unittest
 
 from model_gateway import db
@@ -8,12 +10,14 @@ from tests.fakes import RECORDER, calls
 
 FAIL = 'NAME = "fail"\ndef on_request(ctx, req):\n    raise RuntimeError("x")\n'
 SAYS = 'NAME = "says"\nSETTINGS = {"v": (7, int, None)}\ndef health(ctx):\n    return "v=%d" % ctx.settings["v"]\n'
+FDS = re.compile(rb" fds=\d+/\d+ ")
 with open(os.path.join(jail.ROOT, "examples", "middleware", "model_note.py")) as f:
     NOTE = f.read()
 
 
 def health(port):
-    return fakes.request(port, "GET", "/__gateway/health")[1]
+    """The health line with its `fds=` field replaced by a fixed one: the open count moves with every thread."""
+    return FDS.sub(b" fds=N/L ", fakes.request(port, "GET", "/__gateway/health")[1])
 
 
 def db_part(rt):
@@ -38,14 +42,14 @@ class HealthTest(unittest.TestCase):
     def test_no_settings_no_middleware(self):
         rt, port = fakes.start_gateway(self)
         part = db_part(rt)
-        self.assertEqual(health(port), b"ok pid=%d capture=off settings=missing %s middleware=[]\n" % (os.getpid(), part))
+        self.assertEqual(health(port), b"ok pid=%d fds=N/L capture=off settings=missing %s middleware=[]\n" % (os.getpid(), part))
 
     def test_the_example_middleware_and_capture_on(self):
         rt, port = fakes.start_gateway(self, settings={"capture_dir": "/tmp/unused-capture",
                                                        "middleware": [{"module": "model_note"}]},
                                        middleware={"model_note": NOTE})
         part = db_part(rt)
-        self.assertEqual(health(port), b"ok pid=%d capture=on settings=ok %s middleware=[model-note errors=0]\n"
+        self.assertEqual(health(port), b"ok pid=%d fds=N/L capture=on settings=ok %s middleware=[model-note errors=0]\n"
                          % (os.getpid(), part))
 
     def test_health_text_and_errors(self):
@@ -55,14 +59,23 @@ class HealthTest(unittest.TestCase):
         fakes.request(port, "POST", "/v1/messages", b'{"model":"m"}')
         part = db_part(rt)
         self.assertNotIn(b" db_rows=0 ", part + b" ")  # the request's row and its failure's event
-        self.assertEqual(health(port), b"ok pid=%d capture=off settings=ok %s middleware=[says v=7 errors=0, fail errors=1]\n"
+        self.assertEqual(health(port), b"ok pid=%d fds=N/L capture=off settings=ok %s middleware=[says v=7 errors=0, fail errors=1]\n"
                          % (os.getpid(), part))
 
     def test_a_refused_edit_shows_as_a_settings_error(self):
         rt, port = fakes.start_gateway(self, settings={})
         jail.write_json(rt.settings.path, {"capture_dir": "relative"}, bump=1)
-        self.assertRegex(health(port), rb"^ok pid=\d+ capture=off settings=error\(.*capture_dir must be an absolute path.*\) "
+        self.assertRegex(health(port), rb"^ok pid=\d+ fds=N/L capture=off settings=error\(.*capture_dir must be an absolute path.*\) "
                                        rb"db=\S+ db_rows=\d+ db_drops=0 db_errors=0 middleware=\[\]\n$")
+
+    def test_the_line_reports_open_handles_over_the_soft_limit(self):
+        rt, port = fakes.start_gateway(self)
+        raw = fakes.request(port, "GET", "/__gateway/health")[1]
+        found = re.match(rb"^ok pid=\d+ fds=(\d+)/(\d+) capture=", raw)
+        self.assertIsNotNone(found, raw)
+        self.assertEqual(int(found.group(2)), resource.getrlimit(resource.RLIMIT_NOFILE)[0])
+        self.assertGreater(int(found.group(1)), 0)
+        self.assertLess(int(found.group(1)), int(found.group(2)))
 
     def test_health_runs_no_hook(self):
         rt, port = fakes.start_gateway(self, settings={"middleware": [{"module": "rec"}]},

@@ -1,5 +1,6 @@
 """Jailed token persistence, rotation and inter-process single-flight tests."""
 import base64
+import errno
 import importlib
 import io
 import json
@@ -174,6 +175,16 @@ class AuthTest(unittest.TestCase):
                 self.assertEqual(len(self.fake.calls) - before, 1)
                 with open(self.knobs.auth_path, "rb") as stream:
                     self.assertEqual(stream.read(), stored)
+
+    def test_a_refresh_that_ran_out_of_file_handles_says_so(self):
+        self.store.save(tokens())
+        refuse = OSError(errno.EMFILE, "Too many open files")
+        with patch("http.client.HTTPSConnection.connect", side_effect=refuse), \
+                patch("http.client.HTTPConnection.connect", side_effect=refuse):
+            with self.assertRaises(self.auth.AuthError) as caught:
+                self.store.credentials()
+        self.assertIn("ChatGPT auth connection failed: out of file handles", str(caught.exception))
+        self.assertEqual(len(self.fake.calls), 0)
 
     def test_threads_single_flight_expiry_and_forced_401(self):
         for force in (False, True):

@@ -325,3 +325,11 @@ def chatgpt_responses(path, since=0.0):
     input_tokens, cache_read_tokens, ttfb_ms and total_ms."""
     return query(path, "SELECT lane, slug, input_tokens, cache_read_tokens, ttfb_ms, total_ms FROM requests"
                        " WHERE route = 'chatgpt' AND input_tokens IS NOT NULL AND started >= ? ORDER BY id", (since,))
+
+
+def anthropic_timings(path, since=0.0):
+    """Each Anthropic-route request that carries timings since `since` (epoch seconds), oldest first: model,
+    ttfb_ms, upstream_ms and total_ms."""
+    return query(path, "SELECT model, ttfb_ms, upstream_ms, total_ms FROM requests WHERE route = 'anthropic'"
+                       " AND ttfb_ms IS NOT NULL AND upstream_ms IS NOT NULL AND total_ms IS NOT NULL"
+                       " AND started >= ? ORDER BY id", (since,))

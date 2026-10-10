@@ -32,12 +32,14 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | headers | the secret headers, the hop-by-hop set, the read-only `ctx.headers` mapping, the debug header pick | `model_gateway/headers.py` | assumed: the secret set changes once, for capture and hooks alike |
 | events | splitting an SSE stream into events across chunk boundaries; the one-call JSON event | `model_gateway/events.py` | assumed: changes only with the SSE wire format |
 | capture | the capture folder layout, secret redaction, sequence numbers | `model_gateway/capture.py` | assumed: the layout and its file names change together |
-| upstream | the per-thread upstream connection, the one fresh retry, TLS, the WebSocket upgrade | `model_gateway/upstream.py` | assumed: never co-changes with the hooks |
+| upstream | the upstream connection leased from the pool, the one fresh retry, TLS, the WebSocket upgrade, an out-of-handles failure named as one | `model_gateway/upstream.py` | assumed: never co-changes with the hooks |
+| pool | the idle upstream connections shared across serving threads: give back when a body is complete, the idle cap, the reaper | `model_gateway/pool.py` | assumed: the lease rule and the bounds co-change |
+| handles | the soft open-file limit raised at start, the open count, the out-of-handles diagnosis and its rate-limited event | `model_gateway/handles.py` | assumed: the limit, the count and the diagnosis co-change |
 | frames | RFC 6455 frames on an upgraded socket: masking, fragments, pings, closes, the idle check | `model_gateway/frames.py` | assumed: the wire format changes alone |
 | proxy | one exchange: read the body (chunked included), run the hooks, forward or take a hook's answer, relay chunk by chunk, the request's row | `model_gateway/proxy.py` | assumed: the exchange's steps co-change, so they are one unit (see § Tree, flow order) |
 | response | the in-memory response the relay reads where no upstream HTTP response exists: a hook's answer, a ChatGPT-route body | `model_gateway/response.py` | assumed: changes with the relay's reading surface only |
 | health | the health line | `model_gateway/health.py` | assumed: changes with the health contract only |
-| server | the listening socket with `SO_REUSEPORT`, in-flight tracking, SIGTERM drain | `model_gateway/server.py` | assumed: graceful restart and drain change together |
+| server | the listening socket with `SO_REUSEPORT` and its backlog, accept failures, in-flight tracking, SIGTERM drain | `model_gateway/server.py` | assumed: graceful restart and drain change together |
 | runtime | composing env, log, database, settings, middleware, upstream and drain into one object | `model_gateway/runtime.py` | assumed: changes when a new mechanism joins |
 | harness | the public middleware test harness | `model_gateway/harness.py` | assumed: changes with the hooks contract |
 | chatgpt signature | reasoning signature codec | `model_gateway/chatgpt/signature.py` | assumed: replay and stream share the codec |
@@ -80,7 +82,7 @@ model_gateway/cli.py                      COMMANDS table → serve | check | mw 
 model_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 model_gateway/clock.py                    façade: time
 model_gateway/log.py                      façade: the text log
-model_gateway/db.py                       façade: Db, query, chatgpt_responses, DbError
+model_gateway/db.py                       façade: Db, query, chatgpt_responses, anthropic_timings, DbError
 model_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
 model_gateway/middleware.py               Module, load_modules, MiddlewareError
 model_gateway/hooks.py                    Context, Request, Answer, Result, Chain, last_turn_message
@@ -88,11 +90,13 @@ model_gateway/headers.py                  Headers, SECRET, HOP, debug_headers
 model_gateway/events.py                   EventSplitter, json_event
 model_gateway/capture.py                  façade: Capture, Sequence
 model_gateway/upstream.py                 façade: Upstream, UpstreamError, Upgrade
+model_gateway/pool.py                     Pool, PooledResponse: the idle upstream connections
+model_gateway/handles.py                  raise_limit, open_count, diagnose, announce: file handles
 model_gateway/frames.py                   WebSocket, mask, parse_frame: RFC 6455 frames on an upgraded socket
 model_gateway/proxy.py                    Handler, the request row
 model_gateway/usage.py                    Meter: usage and error code off a relayed response
 model_gateway/response.py                 Response: the in-memory response the relay reads
-model_gateway/health.py                   health_line
+model_gateway/health.py                   health_line (pid, fds, ...)
 model_gateway/server.py                   Server, Drain, serve
 model_gateway/runtime.py                  Runtime
 model_gateway/harness.py                  run, run_cli, load
@@ -190,7 +194,8 @@ The census of the product spelling exempts this document alone, since its glossa
 | logging | `model_gateway/log.py` | appending to the log file, rotation, the `logging` module |
 | the database | `model_gateway/db.py` | the `sqlite3` module: connections, the schema, every read and write |
 | settings | `model_gateway/settings.py` | reading `settings.json` and its file name |
-| upstream HTTP | `model_gateway/upstream.py` | `http.client.HTTPConnection`, `HTTPSConnection`, `ssl.create_default_context`, `socket.create_connection` |
+| upstream HTTP | `model_gateway/upstream.py` | `http.client.HTTPConnection`, `HTTPSConnection`, `ssl.create_default_context`, `socket.create_connection`; its pool is `model_gateway/pool.py` |
+| file handles | `model_gateway/handles.py` | `resource.setrlimit`, the `/dev/fd` listing |
 | capture writes | `model_gateway/capture.py` | the capture file names and their writes |
 | test scratch root | `tests/jail.py` | `tempfile.mkdtemp`, `mkstemp`, `TemporaryDirectory`, `NamedTemporaryFile` in tests |
 

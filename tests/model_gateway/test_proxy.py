@@ -334,5 +334,37 @@ class RelayRouteTest(unittest.TestCase):
                 self.assertEqual(result.client_disconnected, isinstance(failure, BrokenPipeError))
 
 
+class ClaudeRouteTimingTest(unittest.TestCase):
+    def test_a_streamed_reply_carries_ttfb_ms_and_upstream_ms(self):
+        up = fakes.start_upstream(self, fakes.SlowUpstream)  # first event at once, the last about 1.5 s later
+        rt, port = fakes.start_gateway(self, up)
+        resp, data = fakes.request(port, "POST", "/v1/messages", b'{"model":"m","stream":true}')
+        self.assertEqual(resp.status, 200)
+        (row,) = fakes.recorded(rt)
+        self.assertIsNotNone(row["ttfb_ms"])
+        self.assertIsNotNone(row["upstream_ms"])
+        self.assertLess(row["ttfb_ms"], 700)
+        self.assertGreaterEqual(row["upstream_ms"], 1400)
+        self.assertLessEqual(row["upstream_ms"], row["total_ms"])
+
+    def test_a_json_reply_and_an_error_reply_carry_them_too(self):
+        rt, port = fakes.start_gateway(self, fakes.start_upstream(self))
+        fakes.request(port, "POST", "/v1/json", b'{"model":"m"}')
+        fakes.request(port, "POST", "/v1/other", b'{"model":"m"}')  # the fake answers 429
+        ok, limited = fakes.recorded(rt)
+        self.assertEqual((ok["status"], limited["status"]), (200, 429))
+        for row in (ok, limited):
+            self.assertIsNotNone(row["ttfb_ms"], row["path"])
+            self.assertIsNotNone(row["upstream_ms"], row["path"])
+            self.assertLessEqual(row["ttfb_ms"], row["total_ms"])
+            self.assertLessEqual(row["upstream_ms"], row["total_ms"])
+
+    def test_a_request_that_reached_no_upstream_has_none(self):
+        rt, port = fakes.start_gateway(self, "http://127.0.0.1:%d" % jail.free_port())
+        self.assertEqual(fakes.request(port, "POST", "/v1/json", b'{"model":"m"}')[0].status, 502)
+        (row,) = fakes.recorded(rt)
+        self.assertEqual((row["ttfb_ms"], row["upstream_ms"]), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ import tempfile
 import threading
 from urllib.parse import urlencode
 
-from .. import clock
+from .. import clock, handles
 from ..upstream import Upstream
 from .keychain import Keychain, KeychainError
 from . import identity
@@ -111,10 +111,11 @@ def post_token(origin, path, body, form=False, timeout=30):
         if not isinstance(data, dict):
             raise AuthError("Invalid ChatGPT auth response")
         return response.status, data
-    except (OSError, http.client.HTTPException):
-        raise AuthError("ChatGPT auth connection failed") from None
+    except (OSError, http.client.HTTPException) as error:
+        shortage = handles.diagnose(error)
+        raise AuthError("ChatGPT auth connection failed" + (": " + shortage.message if shortage else "")) from None
     finally:
-        upstream.drop()
+        upstream.close()
 
 
 class Store:
