@@ -79,10 +79,18 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
                        len(serialized) - _attachment_chars(result['input']))
 
 
-def activity_summary(body: dict) -> bool:
-    """True when the last message is a user turn whose own text, never a tool result's, opens with the summary ask."""
+def last_turn_message(body: dict):
+    """The last user or assistant message, past the harness notices Claude Code appends as trailing system messages."""
     messages = body.get('messages')
-    last = messages[-1] if isinstance(messages, list) and messages else None
+    for message in reversed(messages if isinstance(messages, list) else []):
+        if not isinstance(message, dict) or message.get('role') != 'system':
+            return message
+    return None
+
+
+def activity_summary(body: dict) -> bool:
+    """True when the last turn message is the user's, and its own text, never a tool result's, opens with the summary ask."""
+    last = last_turn_message(body)
     if not isinstance(last, dict) or last.get('role') != 'user':
         return False
     content = last.get('content')

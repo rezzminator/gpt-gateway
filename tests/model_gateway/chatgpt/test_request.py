@@ -130,6 +130,10 @@ class RequestTest(unittest.TestCase):
                 self.assertEqual((value['reasoning']['effort'], translated.notes), (effort, ()))
         self.assertTrue(request.activity_summary({'messages': fork}))
         self.assertTrue(request.activity_summary({'messages': [{'role': 'user', 'content': ask}]}))
+        # Claude Code appends harness notices as trailing system messages; the fork's ask sits before them.
+        notice = {'role': 'system', 'content': 'SubagentStop hook feedback'}
+        self.assertTrue(request.activity_summary({'messages': fork + [notice, notice]}))
+        self.assertFalse(request.activity_summary({'messages': call + [{'role': 'system', 'content': ask}]}))
         # The ask is a summary only as the last user message's own text: quoted in a tool result, earlier or mid-text it is work.
         for messages in (call + [{'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'c', 'content': ask}]}],
                          [{'role': 'user', 'content': ask}, {'role': 'assistant', 'content': 'x'}, {'role': 'user', 'content': 'go'}],
