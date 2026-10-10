@@ -368,15 +368,15 @@ class RouteRetryTest(unittest.TestCase):
             resp, data = fakes.request(port, "POST", "/v1/json", json.dumps(self.body).encode(), self.headers)
             self.assertEqual(data, fakes.JSON_BODY)
 
-    def test_explicit_empty_completion_exhausts_before_output(self):
-        self.fake.script = [(200, fakes.responses_event("response.completed", response={"usage": {}}))] * 5
+    def test_an_empty_completion_ends_the_turn_with_no_content(self):
+        # Claude Code answers an end_turn without text with one nudge; a retried empty only burns the plan.
+        self.fake.script = [(200, fakes.responses_event("response.completed", response={"usage": {}}))]
         rt, port = self.gateway()
-        with patch("model_gateway.chatgpt.errors.backoff", return_value=0):
-            resp, data = self.send(port)
-        self.assertEqual(resp.status, 503)
-        self.assertEqual(resp.getheader("x-should-retry"), "false")
-        self.assertEqual(len(self.responses()), 5)
-        self.assertEqual(json.loads(data)["error"]["message"], "chatgpt upstream: empty completion")
+        resp, data = self.send(port)
+        message = stream.accumulate(data)
+        self.assertEqual((resp.status, len(self.responses()), message["content"]), (200, 1, []))
+        self.assertEqual(message["stop_reason"], "end_turn")
+        self.assertIn(" empty=1\n", fakes.logged(rt))
 
 
 class CodexRouteTest(unittest.TestCase):

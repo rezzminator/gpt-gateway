@@ -29,7 +29,6 @@ class ErrorsTest(unittest.TestCase):
             (400, {"error": {"code": "slow_down"}}, 529, "overloaded_error", False, False, False),
             (400, {"error": {"code": "usage_not_included"}},
              403, "permission_error", False, False, False),
-            (503, {"code": "empty_completion"}, 503, "api_error", True, False, False),
             (400, {"error": {"code": "invalid_encrypted_content"}},
              400, "invalid_request_error", True, False, True),
             (None, {"code": "stream_closed"}, 502, "api_error", True, False, False),
@@ -142,11 +141,10 @@ class ErrorsTest(unittest.TestCase):
             self.assertAlmostEqual(d.delay, 60)
             self.assertFalse(d.retry)
 
-    def test_empty_no_client_retry_and_frozen_decision(self):
-        d = errors.classify(503, {"code": "empty_completion"}, "before-output")
+    def test_frozen_decision(self):
+        d = errors.classify(None, {"code": "stream_closed"}, "before-output")
         self.assertTrue(d.retry)
-        self.assertEqual(d.client_status, 503)
-        self.assertEqual(d.client_headers, {"x-should-retry": "false"})
+        self.assertEqual(d.client_status, 502)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             d.retry = True
         with self.assertRaises(TypeError):

@@ -153,11 +153,10 @@ class StreamTest(unittest.TestCase):
         output = t.feed(raw) + t.finish()
         self.assertEqual(output, (FIXTURES / "incomplete.anthropic.sse").read_bytes())
 
-    def test_incomplete_failed_error_and_empty_completion(self):
+    def test_incomplete_failed_and_error(self):
         cases = [("response.incomplete", {"response": {"incomplete_details": {"reason": "content_filter"}}}),
                  ("response.failed", {"response": {"error": {"code": "usage_not_included"}}}),
-                 ("error", {"code": "context_length_exceeded"}),
-                 ("response.completed", {"response": {"usage": {}}})]
+                 ("error", {"code": "context_length_exceeded"})]
         for kind, fields in cases:
             with self.subTest(kind=kind):
                 t = self.translator()
@@ -165,8 +164,20 @@ class StreamTest(unittest.TestCase):
                 self.assertEqual(result, b"")
                 self.assertFalse(t.emitted_any)
                 self.assertIsNotNone(t.error)
-                self.assertEqual(t.error.retry, kind == "response.completed")
+                self.assertFalse(t.error.retry)
                 self.assertIn("chatgpt upstream", t.error.client_body["error"]["message"])
+
+    def test_an_empty_completion_is_a_turn_with_no_content(self):
+        for items in ([], [("response.output_item.added", {"item": {"type": "reasoning"}}),
+                           ("response.output_item.done", {"item": {"type": "reasoning", "id": "rs_1"}})]):
+            with self.subTest(items=len(items)):
+                t = self.translator()
+                out = b"".join(t.feed(upstream(kind, **fields)) for kind, fields in items)
+                out += t.feed(upstream("response.completed", response={"usage": {"output_tokens": 9}}))
+                message = stream.accumulate(out)
+                self.assertEqual((t.error, t.empty, t.emitted_any, message["stop_reason"]), (None, True, True, "end_turn"))
+                self.assertEqual([b for b in message["content"] if b["type"] != "thinking"], [])
+                self.assertEqual(t.usage["output_tokens"], 9)
 
     def test_tools_are_whole_at_done_and_parallel_indexes_are_unique(self):
         t = self.translator()
@@ -209,7 +220,6 @@ class StreamTest(unittest.TestCase):
             ("failed", upstream("response.failed", response={"error": None}), 502, True),
             ("error", upstream("error", code="usage_not_included"), 403, False),
             ("incomplete", upstream("response.incomplete", response={"incomplete_details": {"reason": "content_filter"}}), 502, False),
-            ("empty", upstream("response.completed", response={"usage": {}}), 503, True),
             ("protocol", b"data: invalid\n\n", 502, True),
             ("closed", None, 502, True),
             ("idle", None, 502, True),

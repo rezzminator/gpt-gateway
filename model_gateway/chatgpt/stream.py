@@ -30,6 +30,7 @@ class Translator:
     stream_closed/idle_timeout/protocol_error. input_tokens is the upstream
     total; cache_ratio is cached / total. usage is the final Anthropic usage;
     reasoning_tokens is upstream's reasoning count, None when it reports none.
+    empty is true once a response completed with neither text, a tool call nor signed reasoning.
     """
 
     # claude-code-proxy/src/providers/codex/translate/live_stream.rs:78-106.
@@ -43,6 +44,7 @@ class Translator:
         self.cache_ratio = None
         self.input_tokens = None
         self.reasoning_tokens = None
+        self.empty = False
         self._splitter = EventSplitter()
         self._blocks = {}
         self._done = set()
@@ -208,7 +210,9 @@ class Translator:
         return b""
 
     # openai/codex/codex-rs/codex-api/src/sse/responses.rs:117-156; derived, changed.
-    # claude-code-proxy/src/providers/codex/translate/reducer.rs:1023-1052.
+    # claude-code-proxy/src/providers/codex/translate/reducer.rs:1023-1052, changed: a completion with no content ends
+    # its turn, as Codex ends it and as the Messages API answers end_turn with no content; Claude Code then asks once
+    # for visible output, where a retried empty regenerates the same nothing and a final error ends the agent.
     def _complete(self, kind, data):
         response = data.get("response") or {}
         reason = "tool_use" if self._tool_use else "end_turn"
@@ -216,8 +220,7 @@ class Translator:
             if (response.get("incomplete_details") or {}).get("reason") != "max_output_tokens":
                 return self._fail(kind, data)
             reason = "max_tokens"
-        elif not self._has_content:
-            return self._fail(kind, {"code": "empty_completion"})
+        self.empty = not self._has_content
         raw = response.get("usage") or {}
         details = raw.get("input_tokens_details") or {}
         total = max(0, int(raw.get("input_tokens") or 0))

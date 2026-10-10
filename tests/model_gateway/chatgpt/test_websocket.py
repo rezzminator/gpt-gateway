@@ -296,7 +296,7 @@ class WebSocketRouteTest(unittest.TestCase):
     test_usage_limit_and_precommit_context_error = route_tests.RouteTest.test_usage_limit_and_precommit_context_error
     test_nonstream_and_login_failure = route_tests.RouteTest.test_nonstream_and_login_failure
     test_committed_failure_streaming_and_nonstream = route_tests.RouteRetryTest.test_committed_failure_streaming_and_nonstream
-    test_explicit_empty_completion_exhausts_before_output = route_tests.RouteRetryTest.test_explicit_empty_completion_exhausts_before_output
+    test_an_empty_completion_ends_the_turn_with_no_content = route_tests.RouteRetryTest.test_an_empty_completion_ends_the_turn_with_no_content
     test_server_retry_advice_paces_the_retry_and_reaches_claude_code = (
         errors_tests.ErrorsRouteTest.test_server_retry_advice_paces_the_retry_and_reaches_claude_code)
 

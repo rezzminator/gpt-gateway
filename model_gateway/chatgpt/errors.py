@@ -48,7 +48,7 @@ def classify(status, body_head, phase, headers=None):
     body_head accepts a parsed envelope, UTF-8 bytes or text; headers, the upstream answer's
     headers as a mapping or (name, value) pairs, carry its retry advice. The caller enforces
     MAX_RETRIES, one token refresh and one reasoning replay reset per request.
-    Synthetic codes: empty_completion, stream_closed, idle_timeout.
+    Synthetic codes: stream_closed, idle_timeout.
     """
     if phase not in ("before-output", "after-output"):
         raise ValueError("phase must be before-output or after-output")
@@ -97,12 +97,6 @@ def classify(status, body_head, phase, headers=None):
         client_status, kind = 529, "overloaded_error"
     elif "usage_not_included" in lower or status == 403:
         client_status, kind = 403, "permission_error"
-    elif "empty_completion" in lower:
-        # claude-code-proxy/src/providers/codex/mod.rs:940-946: provider retry;
-        # mod.rs:1484-1496: suppress client retries after that budget is spent.
-        client_status, retry = 503, True
-        message = "empty completion"
-        headers["x-should-retry"] = "false"
     # codex-rs/codex-api/src/sse/responses_error.rs:47-84: Codex never retries these failure codes.
     elif code in ("insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded",
                   "project_spend_limit_exceeded"):
