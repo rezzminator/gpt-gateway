@@ -5,8 +5,8 @@ sends every request of it there (codex-rs/core/src/client.rs:605-621); replaying
 a kept socket's request from the prompt cache its previous request wrote far more often than a fresh HTTP request's.
 One request is in flight per socket, and a lane keeps one socket: a second lands on another backend server, whose cache
 holds only what that socket sent. Claude Code's activity-summary fork runs while its agent's request still does, and
-the agent's next request can arrive while the fork runs, so a request whose lane's socket is busy waits for it and
-opens another only once that wait runs out; every socket coming back goes to the pool as its lane's one idle socket,
+the agent's next request can arrive while the fork runs, so a request whose lane's socket is busy waits for it, a
+fork the longest, and opens another only once that wait runs out; every socket coming back goes to the pool as its lane's one idle socket,
 and a spare the lane already holds there closes. A socket answering anything but a completed response is closed.
 """
 import collections
@@ -36,8 +36,9 @@ KEPT_AFTER = ("response.completed", "response.incomplete")
 PAUSE_AFTER, PAUSE_SECONDS = 5, 600
 # An upgrade answered with a status meaning the backend serves no WebSocket here (Codex: 426) pauses it this long.
 UNSERVED_PAUSE_SECONDS = 3600
-# How long a request waits for its lane's busy socket before it opens another.
-LANE_WAIT_SECONDS = 30
+# How long a request waits for its lane's busy socket before it opens another: the agent's request waits out a fork,
+# and the fork, which only labels the agent's last action, waits out the longest generation of the agent's request.
+LANE_WAIT_SECONDS, FORK_WAIT_SECONDS = 30, 600
 
 
 def unserved(status):
@@ -127,7 +128,9 @@ class Sockets:
 
     def checkout(self, pool_key, wait=0):
         """The lane's most recent idle socket still fit for a request, or None; the unfit ones close. With `wait`, a
-        lane whose every socket is busy waits that many seconds for one to come back before it gets None."""
+        lane whose every socket is busy waits that many seconds for one to come back before it gets None. None
+        reserves the socket the caller opens next as busy, so a request arriving during its handshake waits for it;
+        `open` takes the reservation over, and a failed open releases it."""
         deadline = clock.monotonic() + wait
         while True:
             with self.lock:
@@ -139,6 +142,7 @@ class Sockets:
                     self.returned.wait(remaining)
                 if kept is None:
                     timed_out = wait > 0 and self.busy[pool_key] > 0
+                    self.busy[pool_key] += 1
                 else:
                     del self.idle[kept]
                     kept.out = True
@@ -168,17 +172,29 @@ class Sockets:
             self.close(oldest, "pool-full")
 
     def open(self, pool_key, headers):
-        """A Kept on 101, else the Upgrade with the answer's status; UpstreamError when nothing answered."""
+        """A Kept on 101, taking over the reservation checkout made, else the Upgrade with the answer's status;
+        UpstreamError when nothing answered. Either failure releases the reservation."""
         started = clock.monotonic()
-        answer = self.upstream.websocket(PATH, headers)
+        try:
+            answer = self.upstream.websocket(PATH, headers)
+        except BaseException:
+            self.release(pool_key)
+            raise
         if answer.socket is None:
+            self.release(pool_key)
             return answer
         self.log("    gpt websocket open lane=%s handshake_ms=%d" % (pool_key[0], round((clock.monotonic() - started) * 1000)))
         kept = Kept(WebSocket(answer.socket, answer.pending, self.log), pool_key, answer.headers)
-        with self.lock:
-            kept.out = True
-            self.busy[pool_key] += 1
+        kept.out = True
         return kept
+
+    def release(self, pool_key):
+        """Drop the reservation of a socket that never opened; a waiting request may open its own."""
+        with self.lock:
+            self.busy[pool_key] -= 1
+            if not self.busy[pool_key]:
+                del self.busy[pool_key]
+            self.returned.notify_all()
 
     def _returned(self, kept):
         """Under the lock: a checked-out socket is no longer busy, and a waiting request may take its lane's next one."""

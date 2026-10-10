@@ -24,12 +24,13 @@ class Client:
                     "ChatGPT-Account-ID": credentials.account_id})
 
     # codex-rs/core/src/client.rs:652-660,947-1071; no ingress headers cross this boundary.
-    def responses(self, translation, lane_key, credentials, turn_state=None, observe=None):
+    def responses(self, translation, lane_key, credentials, turn_state=None, observe=None, fork=False):
         """The upstream answer: over the lane's kept WebSocket while it serves, else an HTTP POST. `observe` receives a
-        turn-state token a WebSocket response issues in a `response.metadata` event."""
+        turn-state token a WebSocket response issues in a `response.metadata` event; a `fork` waits longest for its
+        lane's busy socket."""
         self.local.transport = "http"
         if self.sockets is not None and self.sockets.usable():
-            answer = self._over_websocket(translation, lane_key, credentials, turn_state, observe)
+            answer = self._over_websocket(translation, lane_key, credentials, turn_state, observe, fork)
             if answer is not None:
                 return answer
         headers = self._headers(credentials)
@@ -51,14 +52,15 @@ class Client:
             headers["x-openai-internal-codex-responses-lite"] = "true"
         return headers.items()
 
-    def _over_websocket(self, translation, lane_key, credentials, turn_state, observe):
+    def _over_websocket(self, translation, lane_key, credentials, turn_state, observe, fork=False):
         """The started Answer or a Refusal; None when the upgrade showed the endpoint serves no WebSocket. A kept socket
         that fails before its first message, or that the backend asks to replace, gives way once to a fresh one."""
         data = websocket.message(translation.body_bytes, turn_state)
         pool_key = websocket.socket_key(lane_key, translation.lite, credentials)
         self.local.transport, self.local.reused, self.local.stale = "ws", False, False
         for attempt in (1, 2):
-            kept = self.sockets.checkout(pool_key, websocket.LANE_WAIT_SECONDS if attempt == 1 else 0)
+            wait = websocket.FORK_WAIT_SECONDS if fork else websocket.LANE_WAIT_SECONDS
+            kept = self.sockets.checkout(pool_key, wait if attempt == 1 else 0)
             if kept is None:
                 try:
                     kept = self.sockets.open(pool_key, self._upgrade_headers(translation, lane_key, credentials))

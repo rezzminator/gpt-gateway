@@ -202,7 +202,7 @@ class WebSocketRouteTest(unittest.TestCase):
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+        self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
                          ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
 
     def test_an_agent_request_waits_for_the_fork_holding_its_lanes_socket(self):
@@ -214,16 +214,36 @@ class WebSocketRouteTest(unittest.TestCase):
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         self.assertEqual(self.concurrent(port, fork, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+        self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
                          ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
 
-    def test_a_wait_that_runs_out_opens_another_socket_and_the_lane_keeps_the_one_back_last(self):
+    def test_a_request_arriving_while_its_lanes_first_socket_opens_waits_for_it(self):
+        # Until the upgrade answers, the opening socket is neither idle nor busy; a fork arriving then must still wait.
+        self.fake.slow_upgrade = [0.6]
+        rt, port = self.gateway()
+        agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
+        fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
+        self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 1)
+        self.assertNotIn("reason=lane-spare", fakes.logged(rt))
+
+    def test_a_fork_waits_out_a_generation_longer_than_the_lane_wait(self):
+        # The agent's request can generate for minutes; the fork only labels its last action, so it waits it out.
         self.fake.stall = [0.8]
         rt, port = self.gateway()
         agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         with patch("model_gateway.chatgpt.websocket.LANE_WAIT_SECONDS", 0.1):
             self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
+        self.assertEqual(len(self.fake.upgrades), 1)
+        self.assertNotIn("gpt websocket lane-wait", fakes.logged(rt))
+
+    def test_a_wait_that_runs_out_opens_another_socket_and_the_lane_keeps_the_one_back_last(self):
+        self.fake.stall = [0.8]
+        rt, port = self.gateway()
+        agent = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.RESULT])
+        with patch("model_gateway.chatgpt.websocket.LANE_WAIT_SECONDS", 0.1):
+            self.assertEqual(self.concurrent(port, agent, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 2)
         self.fake.stall = [0.8]
         self.assertEqual(self.concurrent(port, agent, agent), {"first": 200, "second": 200})

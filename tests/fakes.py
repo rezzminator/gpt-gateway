@@ -297,6 +297,7 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     vanish = []  # per WebSocket message, True: the socket closes without an answer
     hangup = []  # per WebSocket message answered, True: the socket closes after the answer
     stall = []  # per WebSocket message, seconds the answer waits
+    slow_upgrade = []  # per WebSocket upgrade, seconds the 101 waits; a test assigns its own list
 
     def log_message(self, *args):
         pass
@@ -354,6 +355,8 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         accept = base64.b64encode(hashlib.sha1(headers["sec-websocket-key"].encode() + RFC6455_GUID).digest())
+        if self.slow_upgrade:
+            time.sleep(self.slow_upgrade.pop(0))
         self.send_response(101)
         for name, value in (("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Accept", accept.decode())):
             self.send_header(name, value)
