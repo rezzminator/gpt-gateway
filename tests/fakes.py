@@ -283,12 +283,13 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
         self.seen.append({"method": self.command, "path": self.path,
                           "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
+        extra = []
         if self.path.startswith("/backend-api/codex/models?"):
             status, payload = self.models_status, self.models_body
         elif self.path == "/oauth/token":
             status, payload = 200, self.tokens
-        elif self.path == "/backend-api/codex/responses":
-            status, payload = self.script.pop(0) if self.script else (200, responses_turn())
+        elif self.path == "/backend-api/codex/responses":  # a script entry may add a third item: its extra headers
+            status, payload, *extra = self.script.pop(0) if self.script else (200, responses_turn())
         else:
             status, payload = 404, {"error": "unknown fake path"}
         if isinstance(payload, Cut):
@@ -306,6 +307,8 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
         token = self.issued.pop(0) if self.path == "/backend-api/codex/responses" and self.issued else None
         if token:
             self.send_header("x-codex-turn-state", token)
+        for name, value in (extra[0] if extra else {}).items():
+            self.send_header(name, value)
         self.send_header("content-type", "text/event-stream" if isinstance(payload, bytes) else "application/json")
         self.send_header("content-length", str(len(data)))
         self.end_headers()

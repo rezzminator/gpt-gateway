@@ -126,21 +126,23 @@ class Route:
                 self.lanes[key] = Lane()
             return self.lanes[key]
 
-    def _error_line(self, key, slug, status, attempt, action, head, credentials=None):
+    def _error_line(self, key, slug, status, attempt, action, head, credentials=None, delay=None):
         if not isinstance(head, bytes):
             head = json.dumps(head, ensure_ascii=False).encode()
         if credentials is not None:
             for secret in (credentials.access_token, credentials.account_id):
                 head = head.replace(secret.encode(), b"[redacted]")
-        self.log("    gpt error lane=%s slug=%s status=%s attempt=%d action=%s body=%r" %
-                 (key, slug, status, attempt, action, head[:300]))
+        advice = "" if delay is None else " retry_after=%g" % delay
+        self.log("    gpt error lane=%s slug=%s status=%s attempt=%d action=%s%s body=%r" %
+                 (key, slug, status, attempt, action, advice, head[:300]))
 
     def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
                   ended=None):
         """`ended`: when the client had the last byte, the stream's end before the reader's join; now when None."""
         if translator.error is not None:
             self._error_line(key, model.slug, "transport" if reader.transport_error else status,
-                             attempt, "final", reader.error_head, credentials)
+                             attempt, "final", translator.failure or reader.error_head, credentials,
+                             translator.error.delay)
         if translator.usage is not None:
             if translator.terminal == "response.completed":
                 with self.lock:
@@ -200,7 +202,7 @@ class Route:
                 if status != 200:
                     head = response.read(65536)
                     self.client.drop()
-                    decision = errors.classify(status, head, "before-output")
+                    decision = errors.classify(status, head, "before-output", response.getheaders())
                 else:
                     with self.lock:
                         if state.turn_state.observe(where, response.getheader(turn.HEADER)):
@@ -218,7 +220,7 @@ class Route:
                         self._terminal(key, model, translation, translator, estimator, attempt, code, reader,
                                        credentials, measure)
                         return Response.json(code, data)
-                    decision, head = translator.error, reader.error_head
+                    decision, head = translator.error, translator.failure or reader.error_head
                     if reader.transport_error:
                         status = "transport"
             except (UpstreamError, OSError, http.client.HTTPException) as error:
@@ -237,11 +239,13 @@ class Route:
                 silent, measure.stale = True, True
                 attempt -= 1
                 continue
-            can_retry = decision.retry and attempt <= errors.MAX_RETRIES
+            can_retry = (decision.retry and attempt <= errors.MAX_RETRIES
+                         and (decision.delay is None or decision.delay <= errors.MAX_ADVISED_SLEEP))
             if decision.refresh and refreshed or decision.drop_reasoning and dropped:
                 can_retry = False
             action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning else "retry")
-            self._error_line(key, model.slug, status, attempt, action if can_retry else "final", head, credentials)
+            self._error_line(key, model.slug, status, attempt, action if can_retry else "final", head, credentials,
+                             decision.delay)
             if not can_retry:
                 if decision.client_status == 401:
                     return login_required()
@@ -262,4 +266,4 @@ class Route:
                 return login_required(str(error))
             except auth.AuthError as error:
                 return route_error(503, "api_error", str(error))
-            clock.sleep(errors.backoff(attempt))
+            clock.sleep(errors.backoff(attempt) if decision.delay is None else decision.delay)

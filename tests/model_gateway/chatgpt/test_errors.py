@@ -1,11 +1,14 @@
-"""Every error-table row, its after-output SSE, and bounded retry backoff."""
+"""Every error-table row, its after-output SSE, bounded retry backoff, and server retry advice through a real gateway."""
 import dataclasses
 import json
 import unittest
 from unittest.mock import patch
 
+from model_gateway import clock
 from model_gateway.chatgpt import errors
 from model_gateway.events import EventSplitter
+from tests import fakes
+from tests.model_gateway.chatgpt import test_route as route_tests
 
 
 class ErrorsTest(unittest.TestCase):
@@ -45,6 +48,13 @@ class ErrorsTest(unittest.TestCase):
              429, "rate_limit_error", False, False, False),
             (None, {"type": "response.failed", "response": {"error": {"code": "unrecognised_invented"}}},
              502, "api_error", True, False, False),
+            # codex-api/src/sse/responses_error.rs:90-96: a stream's rate_limit_exceeded or slow_down is a rate
+            # limit Codex always retries; the same code on an HTTP error answer keeps its status's row.
+            (None, {"type": "response.failed", "response": {"error": {"code": "rate_limit_exceeded"}}},
+             429, "rate_limit_error", True, False, False),
+            (None, {"type": "response.failed", "response": {"error": {"code": "slow_down"}}},
+             429, "rate_limit_error", True, False, False),
+            (429, {"error": {"code": "rate_limit_exceeded"}}, 429, "rate_limit_error", False, False, False),
         ]
         with patch("model_gateway.clock.now", return_value=1000):
             for status, body, code, kind, retry, refresh, drop in cases:
@@ -77,6 +87,50 @@ class ErrorsTest(unittest.TestCase):
             self.assertIsInstance(d.client_headers, dict)
             self.assertEqual(d.client_headers["retry-after"], "0")
 
+    def test_server_retry_advice_sets_the_delay_and_reaches_the_client(self):
+        # Codex sleeps on the server's advice (codex-client/src/retry.rs; protocol/src/error.rs:395-457): the
+        # Retry-After header first, then, for a stream's rate limit, "try again in Xs" in its message
+        # (codex-api/src/sse/responses_error.rs:90-96, 138-143). retry-after-ms leads, as the OpenAI SDKs read it.
+        failed = lambda code, message: {"type": "response.failed", "response": {"error": {"code": code, "message": message}}}
+        cases = [  # status, body, upstream headers, delay, the advice headers the client receives
+            (503, "down", [("Retry-After", "2")], 2.0, {"retry-after": "2", "retry-after-ms": "2000"}),
+            (503, "down", {"retry-after": "1.25"}, 1.25, {"retry-after": "2", "retry-after-ms": "1250"}),
+            (503, "down", [("retry-after-ms", "1500"), ("retry-after", "9")], 1.5,
+             {"retry-after": "2", "retry-after-ms": "1500"}),
+            (503, "down", [("Retry-After", "Sat, 10 Oct 2026 07:00:10 GMT")], 5.0,
+             {"retry-after": "5", "retry-after-ms": "5000"}),
+            (503, "down", [("Retry-After", "Sat, 10 Oct 2026 06:00:00 GMT")], 0.0, {"retry-after": "0", "retry-after-ms": "0"}),
+            (503, "down", [("Retry-After", "-3")], 0.0, {"retry-after": "0", "retry-after-ms": "0"}),
+            (503, "down", [("Retry-After", "soon")], None, {}),
+            (503, "down", [("Retry-After", "nan")], None, {}),
+            (503, "down", None, None, {}),
+            (429, {"detail": "Rate limit exceeded"}, [("Retry-After", "7")], 7.0, {"retry-after": "7", "retry-after-ms": "7000"}),
+            (None, failed("rate_limit_exceeded", "Rate limit reached. Please try again in 1.898s."), None, 1.898,
+             {"retry-after": "2", "retry-after-ms": "1898"}),
+            (None, failed("slow_down", "Please TRY AGAIN IN 250ms"), None, 0.25, {"retry-after": "1", "retry-after-ms": "250"}),
+            (None, failed("rate_limit_exceeded", "try again in 3 seconds"), None, 3.0, {"retry-after": "3", "retry-after-ms": "3000"}),
+            (None, failed("rate_limit_exceeded", "slow down"), None, None, {}),
+            (None, failed("server_error", "try again in 4s"), None, None, {}),
+        ]
+        stamp = 1791615605.0  # Sat, 10 Oct 2026 07:00:05 GMT
+        with patch("model_gateway.clock.now", return_value=stamp):
+            for status, body, headers, delay, client in cases:
+                with self.subTest(status=status, headers=headers, body=body):
+                    d = errors.classify(status, body, "before-output", headers)
+                    if delay is None:
+                        self.assertIsNone(d.delay)
+                    else:
+                        self.assertIsNotNone(d.delay)
+                        self.assertAlmostEqual(d.delay, delay)
+                    self.assertEqual({k: v for k, v in d.client_headers.items() if k.startswith("retry-after")}, client)
+            # usage_limit_reached keeps its own reset over a header's advice
+            d = errors.classify(429, {"error": {"type": "usage_limit_reached", "resets_at": stamp + 60}},
+                                "before-output", [("Retry-After", "7")])
+            self.assertEqual(d.client_headers["retry-after"], "60")
+            self.assertIsNotNone(d.delay)
+            self.assertAlmostEqual(d.delay, 60)
+            self.assertFalse(d.retry)
+
     def test_empty_no_client_retry_and_frozen_decision(self):
         d = errors.classify(503, {"code": "empty_completion"}, "before-output")
         self.assertTrue(d.retry)
@@ -98,3 +152,43 @@ class ErrorsTest(unittest.TestCase):
         for n in (0, 5, -1):
             with self.subTest(n=n), self.assertRaises(ValueError):
                 errors.backoff(n)
+
+
+class ErrorsRouteTest(unittest.TestCase):
+    setUp = route_tests.RouteTest.setUp
+    jwt = route_tests.RouteTest.jwt
+    gateway = route_tests.RouteTest.gateway
+    send = route_tests.RouteTest.send
+    responses = route_tests.RouteTest.responses
+
+    def test_server_retry_advice_paces_the_retry_and_reaches_claude_code(self):
+        # Codex sleeps until a 5xx's Retry-After before its retry and carries the advice of the answer it gives
+        # up on; a 429 goes to Claude Code with the advice, and advice past MAX_ADVISED_SLEEP is never slept here.
+        unavailable = {"error": {"message": "unavailable"}}
+        self.fake.script = [(503, unavailable, {"Retry-After": "0.05"}), (200, fakes.responses_turn()),
+                            (429, {"detail": "Rate limit exceeded"}, {"Retry-After": "3"}),
+                            (503, unavailable, {"Retry-After": str(errors.MAX_ADVISED_SLEEP + 1)}),
+                            (200, fakes.responses_event("response.failed", response={"instructions": "x" * 400, "status": "failed", "error": {
+                                "code": "rate_limit_exceeded", "message": "Please try again in 0.04s."}})),
+                            (200, fakes.responses_turn())]
+        rt, port = self.gateway()
+        slept, real = [], clock.sleep
+        with patch("model_gateway.clock.sleep", side_effect=lambda s: (slept.append(s), real(min(s, 0.01)))), \
+                patch("model_gateway.chatgpt.errors.backoff", return_value=0) as backoff:
+            answers = [self.send(port)[0] for _ in range(4)]
+        self.assertEqual([x.status for x in answers], [200, 429, 503, 200])
+        backoff.assert_not_called()
+        self.assertIn(0.05, slept)
+        self.assertIn(0.04, slept)
+        self.assertNotIn(errors.MAX_ADVISED_SLEEP + 1, slept)
+        self.assertEqual([(x.getheader("retry-after"), x.getheader("retry-after-ms")) for x in answers[1:]],
+                         [("3", "3000"), ("%d" % (errors.MAX_ADVISED_SLEEP + 1), "%d" % ((errors.MAX_ADVISED_SLEEP + 1) * 1000)),
+                          (None, None)])
+        self.assertEqual(len(self.responses()), 6)
+        logged = fakes.logged(rt)
+        for line in ("status=503 attempt=1 action=retry retry_after=0.05 body=", "status=429 attempt=1 action=final retry_after=3 body=",
+                     "status=503 attempt=1 action=final retry_after=%g body=" % (errors.MAX_ADVISED_SLEEP + 1),
+                     # a stream failure logs its failing event, never the stream's opening bytes or the response it carries
+                     'status=200 attempt=1 action=retry retry_after=0.04 body=b\'{"type": "response.failed", "status": '
+                     '"failed", "error": {"code": "rate_limit_exceeded", "message": "Please try again in 0.04s."}}\''):
+            self.assertIn(line, logged)

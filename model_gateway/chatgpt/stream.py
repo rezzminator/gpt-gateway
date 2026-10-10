@@ -39,6 +39,7 @@ class Translator:
         self.terminal = None
         self.usage = None
         self.error = None
+        self.failure = None  # the failing event as its type, status and error, for the gpt error line
         self.cache_ratio = None
         self.input_tokens = None
         self.reasoning_tokens = None
@@ -131,6 +132,9 @@ class Translator:
     # claude-code-proxy/src/providers/codex/translate/live_stream.rs:223-249,959-988.
     def _fail(self, kind, payload):
         self.terminal = kind
+        response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+        self.failure = dict({key: value for key, value in payload.items() if key != "response"},
+                            **{key: response[key] for key in ("status", "error", "incomplete_details") if key in response})
         decision = errors.classify(None, payload, "before-output")
         # Content earlier in this same feed commits along with the error frame.
         if not self.emitted_any and not self._has_content:
