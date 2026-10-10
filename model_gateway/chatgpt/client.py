@@ -8,7 +8,7 @@ import json
 import threading
 
 from ..upstream import Upstream
-from . import identity
+from . import identity, turn
 
 
 class Client:
@@ -22,13 +22,15 @@ class Client:
                     "ChatGPT-Account-ID": credentials.account_id})
 
     # codex-rs/core/src/client.rs:652-660,947-1071; no ingress headers cross this boundary.
-    def responses(self, translation, lane_key, credentials):
+    def responses(self, translation, lane_key, credentials, turn_state=None):
         headers = self._headers(credentials)
         headers.update({"Accept": "text/event-stream", "Content-Type": "application/json",
                         "session-id": lane_key, "x-client-request-id": lane_key,
                         "x-openai-subagent": "collab_spawn", "content-length": str(len(translation.body_bytes))})
         if translation.lite:
             headers["x-openai-internal-codex-responses-lite"] = "true"
+        if turn_state:
+            headers[turn.HEADER] = turn_state  # codex-rs/core/src/client.rs:2119-2140
         return self.upstream.send("POST", "/backend-api/codex/responses", translation.body_bytes, headers.items())
 
     # codex-lb/app/core/clients/model_fetcher.py:132-153; rewritten with the core upstream façade.

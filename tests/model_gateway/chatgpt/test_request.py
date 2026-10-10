@@ -116,28 +116,26 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(value.get('reasoning'), {})
         self.assertEqual(value['text'], {})
 
-    def test_activity_summary_runs_at_the_lowest_supported_effort(self):
+    def test_activity_summary_keeps_its_agents_effort(self):
+        # The backend's prompt cache keys on reasoning effort: a fork at another effort re-reads its lane's prefix uncached.
         ask = 'Describe your most recent action in 3-5 words using present tense (-ing). Do not use tools.'
         call = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'c', 'name': 'read', 'input': {}}]}]
         fork = call + [{'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'c', 'content': ''},
                                                     {'type': 'text', 'text': ask}, {'type': 'text', 'text': 'Be brief.'}]}]
-        for extra, levels, effort in (({'output_config': {'effort': 'high'}}, ('minimal', 'low', 'high'), 'minimal'),
-                                      ({'output_config': {'effort': 'xhigh'}}, ('xhigh', 'high', 'low'), 'low'),
+        for extra, levels, effort in (({'output_config': {'effort': 'high'}}, ('minimal', 'low', 'high'), 'high'),
+                                      ({'output_config': {'effort': 'xhigh'}}, ('xhigh', 'high', 'low'), 'xhigh'),
                                       ({}, ('medium', 'high'), 'medium')):
             with self.subTest(levels=levels):
                 value, translated = self.result(dict(messages=fork, **extra), reasoning_levels=levels)
-                self.assertEqual((value['reasoning']['effort'], translated.notes), (effort, ('activity summary at ' + effort,)))
-                self.assertTrue(request.activity_summary({'messages': fork}))
+                self.assertEqual((value['reasoning']['effort'], translated.notes), (effort, ()))
+        self.assertTrue(request.activity_summary({'messages': fork}))
+        self.assertTrue(request.activity_summary({'messages': [{'role': 'user', 'content': ask}]}))
         # The ask is a summary only as the last user message's own text: quoted in a tool result, earlier or mid-text it is work.
         for messages in (call + [{'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'c', 'content': ask}]}],
                          [{'role': 'user', 'content': ask}, {'role': 'assistant', 'content': 'x'}, {'role': 'user', 'content': 'go'}],
                          [{'role': 'user', 'content': 'Please ' + ask}], [{'role': 'assistant', 'content': ask}], []):
             with self.subTest(messages=messages[-1:]):
-                value, translated = self.result({'messages': messages, 'output_config': {'effort': 'high'}})
-                self.assertEqual((value['reasoning']['effort'], translated.notes), ('high', ()))
-        self.assertTrue(request.activity_summary({'messages': [{'role': 'user', 'content': ask}]}))
-        value, translated = self.result({'messages': fork}, reasoning_levels=(), default_reasoning=None)
-        self.assertEqual((value['reasoning'], translated.notes), ({'summary': 'auto'}, ()))
+                self.assertFalse(request.activity_summary({'messages': messages}))
 
     def test_tool_names_arguments_results_and_parallel(self):
         long = 'tool_' + 'a' * 90

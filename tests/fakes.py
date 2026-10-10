@@ -274,6 +274,7 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     models_status = 200
     models_body = CHATGPT_MODELS
     tokens = {}
+    issued = []  # per Responses request, the x-codex-turn-state its response sends, or None
 
     def log_message(self, *args):
         pass
@@ -302,6 +303,9 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             return
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.send_response(status)
+        token = self.issued.pop(0) if self.path == "/backend-api/codex/responses" and self.issued else None
+        if token:
+            self.send_header("x-codex-turn-state", token)
         self.send_header("content-type", "text/event-stream" if isinstance(payload, bytes) else "application/json")
         self.send_header("content-length", str(len(data)))
         self.end_headers()

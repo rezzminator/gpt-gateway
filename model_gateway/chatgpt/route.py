@@ -4,14 +4,14 @@ Retry orchestration derived from openai/codex, changed (Apache-2.0;
 see THIRD_PARTY_NOTICES.md). All translation stays in the pure translators.
 """
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import http.client
 import threading
 
 from .. import clock
 from ..upstream import UpstreamError, is_stale
-from . import auth, errors, estimate, lane, request, signature, stream
+from . import auth, errors, estimate, lane, request, signature, stream, turn
 from .catalog import Catalog, CatalogUnavailable
 from .client import Client
 from .response import Reader, Response
@@ -87,6 +87,14 @@ class Measure:
     sent_at: float = 0.0  # the attempt's upstream request was sent
     reused: bool = False  # the attempt rode a kept-alive connection
     stale: bool = False  # a kept-alive connection failed before any body byte and the request went on a fresh one
+    turn: str = ""  # "sent": the attempt carried the turn-state token; "issued": its response's token was kept
+
+
+@dataclass
+class Lane:
+    """What the route keeps per lane key: the token estimator and the turn-state token."""
+    estimator: estimate.Estimator = field(default_factory=estimate.Estimator)
+    turn_state: turn.Turn = field(default_factory=turn.Turn)
 
 
 def milliseconds(seconds):
@@ -105,12 +113,12 @@ class Route:
     def decide(self, method, path, body, headers):
         return decide(self.catalog, method, path, body, headers)
 
-    def estimator(self, key):
+    def lane_state(self, key):
         with self.lock:
             if key not in self.lanes:
                 if len(self.lanes) >= 1024:
                     del self.lanes[next(iter(self.lanes))]
-                self.lanes[key] = estimate.Estimator()
+                self.lanes[key] = Lane()
             return self.lanes[key]
 
     def _error_line(self, key, slug, status, attempt, action, head, credentials=None):
@@ -134,14 +142,14 @@ class Route:
                     estimator.observe(translation.estimate_chars, translator.input_tokens)
             reasoning = "-" if translator.reasoning_tokens is None else translator.reasoning_tokens
             self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d out=%d reasoning=%s "
-                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s" %
+                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s%s" %
                      (key, model.slug, status, translator.input_tokens,
                       translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt,
                       translator.usage["output_tokens"], reasoning,
                       milliseconds(reader.first_byte_at - measure.started),
                       milliseconds(reader.terminal_at - measure.sent_at),
                       milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
-                      measure.reused, measure.stale,
+                      measure.reused, measure.stale, " turn_state=" + measure.turn if measure.turn else "",
                       " notes=" + json.dumps(list(translation.notes)) if translation.notes else ""))
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
@@ -149,7 +157,8 @@ class Route:
         measure = Measure(clock.monotonic() if started is None else started)
         silent = False  # the one free retry of a kept-alive connection that died before any body byte
         key = lane.key(headers.get("x-claude-code-session-id", ""), headers.get("x-claude-code-agent-id", ""))
-        estimator = self.estimator(key)
+        state = self.lane_state(key)
+        estimator = state.estimator
         try:
             translation = request.translate(body, model, key)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
@@ -159,6 +168,9 @@ class Route:
             estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
+        where = turn.position(body)
+        with self.lock:
+            state.turn_state.begin(where)
         refreshed = dropped = False
         credentials = None
         attempt = 0
@@ -169,7 +181,10 @@ class Route:
             try:
                 credentials = credentials or self.store.credentials()
                 measure.sent_at = clock.monotonic()
-                response = self.client.responses(translation, key, credentials)
+                with self.lock:
+                    token = state.turn_state.outgoing(where)
+                response = self.client.responses(translation, key, credentials, token)
+                measure.turn = "sent" if token else ""
                 reused, retried = self.client.upstream.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
@@ -178,6 +193,9 @@ class Route:
                     self.client.drop()
                     decision = errors.classify(status, head, "before-output")
                 else:
+                    with self.lock:
+                        if state.turn_state.observe(where, response.getheader(turn.HEADER)):
+                            measure.turn = "issued"
                     reader = Reader(response, translator, self.client)
                     first = reader.next()
                     if first:

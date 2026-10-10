@@ -43,10 +43,6 @@ def translate(body: dict, model: Model, lane_key: str) -> Translation:
         items.insert(0, {'type': 'additional_tools', 'role': 'developer', 'tools': registered})
     reasoning = {}
     effort = _request_effort(body, model, notes)
-    lowest = [level for level in _EFFORTS if level in model.reasoning_levels]
-    if lowest and activity_summary(body):
-        effort = lowest[0]
-        notes.append('activity summary at ' + effort)
     if effort is not None:
         reasoning['effort'] = effort
     if model.supports_summaries:

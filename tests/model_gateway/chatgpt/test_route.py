@@ -260,11 +260,11 @@ class RouteRetryTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertGreaterEqual(json.loads(data)["input_tokens"], 2100)
         self.assertEqual(len(self.responses()), 1)
-        first = rt.chatgpt.estimator("oldest")
+        first = rt.chatgpt.lane_state("oldest")
         for n in range(1024):
-            rt.chatgpt.estimator(str(n))
+            rt.chatgpt.lane_state(str(n))
         self.assertEqual(len(rt.chatgpt.lanes), 1024)
-        self.assertIsNot(rt.chatgpt.estimator("oldest"), first)
+        self.assertIsNot(rt.chatgpt.lane_state("oldest"), first)
 
     def test_failed_and_unmarked_hooks_preserve_original_body(self):
         for source in ['req.body["model"] = "claude-other"; req.mark_changed()',

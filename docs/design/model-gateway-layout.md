@@ -46,6 +46,7 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt tools | tool definitions, choice and name mapping | `model_gateway/chatgpt/tools.py` | assumed: tool request and response names agree |
 | chatgpt schema | pure JSON schema sanitization | `model_gateway/chatgpt/schema.py` | assumed: schema rules change alone |
 | chatgpt lane | per-session, per-agent cache key | `model_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
+| chatgpt turn | a request's turn position and the lane's `x-codex-turn-state` token | `model_gateway/chatgpt/turn.py` | assumed: Codex's turn contract changes alone |
 | chatgpt stream | Responses SSE translation and accumulation | `model_gateway/chatgpt/stream.py` | assumed: event mapping and accumulation agree |
 | chatgpt errors | error decisions and retry backoff | `model_gateway/chatgpt/errors.py` | assumed: status and retry policy co-change |
 | chatgpt estimate | per-lane token estimate calibration | `model_gateway/chatgpt/estimate.py` | assumed: measurement and estimate co-change |
@@ -95,12 +96,13 @@ model_gateway/chatgpt/request.py          deterministic Responses request transl
 model_gateway/chatgpt/tools.py            tool mapping and name restoration
 model_gateway/chatgpt/schema.py           pure schema sanitizer
 model_gateway/chatgpt/lane.py             lane key
+model_gateway/chatgpt/turn.py             position, Turn: the turn-state token
 model_gateway/chatgpt/stream.py           Translator, accumulate
 model_gateway/chatgpt/errors.py           Decision, classify, backoff
 model_gateway/chatgpt/estimate.py         Estimator
 model_gateway/chatgpt/identity.py         CODEX_CLIENT_VERSION, headers
 model_gateway/chatgpt/client.py           separate ChatGPT Upstream, responses and models
-model_gateway/chatgpt/route.py            decision, retries, lanes
+model_gateway/chatgpt/route.py            decision, retries, Lane: estimator and turn state
 model_gateway/chatgpt/response.py         Response, Reader: the relay's response object and reader thread
 examples/middleware/model_note.py         NAME "model-note", SETTINGS enabled, on_request
 launchd/install.sh                        copies the SHIP list to ~/.local/share/model-gateway/, writes the plist
@@ -154,6 +156,7 @@ Anatomy: every source module opens with a purpose docstring and has a test home 
 | SIGTERM wind-down | drain | graceful shutdown | `MODEL_GATEWAY_DRAIN_SECONDS`, `server.Drain` |
 | the routing target | route (`"anthropic"`, `"chatgpt"`) | codex bridge, translator module, provider | `ctx.route`, `chatgpt/route.py` |
 | cache affinity per session and agent | lane key | conversation id, session-only key | `chatgpt/lane.py`, `prompt_cache_key`, `session-id`, `x-client-request-id` |
+| sticky routing within one agent turn | turn-state token | sticky id, routing cookie | `chatgpt/turn.py`, `x-codex-turn-state`, gpt line `turn_state=` |
 | models and their capabilities | catalog | allowlist, model table | `chatgpt/catalog.py`, disk cache, route decision |
 | catalog-selected Responses wire variant | Responses-Lite | lite mode, Sol protocol | `use_responses_lite`, `additional_tools`, `x-openai-internal-codex-responses-lite` |
 | replayable encrypted reasoning envelope | reasoning signature | thinking cache, reasoning blob | `chatgpt/signature.py`, `model-gateway:chatgpt:v1:` |
