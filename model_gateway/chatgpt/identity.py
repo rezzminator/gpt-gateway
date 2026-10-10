@@ -4,7 +4,7 @@ Derived from openai/codex, changed (Apache-2.0); see THIRD_PARTY_NOTICES.md.
 """
 import platform
 
-CODEX_CLIENT_VERSION = "0.155.1"
+CODEX_CLIENT_VERSION = "0.162.1"
 
 
 # codex-rs/login/src/auth/default_client.rs:152-179; terminal-detection/src/lib.rs:152-183,234-236.

@@ -12,8 +12,8 @@ class IdentityTest(unittest.TestCase):
                     patch.object(identity.platform, "mac_ver", return_value=(version, (), "")), \
                     patch.object(identity.platform, "release", return_value=version), \
                     patch.object(identity.platform, "machine", return_value="arm64"):
-                self.assertEqual(identity.headers(), {"originator": "codex_cli_rs", "version": "0.155.1",
-                    "User-Agent": "codex_cli_rs/0.155.1 (%s %s; arm64) unknown" % (expected, version)})
+                self.assertEqual(identity.headers(), {"originator": "codex_cli_rs", "version": "0.162.1",
+                    "User-Agent": "codex_cli_rs/0.162.1 (%s %s; arm64) unknown" % (expected, version)})
 
     def test_darwin_without_marketing_version_uses_kernel_release(self):
         with patch.object(identity.platform, "system", return_value="Darwin"), \

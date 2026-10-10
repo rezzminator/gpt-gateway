@@ -194,7 +194,7 @@ Non-streaming requests drain the translated stream and return one Anthropic JSON
 
 ### Identity and knobs
 
-The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator: codex_cli_rs`, `version: 0.155.1`, and `User-Agent: codex_cli_rs/0.155.1 ({os_type} {os_version}; {arch}) unknown`. OS type is `Mac OS` on macOS, otherwise the platform system name; version and architecture come from the platform. The terminal token `unknown` is Codex's fallback when no terminal is detected. Responses requests also send `x-openai-subagent: collab_spawn`. It builds the ChatGPT headers from scratch using its own access token and account id; Claude Code's `authorization` and `x-api-key` never leave the process on this route. Transport is HTTP SSE with full input on every request; Responses-Lite is selected from the catalog.
+The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator: codex_cli_rs`, `version: 0.162.1`, and `User-Agent: codex_cli_rs/0.162.1 ({os_type} {os_version}; {arch}) unknown`. OS type is `Mac OS` on macOS, otherwise the platform system name; version and architecture come from the platform. The terminal token `unknown` is Codex's fallback when no terminal is detected. Responses requests also send `x-openai-subagent: collab_spawn`. It builds the ChatGPT headers from scratch using its own access token and account id; Claude Code's `authorization` and `x-api-key` never leave the process on this route. Transport is HTTP SSE with full input on every request; Responses-Lite is selected from the catalog.
 
 | Variable | Meaning | Default |
 | --- | --- | --- |

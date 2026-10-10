@@ -79,7 +79,7 @@ class RouteTest(unittest.TestCase):
             self.assertFalse(any(k.startswith("anthropic-") for k in h))
             self.assertEqual(h["authorization"], "Bearer " + self.token)
             self.assertEqual(h["originator"], "codex_cli_rs")
-            self.assertEqual(h["version"], "0.155.1")
+            self.assertEqual(h["version"], "0.162.1")
             self.assertTrue(h["user-agent"].endswith(" unknown"))
         for req in seen:
             h = req["headers"]
@@ -138,7 +138,7 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(self.responses()[1]["headers"]["authorization"], "Bearer " + self.fake.tokens["access_token"])
         refresh = [x for x in self.fake.seen if x["path"] == "/oauth/token"]
         self.assertEqual(len(refresh), 1)
-        self.assertEqual(refresh[0]["headers"]["version"], "0.155.1")
+        self.assertEqual(refresh[0]["headers"]["version"], "0.162.1")
         self.assertIn("action=refresh", fakes.logged(rt))
 
     def test_usage_limit_and_precommit_context_error(self):

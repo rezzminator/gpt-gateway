@@ -26,7 +26,7 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(headers["content-length"], "2")
             self.assertEqual(headers.get("x-openai-internal-codex-responses-lite"), "true" if lite else None)
         self.assertEqual(client.models(creds), fakes.CHATGPT_MODELS)
-        self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.155.1")
+        self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
 
     def test_drop_cancels_the_reader_before_closing_connection(self):
         client = Client(SimpleNamespace(origin="http://127.0.0.1:1"), lambda line: None)
