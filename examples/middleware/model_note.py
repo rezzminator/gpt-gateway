@@ -4,7 +4,7 @@ Copy it to `{middleware_dir}/model_note.py` and list it in settings.json:
 
     {"middleware": [{"module": "model_note", "settings": {"enabled": true}}]}
 
-Each proxied request's log line then ends with ` model-note=<the request's model>`. It edits no
+Each proxied request's note then ends with ` model-note=<the request's model>`. It edits no
 body, so every request goes upstream byte for byte. `MODEL_GATEWAY_MODEL_NOTE=0` turns it off
 without touching the file; an env value reaches the validator as a string.
 """

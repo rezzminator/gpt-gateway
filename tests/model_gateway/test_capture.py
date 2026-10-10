@@ -40,7 +40,7 @@ class CaptureTest(unittest.TestCase):
         conn.request("GET", "/v1/models")
         conn.getresponse().read()
         conn.close()
-        fakes.logged(rt)
+        fakes.recorded(rt)
         (day,) = os.listdir(self.cap)
         first, second = sorted(os.listdir(os.path.join(self.cap, day)))
         self.assertRegex(first, r"^\d{6}\.\d{3}-000001-main-POST-v1_messages$")
@@ -64,13 +64,14 @@ class CaptureTest(unittest.TestCase):
                     self.assertNotIn(b"secret-token", f.read())
         self.assertNotIn("3-request.sent.body", os.listdir(os.path.join(self.cap, day, second)))
 
-    def test_a_capture_that_cannot_write_is_logged_and_the_request_goes_on(self):
+    def test_a_capture_that_cannot_write_is_recorded_and_the_request_goes_on(self):
         blocker = os.path.join(jail.scratch(self), "a-file")
         open(blocker, "w").close()
         rt, port = fakes.start_gateway(self, self.up, settings={"capture_dir": blocker})
         resp, _ = fakes.request(port, "POST", "/v1/messages", b'{"model":"m"}')
         self.assertEqual(resp.status, 200)
-        self.assertIn("capture error", fakes.logged(rt))
+        self.assertEqual([(e["request_id"], e["fields"]["error"].startswith("NotADirectoryError"))
+                          for e in fakes.events(rt, "capture_error")], [(1, True)])
 
 
 if __name__ == "__main__":

@@ -54,17 +54,17 @@ class TurnRouteTest(unittest.TestCase):
     def test_token_replays_within_a_turn_and_never_crosses_turns_lanes_forks_or_failures(self):
         other = dict(self.headers, **{"x-claude-code-agent-id": "agent-other"})
         unavailable = (503, {"error": {"message": "unavailable"}})
-        steps = [  # messages, ingress headers, (status, issued token) per attempt, the gpt line's ending
-            (START, None, [(200, "ts-1")], "stale=0 turn_state=issued transport=http"),
-            (START + [CALL, RESULT], None, [(200, "ts-2")], "stale=0 turn_state=sent transport=http"),
-            (START + [CALL, RESULT, CALL, RESULT, NOTICE], None, [(200, "ts-notice")], "stale=0 turn_state=sent transport=http"),
-            (START + [CALL, RESULT, CALL, FORK, NOTICE], None, [(200, "ts-fork-notice")], "stale=0 transport=http"),
-            (START + [CALL, FORK], None, [(200, "ts-fork")], "stale=0 transport=http"),
-            (START + [CALL, RESULT], other, [(200, None)], "stale=0 transport=http"),
-            (START + [CALL, RESULT, CALL, RESULT], None, [(503, "ts-error"), (200, None)], "stale=0 turn_state=sent transport=http"),
-            (NEXT, None, [(200, None)], "stale=0 transport=http"),
-            (NEXT + [CALL, RESULT], None, [(200, "ts-3")], "stale=0 turn_state=issued transport=http"),
-            (NEXT + [CALL, RESULT, CALL, RESULT], None, [(200, None)], "stale=0 turn_state=sent transport=http")]
+        steps = [  # messages, ingress headers, (status, issued token) per attempt, the request row's turn_state
+            (START, None, [(200, "ts-1")], "issued"),
+            (START + [CALL, RESULT], None, [(200, "ts-2")], "sent"),
+            (START + [CALL, RESULT, CALL, RESULT, NOTICE], None, [(200, "ts-notice")], "sent"),
+            (START + [CALL, RESULT, CALL, FORK, NOTICE], None, [(200, "ts-fork-notice")], None),
+            (START + [CALL, FORK], None, [(200, "ts-fork")], None),
+            (START + [CALL, RESULT], other, [(200, None)], None),
+            (START + [CALL, RESULT, CALL, RESULT], None, [(503, "ts-error"), (200, None)], "sent"),
+            (NEXT, None, [(200, None)], None),
+            (NEXT + [CALL, RESULT], None, [(200, "ts-3")], "issued"),
+            (NEXT + [CALL, RESULT, CALL, RESULT], None, [(200, None)], "sent")]
         sent = [None, "ts-1", "ts-1", None, None, None, "ts-1", "ts-1", None, None, "ts-3"]  # the header each Responses request carried
         attempts = [attempt for step in steps for attempt in step[2]]
         self.fake.script = [(200, fakes.responses_turn()) if status == 200 else unavailable for status, _ in attempts]
@@ -74,11 +74,8 @@ class TurnRouteTest(unittest.TestCase):
             for messages, headers, _, _ in steps:
                 self.assertEqual(self.send(port, dict(self.body, messages=messages), headers)[0].status, 200)
         self.assertEqual([x["headers"].get("x-codex-turn-state") for x in self.responses()], sent)
-        lines = [x for x in fakes.logged(rt).splitlines() if "    gpt lane=" in x]
-        self.assertEqual(len(lines), len(steps))
-        for line, step in zip(lines, steps):
-            with self.subTest(step=steps.index(step)):
-                self.assertTrue(line.endswith(step[3]), line)
+        self.assertEqual([(r["turn_state"], r["stale"], r["transport"]) for r in fakes.gpt_rows(rt)],
+                         [(step[3], 0, "http") for step in steps])
 
     def test_a_fork_sends_its_lanes_last_effort_and_an_estimate_never_moves_it(self):
         # Claude Code sends the activity-summary fork at the agent's declared effort while an effort tag can run the
@@ -105,7 +102,7 @@ class TurnRouteTest(unittest.TestCase):
                 body = dict(self.body, messages=messages, output_config=dict(effort=effort))
                 self.assertEqual(self.send(port, body, headers, path)[0].status, 200)
         self.assertEqual([json.loads(x["body"])["reasoning"].get("effort") for x in self.responses()], sent)
-        self.assertIn("gpt drop-reasoning lane=", fakes.logged(rt))
+        self.assertEqual(len(fakes.events(rt, "drop_reasoning")), 1)
 
     def test_a_compaction_sends_its_lanes_last_effort_and_never_moves_it(self):
         # Claude Code sends every compaction request at effort high whatever effort the agent runs at; the backend's

@@ -51,9 +51,9 @@ class WebSocket:
     """One upgraded connection, driven by one thread at a time: masked frames out, whole text messages in, pings
     answered. A close frame, EOF or a reset raises ConnectionResetError; a frame the protocol forbids, UpstreamError."""
 
-    def __init__(self, sock, pending=b"", log=None):
+    def __init__(self, sock, pending=b"", event=None):
         self.sock, self.pending = sock, bytearray(pending)
-        self.log = log if log is not None else (lambda line: None)
+        self.event = event if event is not None else (lambda kind, **fields: None)
         self.closed = False
 
     def send(self, data, opcode=TEXT):
@@ -159,4 +159,4 @@ class WebSocket:
         try:
             self.sock.close()
         except OSError as e:
-            self.log("    upstream websocket close failed: %r" % (e,))
+            self.event("upstream_socket", what="websocket_close", error=repr(e))

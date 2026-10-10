@@ -194,10 +194,11 @@ class ErrorsRouteTest(unittest.TestCase):
                          [("3", "3000"), ("%d" % (errors.MAX_ADVISED_SLEEP + 1), "%d" % ((errors.MAX_ADVISED_SLEEP + 1) * 1000)),
                           (None, None)])
         self.assertEqual(len(self.responses()), 6)
-        logged = fakes.logged(rt)
-        for line in ("status=503 attempt=1 action=retry retry_after=0.05 body=", "status=429 attempt=1 action=final retry_after=3 body=",
-                     "status=503 attempt=1 action=final retry_after=%g body=" % (errors.MAX_ADVISED_SLEEP + 1),
-                     # a stream failure logs its failing event, never the stream's opening bytes or the response it carries
-                     'status=200 attempt=1 action=retry retry_after=0.04 body=b\'{"type": "response.failed", "status": '
-                     '"failed", "error": {"code": "rate_limit_exceeded", "message": "Please try again in 0.04s."}}\''):
-            self.assertIn(line, logged)
+        failed = [(e["fields"]["status"], e["fields"]["attempt"], e["fields"]["action"], e["fields"]["retry_after"],
+                   e["fields"]["error_head"]) for e in fakes.events(rt) if e["kind"] in ("retry", "final_error")]
+        for attempt in ((503, 1, "retry", 0.05), (429, 1, "final", 3), (503, 1, "final", errors.MAX_ADVISED_SLEEP + 1),
+                        (200, 1, "retry", 0.04)):
+            self.assertIn(attempt, [x[:4] for x in failed])
+        # a stream failure records its failing event, never the stream's opening bytes or the response it carries
+        self.assertIn('{"type": "response.failed", "status": "failed", "error": {"code": "rate_limit_exceeded", '
+                      '"message": "Please try again in 0.04s."}}', [x[4] for x in failed])

@@ -3,6 +3,7 @@ import json
 import os
 import unittest
 
+from model_gateway import db
 from model_gateway.harness import load, run, run_cli
 from model_gateway.middleware import MiddlewareError
 from model_gateway.settings import SettingsError
@@ -55,9 +56,13 @@ class HarnessTest(unittest.TestCase):
         self.assertTrue(out.changed)
         self.assertEqual(out.note, " kind=sub wide=x")
         self.assertEqual([e["event"] for e in out.events], ["message_start", "content_block_delta", "message_stop"])
-        self.assertEqual(len(out.errors), 1)
-        self.assertIn("middleware wide on_event failed: RuntimeError('delta')", out.errors[0])
-        self.assertEqual(out.log[-2:], ("POST /v1/messages -> 200 kind=sub wide=x", "wide end 200 sub kind=sub wide=x"))
+        self.assertEqual([(e["module"], e["hook"], e["error"]) for e in out.errors],
+                         [("wide", "on_event", "RuntimeError('delta')")])
+        self.assertEqual(out.log, ("wide end 200 sub kind=sub wide=x",))
+        self.assertEqual({k: out.row[k] for k in ("method", "path", "kind", "route", "model", "status", "note", "stream",
+                                                  "completed", "agent_id")},
+                         {"method": "POST", "path": "/v1/messages", "kind": "sub", "route": "anthropic", "model": "m",
+                          "status": 200, "note": "wide=x", "stream": False, "completed": True, "agent_id": "a"})
         self.assertEqual((out.result.status, out.result.completed), (200, True))
         self.assertEqual(out.health, "wide tag=x errors=1")
         self.assertEqual(dict(out.settings), {"tag": "x"})
@@ -70,9 +75,11 @@ class HarnessTest(unittest.TestCase):
         self.assertFalse(out.changed)
         self.assertEqual(out.events, ({"event": None, "data": {"id": "r"}, "raw": b'{"id": "r"}'},))
         self.assertEqual(out.result.error_head, b'{"id": "r"}')
+        self.assertEqual((out.row["status"], out.row["error_head"]), (429, '{"id": "r"}'))  # text, as the database holds it
         self.assertEqual(out.errors, ())
         out = run(plain, body=raw, response=JSON_BODY, content_type="application/json")
         self.assertEqual(out.events[0]["data"], json.loads(JSON_BODY))
+        self.assertEqual((out.row["input_tokens"], out.row["cache_read_tokens"], out.row["hit"]), (3, 0, 0.0))
 
     def test_an_answer_is_relayed_and_nothing_is_forwarded(self):
         import sys
@@ -83,7 +90,8 @@ class HarnessTest(unittest.TestCase):
         path = jail.write_middleware(self.dir, "answering", source)
         out = run(path, body={"model": "m"}, headers={"x-claude-code-agent-id": "a"}, response=SSE_BODY, chunk_size=4)
         self.assertEqual(out.note, " kind=sub answering=1 answered=answering")
-        self.assertEqual(out.log, ("POST /v1/messages -> 200 kind=sub answering=1 answered=answering",))
+        self.assertEqual((out.log, out.row["note"], out.row["answered_by"]),
+                         ((), "answering=1 answered=answering", "answering"))
         self.assertIsNone(out.forwarded)
         self.assertFalse(out.changed)
         self.assertEqual([e["event"] for e in out.events], ["message_stop"])
@@ -104,11 +112,12 @@ class HarnessTest(unittest.TestCase):
             load(os.path.join(self.dir, "absent.py"))
 
     def test_run_cli(self):
-        log = os.path.join(self.dir, "gw.log")
-        code, out, err = run_cli(self.path, ["a", "b"], settings={"tag": "c"}, log_path=log)
+        log, path = os.path.join(self.dir, "gw.log"), os.path.join(self.dir, "gateway.db")
+        code, out, err = run_cli(self.path, ["a", "b"], settings={"tag": "c"}, log_path=log, db_path=path)
         self.assertEqual((code, out, err), (4, "tag c ['a', 'b']\n", ""))
-        with open(log) as f:
-            self.assertIn("cli a,b", f.read())
+        self.assertEqual(db.query(path, "SELECT kind, fields FROM events"),
+                         [{"kind": "middleware_log", "fields": '{"line": "cli a,b"}'}])
+        self.assertFalse(os.path.exists(log))  # a middleware's line goes to the database, never the text log
 
 
 if __name__ == "__main__":

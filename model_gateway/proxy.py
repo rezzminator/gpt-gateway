@@ -1,9 +1,9 @@
 """One exchange: read the request (chunked included), run the hooks, forward it, relay the response.
 
 The response streams back as it arrives: each upstream chunk is written and flushed before the next
-is read, and the event hooks see it only after the client has. A request a hook answered goes to no
-upstream: its answer takes the same relay. A request line is logged for POST /v1/messages and for
-every status >= 400; on_response_end runs after it.
+is read, and the event hooks and the usage meter see it only after the client has. A request a hook
+answered goes to no upstream: its answer takes the same relay. Every request but the health check
+becomes one `requests` row in the database, its usage read off the relay; on_response_end runs after it.
 """
 import json
 import copy
@@ -16,6 +16,7 @@ from .health import HEALTH_PATH, health_line
 from .hooks import Context, Request, Result, parse_object
 from .response import Response
 from .upstream import UpstreamError
+from .usage import Meter
 
 MESSAGES_PATH = "/v1/messages"
 ERROR_HEAD = 600
@@ -23,35 +24,75 @@ CHUNK = 65536
 
 
 def assemble_note(kind, notes):
-    """The request's log note: its kind, then each on_request note verbatim, in list order."""
+    """The request's note as Result.note carries it: its kind, then each on_request note verbatim, in list order."""
     return " kind=%s%s" % (kind, "".join(notes))
 
 
-def request_meta(body):
-    """The request's shape for an error line: max_tokens, message and tool counts, stream."""
-    if body is None:
-        return ""
-    msgs, tools = body.get("messages") or [], body.get("tools") or []
-    return " req(max_tokens=%s msgs=%d tools=%d stream=%s)" % (
-        body.get("max_tokens"), len(msgs) if isinstance(msgs, list) else -1,
-        len(tools) if isinstance(tools, list) else -1, body.get("stream"))
+def session_id(body):
+    """The session id in the body's `metadata.user_id`: a JSON object's `session_id`, or the end of a
+    `user_{hash}_account_{uuid}_session_{uuid}` string; None for any other form."""
+    metadata = body.get("metadata") if isinstance(body, dict) else None
+    user = metadata.get("user_id") if isinstance(metadata, dict) else None
+    if not isinstance(user, str):
+        return None
+    if user.startswith("{"):
+        try:
+            user = json.loads(user)
+        except ValueError:
+            return None
+        found = user.get("session_id") if isinstance(user, dict) else None
+        return found if isinstance(found, str) and found else None
+    _, sep, tail = user.rpartition("_session_")
+    return tail if sep and tail else None
 
 
-def logs_line(method, path, status):
-    return (method == "POST" and path.split("?", 1)[0] == MESSAGES_PATH) or status >= 400
+def request_row(method, path, body, headers, kind, route, request_id):
+    """The request's share of its row: what it is and who sent it, never its body."""
+    model = body.get("model") if body is not None else None
+    return {"request_id": request_id, "route": route, "kind": kind, "method": method, "path": path,
+            "model": model if isinstance(model, str) else None, "session_id": session_id(body),
+            "agent_id": headers.get("x-claude-code-agent-id"),
+            "stream": body.get("stream") is True if body is not None else None}
 
 
-def request_line(method, path, status, note, meta, headers, error_head):
-    """`METHOD path -> status note`, plus the request shape, rate limits and body head on an error."""
-    line = "%s %s -> %d%s" % (method, path, status, note)
+def note_row(row, notes, answered):
+    """The notes' share of the row: the middleware notes, and the NAME of the module that answered."""
+    row["note"] = "".join(notes).strip() or None
+    if answered:
+        row["answered_by"] = notes[-1][len(" answered="):]  # run_request closes the notes with it
+
+
+def relay_row(row, status, completed, disconnected, failure, error_head, meter):
+    """The relay's share of the row: the status and how the relay ended, then the meter's error code and, on the
+    Anthropic route, its usage; the ChatGPT route's usage is the backend's, which the route wrote."""
+    row.update(status=status, completed=completed, client_disconnected=disconnected)
     if status >= 400:
-        line += meta
-        limits = " ".join("%s=%s" % (k.lower().replace("anthropic-ratelimit-", ""), v) for k, v in headers
-                          if k.lower().startswith("anthropic-ratelimit-") or k.lower() == "retry-after")
-        if limits:
-            line += " ratelimit(" + limits + ")"
-        line += " body=" + error_head[:300].decode("utf-8", "replace").replace("\n", " ")
-    return line
+        row["error_head"] = error_head
+    if failure is not None:
+        row.update(error_code="stream_error", error_head=failure)
+    for name, value in meter.fields().items():
+        if row.get("route") != "chatgpt" or name in ("error_code", "error_head"):
+            row.setdefault(name, value)
+    return row
+
+
+def metered(method, path, status):
+    """Whether a response's usage and error code are read: a Messages call's, or an error reply's."""
+    return status >= 400 or (method == "POST" and path.split("?", 1)[0] == MESSAGES_PATH)
+
+
+def error_detail(body, headers):
+    """An error reply's context, never its body: the request's shape and the rate-limit headers."""
+    detail = {}
+    if body is not None:
+        msgs, tools = body.get("messages") or [], body.get("tools") or []
+        detail.update(max_tokens=body.get("max_tokens"), messages=len(msgs) if isinstance(msgs, list) else -1,
+                      tools=len(tools) if isinstance(tools, list) else -1)
+    limits = {k.lower().replace("anthropic-ratelimit-", ""): v for k, v in headers
+              if k.lower().startswith("anthropic-ratelimit-") or k.lower() == "retry-after"}
+    if limits:
+        detail["ratelimit"] = limits
+    return detail
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -74,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 rt.chatgpt.client.drop()
 
     def log_message(self, *args):
-        pass  # the gateway log records each exchange itself
+        pass  # the database records each exchange itself
 
     def read_body(self):
         """The request body; ValueError when its content-length or a chunk size is not a number >= 0."""
@@ -107,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         rt = self.server.runtime
         snap = rt.settings.current()  # one settings snapshot per request
         if self.path == HEALTH_PATH:
-            return self.reply(200, "text/plain", health_line(snap, rt.chain, rt.log, rt.chatgpt).encode())
+            return self.reply(200, "text/plain", health_line(snap, rt).encode())
         rt.drain.begin(self.connection)
         try:
             self.proxy(rt, snap)
@@ -116,52 +157,64 @@ class Handler(BaseHTTPRequestHandler):
             if rt.drain.draining:
                 self.close_connection = True  # a draining gateway serves no further request on this connection
 
+    def record(self, rt, row, started, **fields):
+        """Queue the request's row, the relay's end its end."""
+        row.update(fields, ended=clock.now())
+        row.setdefault("total_ms", clock.milliseconds(clock.monotonic() - started))
+        rt.db.request(row)
+
     def proxy(self, rt, snap):
-        started = clock.monotonic()
+        started, row = clock.monotonic(), {"started": clock.now(), "method": self.command, "path": self.path}
         try:
             raw = self.read_body()
         except ValueError as e:
-            rt.log.write("%s %s -> 400 unreadable request body: %s" % (self.command, self.path, e))
             self.close_connection = True  # the body's end is unknown, so nothing after it can be read
-            return self.reply(400, "application/json", json.dumps({"type": "error", "error": {
-                "type": "invalid_request_error", "message": "model-gateway: unreadable request body: %s" % e}}).encode())
+            data = json.dumps({"type": "error", "error": {
+                "type": "invalid_request_error", "message": "model-gateway: unreadable request body: %s" % e}}).encode()
+            self.reply(400, "application/json", data)
+            return self.record(rt, dict(row, route="anthropic"), started, status=400, completed=True,
+                               error_code="invalid_request_error", error_head=data)
         body = parse_object(raw)
         selected = ("anthropic", None, None)
         if rt.chatgpt is not None:
             selected = rt.chatgpt.decide(self.command, self.path, body, self.headers)
         kind = "sub" if self.headers.get("x-claude-code-agent-id") else "main"
         seq = rt.sequence.next()
+        row.update(request_row(self.command, self.path, body, self.headers, kind, selected[0], seq))
         capture_kind = "gpt" if selected[0] == "chatgpt" else kind
-        cap = Capture(snap.capture_dir, seq, self.command, self.path, self.headers, capture_kind, rt.log.write)
+        cap = Capture(snap.capture_dir, seq, self.command, self.path, self.headers, capture_kind, rt.db.event)
         try:
-            self.exchange(rt, snap, raw, body, selected, kind, seq, cap, started)
+            self.exchange(rt, snap, raw, body, selected, kind, seq, cap, started, row)
+        except Exception as e:
+            if "ended" not in row:  # the exchange broke before its row was queued: the request still gets one
+                self.record(rt, row, started, error_code="gateway_error", error_head=repr(e))
+            raise
         finally:
             cap.close()
 
-    def exchange(self, rt, snap, raw, body, selected, kind, seq, cap, started):
+    def exchange(self, rt, snap, raw, body, selected, kind, seq, cap, started, row):
         cap.request_body(raw)
-        meta = request_meta(body)
-        ctx = Context(log=rt.log.write, log_path=rt.log.path, settings=snap.module_settings, kind=kind,
-                      method=self.command, path=self.path, headers=Headers(self.headers.items()),
-                      model=body.get("model") if body is not None else None, request_id=seq,
-                      capture_dir=cap.dir, route=selected[0])
-        if rt.env.debug and logs_line(self.command, self.path, 0):
-            metadata = body.get("metadata") if body is not None else None
-            rt.log.write("    debug headers=%s metadata=%s" % (json.dumps(debug_headers(self.headers.items())),
-                                                              json.dumps(metadata)[:300]))
+        ctx = Context(log=lambda line: rt.db.event("middleware_log", request_id=seq, line=line), log_path=rt.log.path,
+                      settings=snap.module_settings, kind=kind, method=self.command, path=self.path,
+                      headers=Headers(self.headers.items()), model=body.get("model") if body is not None else None,
+                      request_id=seq, capture_dir=cap.dir, route=selected[0])
+        if rt.env.debug and self.command == "POST" and self.path.split("?", 1)[0] == MESSAGES_PATH:
+            rt.db.event("debug", request_id=seq, headers=debug_headers(self.headers.items()),
+                        metadata=body.get("metadata") if body is not None else None)
         req = Request(raw, copy.deepcopy(body) if selected[0] == "chatgpt" else body)
         sent, notes = rt.chain.run_request(ctx, req)
         if sent is not raw and selected[0] != "chatgpt":  # the chatgpt route captures the bytes it sends
             cap.sent_body(sent)
         note = assemble_note(kind, notes)
+        note_row(row, notes, req.answered is not None)
         if req.answered is not None:  # no upstream on either route, so no upstream connection to drop
             answer = req.answered
             return self.relay(rt, ctx, Response(answer.status, answer.data, {"content-type": answer.content_type}),
-                              note, meta, cap, started, None)
+                              note, body, cap, started, None, row)
         if selected[0] == "chatgpt":
             resp = selected[2] or rt.chatgpt.exchange(req.body if sent is not raw else body,
-                                                     selected[1], self.headers, self.path, cap, started)
-            return self.relay(rt, ctx, resp, note, meta, cap, started, rt.chatgpt.client)
+                                                     selected[1], self.headers, self.path, cap, started, row)
+            return self.relay(rt, ctx, resp, note, body, cap, started, rt.chatgpt.client, row)
         headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # a repeated header goes as sent
         headers.append(("accept-encoding", "identity"))
         if sent or self.command in ("POST", "PUT", "PATCH"):
@@ -169,22 +222,24 @@ class Handler(BaseHTTPRequestHandler):
         try:
             resp = rt.upstream.send(self.command, self.path, sent or None, headers)
         except UpstreamError as e:
-            rt.log.write("%s %s -> 502 %s%s" % (self.command, self.path, e.message, note))
             cap.gateway_error(502, e.message)
             data = json.dumps({"type": "error", "error": {"type": "api_error",
                                                           "message": "model-gateway: " + e.message}}).encode()
             self.reply(502, "application/json", data)
+            self.record(rt, row, started, status=502, completed=True, error_code="api_error", error_head=data)
             rt.chain.run_response_end(ctx, Result(502, "Bad Gateway", (), data[:ERROR_HEAD], True, False,
                                                   clock.monotonic() - started, note))
             return
-        self.relay(rt, ctx, resp, note, meta, cap, started, rt.upstream)
+        self.relay(rt, ctx, resp, note, body, cap, started, rt.upstream, row)
 
-    def relay(self, rt, ctx, resp, note, meta, cap, started, upstream):
-        """Relay `resp` to the client; `upstream` is the connection a broken relay spends, None for a hook's answer."""
+    def relay(self, rt, ctx, resp, note, body, cap, started, upstream, row):
+        """Relay `resp` to the client and record its row; `upstream` is the connection a broken relay spends,
+        None for a hook's answer."""
         resp_headers = tuple(resp.getheaders())
         cap.response(resp.status, resp.reason, resp_headers)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
-        error_head, completed, disconnected, sink = b"", False, False, None
+        error_head, completed, disconnected, sink, failure = b"", False, False, None, None
+        meter = Meter(resp.getheader("content-type") if metered(self.command, self.path, resp.status) else None)
         try:  # the client may be gone before the headers reach it, so they are inside the try too
             self.send_response(resp.status)
             for k, v in resp_headers:
@@ -209,6 +264,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     if sink is not None:
                         sink.feed(chunk)
+                    meter.feed(chunk)
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             completed = True
@@ -216,19 +272,28 @@ class Handler(BaseHTTPRequestHandler):
             if upstream is not None:
                 upstream.drop()  # the client left mid-stream; this upstream connection is spent
             disconnected = True
-            rt.log.write("%s %s client disconnected mid-stream%s" % (self.command, self.path, note))
             self.close_connection = True
         except Exception as e:
             if upstream is not None:
                 upstream.drop()
-            rt.log.write("%s %s stream error %r%s" % (self.command, self.path, e, note))
+            failure = repr(e)
             self.close_connection = True
         if sink is not None:
             sink.close(completed)
-        if completed and logs_line(self.command, self.path, resp.status):
-            rt.log.write(request_line(self.command, self.path, resp.status, note, meta, resp_headers, error_head))
+        meter.finish()
+        self.finish_row(rt, row, resp, completed, disconnected, failure, error_head, meter, body, resp_headers)
+        self.record(rt, row, started)
         rt.chain.run_response_end(ctx, Result(resp.status, resp.reason, resp_headers,
                                               error_head if resp.status >= 400 else b"", completed, disconnected,
                                               clock.monotonic() - started, note))
+
+    def finish_row(self, rt, row, resp, completed, disconnected, failure, error_head, meter, body, resp_headers):
+        """The relay's share of the row; an error reply's context and an unreadable usage as events."""
+        relay_row(row, resp.status, completed, disconnected, failure, error_head, meter)
+        if resp.status >= 400:
+            rt.db.event("error_detail", request_id=row["request_id"], **error_detail(body, resp_headers))
+        if (completed and resp.status == 200 and meter.unread and row["route"] == "anthropic" and self.command == "POST"
+                and self.path.split("?", 1)[0] == MESSAGES_PATH):
+            rt.db.event("usage_unread", request_id=row["request_id"], reason=meter.unread)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any

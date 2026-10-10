@@ -1,7 +1,7 @@
 """The per-request half of the middleware contract: Context, Request, Result and the hook chain.
 
-Hooks run in list order. A hook that raises is logged as `middleware {NAME} {hook} failed: {exc!r}`
-with its traceback's last frame, and its module's error count goes up. A failed `on_request` sends
+Hooks run in list order. A hook that raises is recorded as a `middleware_failed` event (its NAME, the
+hook, `{exc!r}` and its traceback's last frame), and its module's error count goes up. A failed `on_request` sends
 the original bytes upstream with every module's edits (and notes) discarded and skips the later
 modules' `on_request`; a failed `on_event` or `on_response_end` is skipped. No hook breaks a request
 or cuts a stream. A hook that changes `body["model"]` has failed: routing is the core's job.
@@ -143,7 +143,7 @@ class Result:
     completed: bool            # the response ran to its end
     client_disconnected: bool
     duration_s: float
-    note: str                  # the assembled log note
+    note: str                  # the assembled note: kind, then each on_request note
 
 
 def parse_object(raw):
@@ -160,28 +160,29 @@ def parse_object(raw):
 class Chain:
     """The loaded modules in list order, and the hooks run over them with failure isolation."""
 
-    def __init__(self, modules, log):
+    def __init__(self, modules, event):
         self.modules = tuple(modules)
-        self.log = log
+        self.event = event  # the database's event(kind, request_id=None, lane=None, **fields)
         self.with_on_event = tuple(m for m in self.modules if m.on_event is not None)
 
-    def fail(self, module, hook, exc):
+    def fail(self, module, hook, exc, ctx=None):
         module.failed()
         frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ is not None else []
-        where = ""
+        where = None
         if frames:
             last = frames[-1]
-            where = " at %s:%s in %s" % (os.path.basename(last.filename), last.lineno, last.name)
-        self.log("middleware %s %s failed: %r%s" % (module.NAME, hook, exc, where))
+            where = "%s:%s in %s" % (os.path.basename(last.filename), last.lineno, last.name)
+        self.event("middleware_failed", request_id=ctx.request_id if ctx is not None else None,
+                   module=module.NAME, hook=hook, error=repr(exc), where=where)
 
     def call(self, module, hook, ctx, *args):
-        """(True, value) from the hook, or (False, None) once its failure is logged and counted."""
+        """(True, value) from the hook, or (False, None) once its failure is recorded and counted."""
         ctx._module = module.module
         try:
             fn = getattr(module, hook)
             return True, fn(ctx, *args)
         except (Exception, SystemExit) as e:
-            self.fail(module, hook, e)
+            self.fail(module, hook, e, ctx)
             return False, None
         finally:
             ctx._module = None
@@ -201,10 +202,10 @@ class Chain:
             ok, note = self.call(m, "on_request", ctx, req)
             if ok and req.body is not None and req.body.get("model", _MISSING) != model:
                 ok = False
-                self.fail(m, "on_request", ValueError("changed body['model']; routing is the core's job"))
+                self.fail(m, "on_request", ValueError("changed body['model']; routing is the core's job"), ctx)
             if ok and note is not None and not isinstance(note, str):
                 ok = False
-                self.fail(m, "on_request", TypeError("returned %s, not str or None" % type(note).__name__))
+                self.fail(m, "on_request", TypeError("returned %s, not str or None" % type(note).__name__), ctx)
             if not ok:
                 req._answer = None
                 return req.raw, []
@@ -220,7 +221,7 @@ class Chain:
         try:
             return json.dumps(req.body, separators=(",", ":")).encode(), notes
         except Exception as e:
-            self.fail(marker, "on_request", e)
+            self.fail(marker, "on_request", e, ctx)
             return req.raw, []
 
     def event_sink(self, ctx, content_type):
@@ -245,7 +246,7 @@ class Chain:
                 ok, value = self.call(m, "health", ctx)
                 if ok and not isinstance(value, str):
                     ok = False
-                    self.fail(m, "health", TypeError("returned %s, not str" % type(value).__name__))
+                    self.fail(m, "health", TypeError("returned %s, not str" % type(value).__name__), ctx)
                 text += " " + (value if ok else "health-error")
             out.append("%s errors=%d" % (text, m.errors))
         return out
@@ -255,7 +256,7 @@ class EventSink:
     """Feeds one response's bytes to the on_event hooks: per SSE event, or once for a JSON body.
 
     A module whose on_event fails is skipped for the rest of this response. The sink never raises:
-    an error of its own is logged and turns it off, and the stream goes on.
+    an error of its own is recorded as an `event_sink` event and turns it off, and the stream goes on.
     """
 
     def __init__(self, chain, ctx, mode):
@@ -281,7 +282,7 @@ class EventSink:
             step()
         except Exception as e:
             self.broken = True
-            self.chain.log("middleware on_event delivery stopped for %s %s: %r" % (self.ctx.method, self.ctx.path, e))
+            self.chain.event("event_sink", request_id=self.ctx.request_id, reason="error", error=repr(e))
 
     def feed(self, chunk):
         def step():
@@ -290,12 +291,14 @@ class EventSink:
                 for event in self.splitter.feed(chunk):
                     self.deliver(event)
                 if self.splitter.overflowed != overflowed:
-                    self.chain.log("middleware on_event: an SSE event over %d bytes was dropped" % self.splitter.max_pending)
+                    self.chain.event("event_sink", request_id=self.ctx.request_id, reason="event_too_large",
+                                     limit=self.splitter.max_pending)
             elif len(self.body) + len(chunk) <= MAX_JSON_EVENT:
                 self.body += chunk
             else:
                 self.broken = True
-                self.chain.log("middleware on_event: JSON body over %d bytes, not delivered" % MAX_JSON_EVENT)
+                self.chain.event("event_sink", request_id=self.ctx.request_id, reason="json_too_large",
+                                 limit=MAX_JSON_EVENT)
         self.guarded(step)
 
     def close(self, completed):

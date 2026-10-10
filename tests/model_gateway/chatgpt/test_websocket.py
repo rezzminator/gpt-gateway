@@ -16,7 +16,7 @@ from tests.model_gateway.chatgpt import test_turn as turn_tests
 
 CALL = dict(role="assistant", content=[dict(type="tool_use", id="call_invented", name="lookup", input={"city": "Harbor"})])
 RESULT = dict(role="user", content=[dict(type="tool_result", tool_use_id="call_invented", content="sunny")])
-FULL = " delta=full:none"  # the ending of a WebSocket lane line with no completed response to continue
+FULL = "full:none"  # the delta of a WebSocket exchange with no completed response to continue
 
 
 class MessageTest(unittest.TestCase):
@@ -47,8 +47,8 @@ class MessageTest(unittest.TestCase):
 
 class PauseTest(unittest.TestCase):
     def test_five_transport_failures_in_a_row_pause_the_socket_for_http_and_a_success_resets_the_count(self):
-        lines = []
-        sockets = websocket.Sockets(None, lines.append)
+        events = []
+        sockets = websocket.Sockets(None, lambda kind, **fields: events.append((kind, fields)))
         with patch("model_gateway.clock.monotonic", return_value=1000.0):
             for _ in range(4):
                 sockets.failed("reset")
@@ -58,8 +58,8 @@ class PauseTest(unittest.TestCase):
             self.assertTrue(sockets.usable())
             sockets.failed("reset by peer")
             self.assertFalse(sockets.usable())
-        self.assertEqual(lines, ["    gpt websocket paused seconds=600 reason=5 transport failures in a row, the last reset by peer; "
-                                 "HTTP serves until then"])
+        self.assertEqual(events, [("websocket_paused", {
+            "seconds": 600, "reason": "5 transport failures in a row, the last reset by peer"})])
         with patch("model_gateway.clock.monotonic", return_value=1000.0 + websocket.PAUSE_SECONDS):
             self.assertTrue(sockets.usable())
 
@@ -74,8 +74,12 @@ class WebSocketRouteTest(unittest.TestCase):
         route_tests.RouteTest.setUp(self)
         self.env["MODEL_GATEWAY_CHATGPT_TRANSPORT"] = "websocket"
 
-    def lines(self, rt, prefix="    gpt lane="):
-        return [line for line in fakes.logged(rt).splitlines() if prefix in line]
+    def endings(self, rt):
+        """(reused, stale, transport, delta) of each answered exchange's request row."""
+        return [(r["reused"], r["stale"], r["transport"], r["delta"]) for r in fakes.gpt_rows(rt)]
+
+    def close_reasons(self, rt):
+        return [e["fields"]["reason"] for e in fakes.events(rt, "websocket_close")]
 
     def test_a_lane_rides_one_kept_socket_and_another_lane_its_own(self):
         rt, port = self.gateway()
@@ -84,9 +88,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(self.send(port, headers=dict(self.headers, **{"x-claude-code-agent-id": "agent-other"}))[0].status, 200)
         self.assertEqual(len(self.fake.upgrades), 2)
         self.assertEqual([x["method"] for x in self.responses()], ["WS"] * 4)
-        endings = [line.split(" reused=", 1)[1] for line in self.lines(rt)]
-        self.assertEqual(endings, ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL,
-                                   "0 stale=0 transport=ws" + FULL])
+        self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (1, 0, "ws", FULL), (1, 0, "ws", FULL), (0, 0, "ws", FULL)])
         for h in self.fake.upgrades:
             self.assertEqual(h["openai-beta"], "responses_websockets=2026-02-06")
             self.assertEqual({h["session-id"], h["thread-id"], h["x-client-request-id"]}, {h["session-id"]})
@@ -96,9 +98,7 @@ class WebSocketRouteTest(unittest.TestCase):
         sent = sorted(Path(self.capture).rglob(SENT_BODY))
         self.assertEqual([b'{"type":"response.create",' + path.read_bytes()[1:] for path in sent],
                          [x["body"] for x in self.responses()])
-        log = fakes.logged(rt)
-        self.assertEqual(log.count("    gpt websocket open lane="), 2)
-        self.assertNotIn("gpt websocket close", log)
+        self.assertEqual((len(fakes.events(rt, "websocket_open")), fakes.events(rt, "websocket_close")), (2, []))
 
     def test_a_turn_state_token_from_response_metadata_rides_the_turns_next_messages(self):
         self.fake.issued = ["ts-ws"]
@@ -109,19 +109,18 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertNotIn("client_metadata", first)
         self.assertEqual(second["client_metadata"], {"x-codex-turn-state": "ts-ws"})
         self.assertNotIn("x-codex-turn-state", self.fake.upgrades[0])
-        self.assertEqual([line.rsplit(" stale=0 ", 1)[1] for line in self.lines(rt)],
-                         ["turn_state=issued transport=ws" + FULL, "turn_state=sent transport=ws" + FULL])
+        self.assertEqual([(r["turn_state"], r["stale"], r["transport"], r["delta"]) for r in fakes.gpt_rows(rt)],
+                         [("issued", 0, "ws", FULL), ("sent", 0, "ws", FULL)])
 
     def test_a_kept_socket_that_dies_before_its_answer_or_while_idle_gives_way_silently(self):
         self.fake.vanish, self.fake.hangup = [False, True], [False, True]
         rt, port = self.gateway()
         self.assertEqual([self.send(port)[0].status for _ in range(3)], [200, 200, 200])
         self.assertEqual(len(self.fake.upgrades), 3)
-        self.assertEqual([line.split(" attempts=", 1)[1][:1] + line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["10 stale=0 transport=ws" + FULL, "10 stale=1 transport=ws" + FULL, "10 stale=0 transport=ws" + FULL])
-        log = fakes.logged(rt)
-        self.assertNotIn("gpt error", log)
-        self.assertIn("reason=closed-while-idle", log)
+        self.assertEqual([r["attempts"] for r in fakes.gpt_rows(rt)], [1, 1, 1])
+        self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (0, 1, "ws", FULL), (0, 0, "ws", FULL)])
+        self.assertEqual(fakes.events(rt, "retry") + fakes.events(rt, "final_error"), [])
+        self.assertIn("closed-while-idle", self.close_reasons(rt))
 
     def test_the_connection_limit_reopens_and_a_wrapped_refusal_answers_as_its_status(self):
         limit = {"error": {"code": "websocket_connection_limit_reached", "message": "limit reached"}}
@@ -134,12 +133,10 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual((refused.status, refused.getheader("retry-after")), (429, "3"))
         self.assertEqual(self.send(port)[0].status, 200)
         self.assertEqual(len(self.fake.upgrades), 3)
-        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["0 stale=0 transport=ws" + FULL, "0 stale=1 transport=ws" + FULL, "0 stale=0 transport=ws" + FULL])
-        log = fakes.logged(rt)
-        self.assertIn("gpt error lane=", log)
-        self.assertIn("status=429 attempt=1 action=final retry_after=3", log)
-        self.assertIn("reason=abort", log)
+        self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (0, 1, "ws", FULL), (0, 0, "ws", FULL)])
+        self.assertIn({"status": 429, "attempt": 1, "retry_after": 3}, [
+            {k: e["fields"][k] for k in ("status", "attempt", "retry_after")} for e in fakes.events(rt, "final_error")])
+        self.assertIn("abort", self.close_reasons(rt))
 
     def test_an_upgrade_the_backend_does_not_serve_pauses_the_socket_and_http_answers(self):
         self.fake.refuse = [426]
@@ -147,8 +144,9 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual([self.send(port)[0].status for _ in range(2)], [200, 200])
         self.assertEqual(len(self.fake.upgrades), 1)
         self.assertEqual([x["method"] for x in self.responses()], ["POST", "POST"])
-        self.assertEqual([line.rsplit(" ", 1)[1] for line in self.lines(rt)], ["transport=http"] * 2)
-        self.assertIn("gpt websocket paused seconds=3600 reason=the upgrade answered 426", fakes.logged(rt))
+        self.assertEqual([r["transport"] for r in fakes.gpt_rows(rt)], ["http"] * 2)
+        self.assertEqual([e["fields"] for e in fakes.events(rt, "websocket_paused")],
+                         [{"seconds": 3600, "reason": "the upgrade answered 426"}])
 
     def test_a_refused_upgrade_with_a_status_of_its_own_answers_as_that_status(self):
         self.fake.refuse = [503] * 5
@@ -158,7 +156,8 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(resp.status, 503)
         self.assertEqual(len(self.fake.upgrades), 5)
         self.assertEqual(self.responses(), [])
-        self.assertIn("status=503 attempt=5 action=final", fakes.logged(rt))
+        self.assertEqual([(e["fields"]["status"], e["fields"]["attempt"]) for e in fakes.events(rt, "final_error")],
+                         [(503, 5)])
 
     def test_five_transport_failures_pause_the_socket_and_the_next_request_goes_over_http(self):
         self.fake.vanish = [True] * 5
@@ -168,8 +167,9 @@ class WebSocketRouteTest(unittest.TestCase):
             served = self.send(port)[0]
         self.assertEqual((failed.status, served.status), (502, 200))
         self.assertEqual([x["method"] for x in self.responses()], ["WS"] * 5 + ["POST"])
-        self.assertEqual([line.rsplit(" ", 1)[1] for line in self.lines(rt)], ["transport=http"])
-        self.assertIn("gpt websocket paused seconds=600 reason=5 transport failures in a row", fakes.logged(rt))
+        self.assertEqual([r["transport"] for r in fakes.gpt_rows(rt)], ["http"])
+        self.assertEqual([(e["fields"]["seconds"], e["fields"]["reason"].startswith("5 transport failures in a row"))
+                          for e in fakes.events(rt, "websocket_paused")], [(600, True)])
 
     def test_a_hang_up_after_output_counts_one_failure_and_a_completed_response_resets_the_count(self):
         partial = fakes.responses_event("response.created") + fakes.responses_event(
@@ -183,7 +183,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(self.send(port)[0].status, 200)
         self.assertEqual(rt.chatgpt.client.sockets.failures, 0)
         self.assertEqual(len(self.fake.upgrades), 2)
-        self.assertIn("reason=ended-early", fakes.logged(rt))
+        self.assertIn("ended-early", self.close_reasons(rt))
 
     def concurrent(self, port, first, second):
         """Send `first`, then `second` while the backend still holds `first`'s answer; both statuses."""
@@ -204,8 +204,7 @@ class WebSocketRouteTest(unittest.TestCase):
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
-                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL])
+        self.assertEqual(sorted(self.endings(rt)), [(0, 0, "ws", FULL), (1, 0, "ws", FULL)])  # the waiter can end first
 
     def test_an_agent_request_waits_for_the_fork_holding_its_lanes_socket(self):
         # The agent's next request can arrive while the fork still holds the socket; a second socket would read the
@@ -216,8 +215,7 @@ class WebSocketRouteTest(unittest.TestCase):
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         self.assertEqual(self.concurrent(port, fork, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
-                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL])
+        self.assertEqual(sorted(self.endings(rt)), [(0, 0, "ws", FULL), (1, 0, "ws", FULL)])  # the waiter can end first
 
     def test_a_request_arriving_while_its_lanes_first_socket_opens_waits_for_it(self):
         # Until the upgrade answers, the opening socket is neither idle nor busy; a fork arriving then must still wait.
@@ -227,7 +225,8 @@ class WebSocketRouteTest(unittest.TestCase):
         fork = dict(self.body, messages=turn_tests.START + [turn_tests.CALL, turn_tests.FORK])
         self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertNotIn("reason=lane-spare", fakes.logged(rt))
+        self.assertEqual(len(fakes.events(rt, "websocket_open")), 1)
+        self.assertNotIn("lane-spare", self.close_reasons(rt))
 
     def test_a_fork_waits_out_a_generation_longer_than_the_lane_wait(self):
         # The agent's request can generate for minutes; the fork only labels its last action, so it waits it out.
@@ -238,7 +237,7 @@ class WebSocketRouteTest(unittest.TestCase):
         with patch("model_gateway.chatgpt.websocket.LANE_WAIT_SECONDS", 0.1):
             self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
-        self.assertNotIn("gpt websocket lane-wait", fakes.logged(rt))
+        self.assertEqual((fakes.events(rt, "lane_wait"), len(fakes.events(rt, "websocket_open"))), ([], 1))
 
     def test_a_wait_that_runs_out_opens_another_socket_and_the_lane_keeps_the_one_back_last(self):
         self.fake.stall = [0.8]
@@ -250,10 +249,8 @@ class WebSocketRouteTest(unittest.TestCase):
         self.fake.stall = [0.8]
         self.assertEqual(self.concurrent(port, agent, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 2)
-        logged = fakes.logged(rt)
-        self.assertEqual(logged.count("gpt websocket lane-wait lane="), 1)
-        self.assertIn("timed out after 0.1 s; another socket opens", logged)
-        self.assertEqual(logged.count("reason=lane-spare"), 1)
+        self.assertEqual([e["fields"]["wait_s"] for e in fakes.events(rt, "lane_wait")], [0.1])
+        self.assertEqual(self.close_reasons(rt).count("lane-spare"), 1)
 
     def test_a_request_extending_its_sockets_last_response_sends_only_its_new_items_after_its_id(self):
         self.fake.script = [(200, fakes.responses_turn(True, response_id="resp_one")), (200, fakes.responses_turn())]
@@ -270,8 +267,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(second, first)
         self.assertEqual(len(self.fake.upgrades), 1)
         n = len(json.loads(Path(sorted(Path(self.capture).rglob(SENT_BODY))[1]).read_bytes())["input"])
-        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws delta=1/%d" % n])
+        self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (1, 0, "ws", "1/%d" % n)])
 
     def test_a_continuation_the_backend_no_longer_holds_goes_again_whole_on_a_fresh_socket(self):
         gone = {"error": {"code": "previous_response_not_found", "message": "Previous response not found."}}
@@ -287,9 +283,8 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(whole["input"][:len(first["input"])], first["input"])
         self.assertEqual(len(whole["input"]), len(first["input"]) + 3)
         self.assertEqual(len(self.fake.upgrades), 2)
-        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["0 stale=0 transport=ws" + FULL, "0 stale=1 transport=ws" + FULL])
-        self.assertNotIn("gpt error", fakes.logged(rt))
+        self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (0, 1, "ws", FULL)])
+        self.assertEqual(fakes.events(rt, "retry") + fakes.events(rt, "final_error"), [])
 
     # The route's error, retry and refresh behaviour, over the WebSocket.
     test_refresh_once_and_oauth_identity = route_tests.RouteTest.test_refresh_once_and_oauth_identity

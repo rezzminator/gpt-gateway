@@ -2,6 +2,7 @@
 successor takes the port, and the drain gives up at its limit."""
 import errno
 import http.client
+import json
 import os
 import signal
 import subprocess
@@ -9,6 +10,7 @@ import threading
 import time
 import unittest
 
+from model_gateway import db
 from model_gateway.server import Drain
 from tests import fakes, jail
 
@@ -56,6 +58,10 @@ class DrainTest(unittest.TestCase):
         with open(self.log) as f:
             return f.read()
 
+    def recorded(self, sql):
+        """Rows of the jail's database, which both gateway processes write."""
+        return db.query(jail.clean_env(self.tmp)["MODEL_GATEWAY_DB"], sql)
+
     def test_a_stream_survives_a_restart_and_the_successor_takes_new_requests(self):
         old = self.gateway()
         self.assertTrue(jail.wait_for(lambda: self.health_pid() == old.pid))
@@ -75,6 +81,11 @@ class DrainTest(unittest.TestCase):
         self.stream(after)
         self.assertIn(b"message_stop", after[0])
         self.assertIn("stop: drained, exiting", self.logged())
+        self.assertEqual([(r["pid"], json.loads(r["fields"])["left"]) for r in self.recorded(
+            "SELECT pid, fields FROM events WHERE kind = 'stop'")], [(old.pid, 0)])
+        self.assertEqual(sorted(r["pid"] for r in self.recorded("SELECT pid FROM events WHERE kind = 'start'")),
+                         sorted([old.pid, new.pid]))
+        self.assertIn({"pid": old.pid, "completed": 1}, self.recorded("SELECT pid, completed FROM requests"))
 
     def test_drain_gives_up_at_its_limit(self):
         old = self.gateway(drain="0.3")
@@ -88,6 +99,8 @@ class DrainTest(unittest.TestCase):
         self.assertLess(time.time() - start, 1.2)
         t.join(20)
         self.assertIn("still in flight", self.logged())
+        self.assertEqual([json.loads(r["fields"])["left"] for r in self.recorded(
+            "SELECT fields FROM events WHERE kind = 'stop'")], [1])
 
 
 class DrainStateTest(unittest.TestCase):

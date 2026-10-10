@@ -13,9 +13,9 @@ from . import continuation, identity, turn, websocket
 
 
 class Client:
-    def __init__(self, knobs, log):
-        self.upstream = Upstream(knobs.origin, log)
-        self.sockets = websocket.Sockets(self.upstream, log) if knobs.transport == "websocket" else None
+    def __init__(self, knobs, event):
+        self.upstream = Upstream(knobs.origin, event)
+        self.sockets = websocket.Sockets(self.upstream, event) if knobs.transport == "websocket" else None
         self.local = threading.local()  # the serving thread's response reader, its open Answer, its last send's facts
 
     # codex-rs/login/src/auth/default_client.rs:152-179; codex-api/src/requests/headers.rs:15-31.

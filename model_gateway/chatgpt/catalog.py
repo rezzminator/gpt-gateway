@@ -101,8 +101,8 @@ class CatalogUnavailable(Exception):
 class Catalog:
     """Disk-first catalog, refreshed lazily, with one bounded refresh in flight."""
 
-    def __init__(self, knobs, client, store, log):
-        self.path, self.client, self.store, self.log = knobs.models_path, client, store, log
+    def __init__(self, knobs, client, store, event):
+        self.path, self.client, self.store, self.event = knobs.models_path, client, store, event
         self.lock = threading.Lock()
         self.copy = None
         self.cause = "no cached catalog"
@@ -165,7 +165,7 @@ class Catalog:
                     self.next_refresh = clock.monotonic() + 300
                 except Exception as error:
                     self.cause, self.failure = str(error), error
-                    self.log("    gpt catalog refresh failed: " + self.cause)
+                    self.event("catalog_refresh_failed", cause=self.cause)
                     self.next_refresh = clock.monotonic() + 60
             if self.copy is None:
                 raise CatalogUnavailable(self.cause) from self.failure

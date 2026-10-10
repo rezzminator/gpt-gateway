@@ -16,7 +16,7 @@ class ModelNoteTest(unittest.TestCase):
         out = run(NOTE, body=BODY, response=SSE_BODY)
         self.assertEqual(out.note, " kind=main model-note=claude-x")
         self.assertIs(out.forwarded, BODY)
-        self.assertEqual(out.log, ("POST /v1/messages -> 200 kind=main model-note=claude-x",))
+        self.assertEqual((out.log, out.row["note"]), ((), "model-note=claude-x"))
         self.assertEqual((out.errors, out.health), ((), "model-note errors=0"))
 
     def test_enabled_from_the_file_and_from_the_env(self):

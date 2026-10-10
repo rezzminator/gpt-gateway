@@ -17,10 +17,11 @@ from . import env as envmod
 from . import middleware
 
 FILE_NAME = "settings.json"
-KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt")
+KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days")
 ENTRY_KEYS = ("module", "settings")
 MODULE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\Z")
 CAPTURE_OFF = ("off", "0")
+DEFAULT_RETENTION_DAYS = 30
 EMPTY = MappingProxyType({})
 
 
@@ -43,6 +44,7 @@ class Snapshot:
     sources: object           # {key: "env" | "file" | "default"}
     state: str                # "ok" | "missing" | "unread" | "error(...)"
     chatgpt: bool = False
+    db_retention_days: int = DEFAULT_RETENTION_DAYS
 
 
 def absolute_dir(value, where, key):
@@ -104,6 +106,11 @@ def read_file(path):
         if data["chatgpt"] is not None and type(data["chatgpt"]) is not bool:
             raise SettingsError("%s: chatgpt must be a boolean or null" % path)
         out["chatgpt"] = data["chatgpt"]
+    if "db_retention_days" in data:
+        days = data["db_retention_days"]
+        if type(days) is not int or days < 1:
+            raise SettingsError("%s: db_retention_days must be a whole number of days >= 1, got %s" % (path, json.dumps(days)))
+        out["db_retention_days"] = days
     for key in ("capture_dir", "middleware_dir"):
         if key in data:
             out[key] = None if data[key] is None else absolute_dir(data[key], path, key)
@@ -157,10 +164,11 @@ def describe(snap):
 class Settings:
     """The effective settings and the loaded middleware they belong to."""
 
-    def __init__(self, path, env, log):
+    def __init__(self, path, env, log, event=None):
         self.path = path
         self.env = dict(env)  # read once; validated with the file at load() or a reload
-        self.log = log
+        self.log = log  # the text log: a refused reload
+        self.event = event if event is not None else (lambda kind, **fields: None)  # the database
         self.lock = threading.Lock()
         self.key = None    # the file's (mtime_ns, size, inode) at the last read, None when missing
         self.read = False
@@ -172,7 +180,7 @@ class Settings:
         return os.path.join(os.path.dirname(os.path.abspath(self.path)), "middleware")
 
     def core(self, file_values):
-        """(capture_dir, middleware_dir, entries, sources, chatgpt) from env, file and defaults."""
+        """(capture_dir, middleware_dir, entries, sources, chatgpt, db_retention_days) from env, file and defaults."""
         sources = {}
         raw = envmod.value(self.env, envmod.CAPTURE_DIR)
         if raw is not None:
@@ -200,14 +208,16 @@ class Settings:
         else:
             chatgpt = file_values.get("chatgpt") or False
             sources["chatgpt"] = "file" if file_values.get("chatgpt") is not None else "default"
-        return capture, mdir, entries, sources, chatgpt
+        retention = file_values.get("db_retention_days", DEFAULT_RETENTION_DAYS)
+        sources["db_retention_days"] = "file" if "db_retention_days" in file_values else "default"
+        return capture, mdir, entries, sources, chatgpt, retention
 
     def build(self, core, modules, state):
-        capture, mdir, entries, sources, chatgpt = core
+        capture, mdir, entries, sources, chatgpt, retention = core
         per_module = {m.module: module_settings(m, values, self.env, self.path)
                       for m, (_, values) in zip(modules, entries)}
         return Snapshot(capture, mdir, tuple(name for name, _ in entries), MappingProxyType(per_module),
-                        MappingProxyType(sources), state, chatgpt)
+                        MappingProxyType(sources), state, chatgpt, retention)
 
     def stat_key(self):
         try:
@@ -263,7 +273,8 @@ class Settings:
         except SettingsError as e:
             self.snapshot = dataclasses.replace(self.snapshot, state="error(%s)" % str(e).replace("\n", " "))
             self.log("settings error, keeping the last good settings (%s): %s" % (describe(self.snapshot), e))
+            self.event("settings_error", path=self.path, error=str(e))
             return
         self.snapshot = snap
-        self.log("settings %s: %s" % ("reloaded from " + self.path if file_values is not None
-                                      else "file %s missing, defaults apply" % self.path, describe(snap)))
+        self.event("settings_reload", path=self.path, state=snap.state, settings=describe(snap),
+                   db_retention_days=snap.db_retention_days)

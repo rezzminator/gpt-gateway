@@ -12,6 +12,11 @@ def monotonic():
     return time.monotonic()
 
 
+def milliseconds(seconds):
+    """A duration in whole milliseconds."""
+    return int(round(seconds * 1000))
+
+
 def stamp(fmt, when=None):
     """`when` (default: now) formatted in local time."""
     return time.strftime(fmt, time.localtime(when))

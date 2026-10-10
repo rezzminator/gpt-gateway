@@ -58,24 +58,24 @@ class UpstreamError(Exception):
         self.message = message
 
 
-def keepalive(sock, log):
-    """Turn TCP keepalive on for `sock`; a refused option is logged, never fatal."""
+def keepalive(sock, event):
+    """Turn TCP keepalive on for `sock`; a refused option is an `upstream_socket` event, never fatal."""
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         for option, value in KEEPALIVE_OPTIONS:
             sock.setsockopt(socket.IPPROTO_TCP, option, value)
     except OSError as e:
-        log("    upstream keepalive failed: %r" % (e,))
+        event("upstream_socket", what="keepalive", error=repr(e))
 
 
 class _Keepalive:
     """Turns TCP keepalive on for the connection's socket as it connects."""
 
-    log = staticmethod(lambda line: None)
+    event = staticmethod(lambda kind, **fields: None)
 
     def connect(self):
         super().connect()
-        keepalive(self.sock, self.log)
+        keepalive(self.sock, self.event)
 
 
 class KeepaliveHTTPConnection(_Keepalive, http.client.HTTPConnection):
@@ -149,9 +149,9 @@ def _answer_body(sock, data, headers):
 
 
 class Upstream:
-    def __init__(self, origin, log=None):
+    def __init__(self, origin, event=None):
         self.origin = urlsplit(origin)
-        self.log = log if log is not None else (lambda line: None)
+        self.event = event if event is not None else (lambda kind, **fields: None)
         self.local = threading.local()
         self.tls = ssl.create_default_context() if self.origin.scheme == "https" else None
 
@@ -168,7 +168,7 @@ class Upstream:
                 conn = KeepaliveHTTPSConnection(host, port or 443, timeout=TIMEOUT_SECONDS, context=self.tls)
             else:
                 conn = KeepaliveHTTPConnection(host, port or 80, timeout=TIMEOUT_SECONDS)
-            conn.log = self.log
+            conn.event = self.event
             self.local.conn = conn
         return conn
 
@@ -180,7 +180,7 @@ class Upstream:
             try:
                 conn.close()
             except Exception as e:
-                self.log("    upstream close failed: %r" % (e,))
+                self.event("upstream_socket", what="close", error=repr(e))
 
     def reuse(self):
         """(reused, stale) of this thread's last send: the answering attempt rode a kept-alive connection;
@@ -194,7 +194,7 @@ class Upstream:
             try:
                 conn.sock.shutdown(socket.SHUT_RDWR)
             except OSError as e:
-                self.log("    upstream shutdown failed: %r" % (e,))
+                self.event("upstream_socket", what="shutdown", error=repr(e))
         self.drop()
 
     def send(self, method, path, body, headers, timeout=None):
@@ -245,7 +245,7 @@ class Upstream:
         sock = None
         try:
             sock = socket.create_connection((host, port), timeout=CONNECT_SECONDS)
-            keepalive(sock, self.log)
+            keepalive(sock, self.event)
             if self.tls is not None:
                 sock = self.tls.wrap_socket(sock, server_hostname=host)
             sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
@@ -274,4 +274,4 @@ class Upstream:
                 try:
                     sock.close()
                 except OSError as e:
-                    self.log("    upstream close failed: %r" % (e,))
+                    self.event("upstream_socket", what="close", error=repr(e))

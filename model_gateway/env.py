@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 PORT = "MODEL_GATEWAY_PORT"
 UPSTREAM = "MODEL_GATEWAY_UPSTREAM"
 LOG = "MODEL_GATEWAY_LOG"
+DB = "MODEL_GATEWAY_DB"
 CAPTURE_DIR = "MODEL_GATEWAY_CAPTURE_DIR"
 DRAIN_SECONDS = "MODEL_GATEWAY_DRAIN_SECONDS"
 DEBUG = "MODEL_GATEWAY_DEBUG"
@@ -18,6 +19,7 @@ CHATGPT = "MODEL_GATEWAY_CHATGPT"
 DEFAULT_PORT = 18787
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_LOG = "~/Library/Logs/model-gateway.log"
+DEFAULT_DB = "~/.local/state/model-gateway/gateway.db"
 DEFAULT_DRAIN_SECONDS = 600.0
 
 
@@ -39,15 +41,26 @@ def value(env, name):
     return raw or None
 
 
+def under_home(environ, path, needed_for):
+    """`path` with a leading `~/` resolved against the mapping's HOME, never the process's own."""
+    if path.startswith("~/"):
+        home = value(environ, "HOME")
+        if not home or not os.path.isabs(home):
+            raise EnvError("env HOME: an absolute path is required for %s" % needed_for)
+        path = os.path.join(home, path[2:])
+    return path
+
+
 class CoreEnv:
-    """The knobs the environment alone sets: port, upstream, log, drain limit, debug."""
+    """The knobs the environment alone sets: port, upstream, log, database, drain limit, debug."""
 
-    __slots__ = ("port", "upstream", "log_path", "drain_seconds", "debug")
+    __slots__ = ("port", "upstream", "log_path", "db_path", "drain_seconds", "debug")
 
-    def __init__(self, port, upstream, log_path, drain_seconds, debug):
+    def __init__(self, port, upstream, log_path, db_path, drain_seconds, debug):
         self.port = port
         self.upstream = upstream
         self.log_path = log_path
+        self.db_path = db_path
         self.drain_seconds = drain_seconds
         self.debug = debug
 
@@ -78,7 +91,10 @@ class CoreEnv:
                 drain = -1.0
             if not drain >= 0:
                 raise EnvError("env %s: must be a number of seconds >= 0, got %r" % (DRAIN_SECONDS, raw))
-        return cls(port, upstream, log_path, drain, value(env, DEBUG) is not None)
+        db_path = under_home(env, value(env, DB) or DEFAULT_DB, "the database, or set %s" % DB)
+        if not os.path.isabs(db_path):
+            raise EnvError("env %s: must be an absolute path, got %r" % (DB, db_path))
+        return cls(port, upstream, log_path, db_path, drain, value(env, DEBUG) is not None)
 
 
 CHATGPT_ORIGIN = "MODEL_GATEWAY_CHATGPT_ORIGIN"
@@ -107,12 +123,7 @@ def chatgpt_origin(environ, name, default):
 
 
 def chatgpt_path(environ, name, default, resolve=True):
-    path = value(environ, name) or default
-    if path.startswith("~/"):
-        home = value(environ, "HOME")
-        if not home or not os.path.isabs(home):
-            raise EnvError("env HOME: an absolute path is required for ChatGPT storage")
-        path = os.path.join(home, path[2:])
+    path = under_home(environ, value(environ, name) or default, "ChatGPT storage")
     if not os.path.isabs(path):
         raise EnvError("env %s: must be an absolute path" % name)
     return os.path.realpath(path) if resolve else os.path.abspath(path)

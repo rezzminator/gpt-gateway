@@ -109,18 +109,17 @@ class UpstreamTest(unittest.TestCase):
         self.assertTrue(cm.exception.message.startswith("upstream protocol error: BadStatusLine"), cm.exception.message)
         self.assertIsNone(up.local.conn)
 
-    def test_a_close_that_fails_is_logged(self):
+    def test_a_close_that_fails_is_recorded(self):
         class Broken:
             def close(self):
                 raise OSError(9, "Bad file descriptor")
-        lines = []
+        events = []
         up = Upstream("http://127.0.0.1:9")
-        up.log = lines.append
+        up.event = lambda kind, **fields: events.append((kind, fields))
         up.local.conn = Broken()
         up.drop()
         self.assertIsNone(up.local.conn)
-        self.assertEqual(len(lines), 1, lines)
-        self.assertIn("upstream close failed: OSError(9, 'Bad file descriptor')", lines[0])
+        self.assertEqual(events, [("upstream_socket", {"what": "close", "error": "OSError(9, 'Bad file descriptor')"})])
 
     def test_unreachable(self):
         up = Upstream("http://127.0.0.1:%d" % jail.free_port())
@@ -138,8 +137,8 @@ class UpstreamTest(unittest.TestCase):
             def do_POST(self):
                 super().do_POST()
                 self.close_connection = False
-        lines = []
-        up = Upstream(fakes.start_upstream(self, Keeping), lines.append)
+        events = []
+        up = Upstream(fakes.start_upstream(self, Keeping), lambda kind, **fields: events.append(kind))
         up.send("POST", "/x", b"{}", HEADERS).read()
         sock = up.local.conn.sock
         self.assertNotEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0)
@@ -149,16 +148,16 @@ class UpstreamTest(unittest.TestCase):
         for option, value in options.items():
             with self.subTest(option=option):
                 self.assertEqual(sock.getsockopt(socket.IPPROTO_TCP, option), value)
-        self.assertEqual(lines, [])
+        self.assertEqual(events, [])
         self.assertIn(upstream.KeepaliveHTTPSConnection, type(Upstream("https://example.invalid").connection()).__mro__)
 
-    def test_a_keepalive_option_the_kernel_refuses_is_logged_and_the_request_goes_on(self):
-        lines = []
-        up = Upstream(fakes.start_upstream(self, ClosingUpstream), lines.append)
+    def test_a_keepalive_option_the_kernel_refuses_is_recorded_and_the_request_goes_on(self):
+        events = []
+        up = Upstream(fakes.start_upstream(self, ClosingUpstream), lambda kind, **fields: events.append((kind, fields)))
         with unittest.mock.patch.object(upstream, "KEEPALIVE_OPTIONS", ((0x7FFF, 1),)):
             self.assertEqual(json.loads(up.send("POST", "/x", b"{}", HEADERS).read())["n"] > 0, True)
-        self.assertEqual(len(lines), 1, lines)
-        self.assertIn("upstream keepalive failed: OSError", lines[0])
+        self.assertEqual([(kind, f["what"], f["error"].startswith("OSError")) for kind, f in events],
+                         [("upstream_socket", "keepalive", True)])
 
     def test_https_gets_a_tls_context(self):
         self.assertIsNotNone(Upstream("https://example.invalid").tls)

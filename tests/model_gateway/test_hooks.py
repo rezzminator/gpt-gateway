@@ -15,13 +15,22 @@ RAW = b'{"model": "claude-x",  "messages": [{"role": "user", "content": "hi"}], 
 class ChainCase(unittest.TestCase):
     def setUp(self):
         self.dir = os.path.join(jail.scratch(self), "middleware")
-        self.lines = []
+        self.lines = []  # ctx.log lines and the chain's events, in order
+        self.events = []
+
+    def record(self, kind, request_id=None, lane=None, **fields):
+        """The chain's database event, kept whole and as the line a test reads it by."""
+        self.events.append((kind, request_id, fields))
+        where = " at " + fields["where"] if fields.get("where") else ""
+        self.lines.append("middleware %s %s failed: %s%s" % (fields.get("module"), fields.get("hook"),
+                                                              fields.get("error"), where)
+                          if kind == "middleware_failed" else "%s %r" % (kind, fields))
 
     def chain(self, sources, settings=None):
         for module, source in sources.items():
             jail.write_middleware(self.dir, module, source)
         modules = load_modules(list(sources), self.dir)
-        return Chain(modules, self.lines.append), modules
+        return Chain(modules, self.record), modules
 
     def ctx(self, settings=None):
         return Context(log=self.lines.append, log_path="/log", settings=MappingProxyType(settings or {}),
@@ -120,6 +129,9 @@ class FailureTest(ChainCase):
         self.assertEqual([m.errors for m in modules], [0, 1, 0])
         (line,) = self.lines
         self.assertRegex(line, r"^middleware fails on_request failed: RuntimeError\('boom',?\) at fails\.py:6 in on_request$")
+        (kind, request_id, fields), = self.events
+        self.assertEqual((kind, request_id, fields["module"], fields["hook"], fields["where"]),
+                         ("middleware_failed", 1, "fails", "on_request", "fails.py:6 in on_request"))
 
     def test_a_changed_model_is_a_failure_of_that_hook(self):
         chain, modules = self.chain({
@@ -177,6 +189,17 @@ class FailureTest(ChainCase):
         self.assertIsNone(chain.event_sink(self.ctx(), "text/html"))
         chain, _ = self.chain({"plain": 'NAME = "plain"\n'})
         self.assertIsNone(chain.event_sink(self.ctx(), "text/event-stream"))
+
+    def test_a_body_past_the_sink_limit_is_one_event_of_its_request(self):
+        from unittest import mock
+        from model_gateway import hooks
+        chain, _ = self.chain({"rec": 'NAME = "rec"\nE = []\ndef on_event(ctx, e):\n    E.append(e)\n'})
+        with mock.patch.object(hooks, "MAX_JSON_EVENT", 4):
+            sink = chain.event_sink(self.ctx(), "application/json")
+            sink.feed(b'{"a":')
+            sink.feed(b'1}')
+            sink.close(True)
+        self.assertEqual(self.events, [("event_sink", 1, {"reason": "json_too_large", "limit": 4})])
 
 
 ANSWERS = 'NAME = "answers"\ndef on_request(ctx, req):\n    req.answer(200, "text/plain", b"here")\n    return " answers=1"\n'

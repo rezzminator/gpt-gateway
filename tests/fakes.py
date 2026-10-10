@@ -11,7 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from model_gateway import frames
+from model_gateway import db, frames
 from model_gateway.runtime import Runtime
 from model_gateway.server import Server
 from tests import jail
@@ -194,10 +194,13 @@ def start_gateway(test, upstream=None, env=None, settings=None, middleware=None)
         jail.write_json(path, settings)
     for module, source in (middleware or {}).items():
         jail.write_middleware(os.path.join(d, "middleware"), module, source)
-    base = {"MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"),
+    base = {"MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"), "MODEL_GATEWAY_DB": os.path.join(d, "gateway.db"),
             "MODEL_GATEWAY_UPSTREAM": upstream or "http://127.0.0.1:%d" % jail.free_port()}
-    rt = Runtime(dict(base, **(env or {})), path)
+    run = dict(base, **(env or {}))
+    run["MODEL_GATEWAY_DB"] = base["MODEL_GATEWAY_DB"]  # each gateway its own database, a jail env's shared one aside
+    rt = Runtime(run, path)
     rt.load()
+    test.addCleanup(rt.db.close)
     server = Server(("127.0.0.1", 0), rt)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     test.addCleanup(server.server_close)
@@ -226,12 +229,35 @@ def request(port, method, path, body=None, headers=None, chunked=False):
     return resp, data
 
 
-def logged(rt, settle=0.1):
+def recorded(rt, table="requests", settle=0.1):
+    """Every row of `table` in the gateway's database once the rows queued within `settle` seconds are written."""
     time.sleep(settle)
-    if not os.path.exists(rt.log.path):
-        return ""
-    with open(rt.log.path) as f:
-        return f.read()
+    if not rt.db.flush():
+        raise AssertionError("the db writer did not flush within its timeout")
+    return db.query(rt.db.path, "SELECT * FROM %s ORDER BY id" % table)
+
+
+def db_bytes(rt):
+    """Every byte of the gateway's database files once its queue is written: the file, its WAL and its index."""
+    if not rt.db.flush():
+        raise AssertionError("the db writer did not flush within its timeout")
+    data = b""
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(rt.db.path + suffix):
+            with open(rt.db.path + suffix, "rb") as f:
+                data += f.read()
+    return data
+
+
+def gpt_rows(rt, settle=0.1):
+    """The request rows the ChatGPT route answered with the backend's usage, in order."""
+    return [r for r in recorded(rt, settle=settle) if r["route"] == "chatgpt" and r["input_tokens"] is not None]
+
+
+def events(rt, kind=None, settle=0.1):
+    """The `events` rows, each with its JSON `fields` decoded, optionally only those of `kind`."""
+    rows = [dict(r, fields=json.loads(r["fields"])) for r in recorded(rt, "events", settle)]
+    return [r for r in rows if kind is None or r["kind"] == kind]
 
 
 CHATGPT_MODELS = {"models": [{"slug": "gpt-test", "supported_reasoning_levels": [],

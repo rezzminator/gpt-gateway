@@ -91,10 +91,8 @@ class RouteTest(unittest.TestCase):
         for path, req in zip(folders, seen):
             self.assertIn("-gpt-", str(path))
             self.assertEqual(path.read_bytes(), req["body"])
-        log = fakes.logged(rt)
-        self.assertEqual(log.count("    gpt lane="), 3)
-        self.assertIn("input=100 cached=60 ratio=0.600 attempts=1", log)
-        self.assertIn("kind=sub", log)
+        self.assertEqual([(r["input_tokens"], r["cache_read_tokens"], r["hit"], r["attempts"], r["kind"])
+                          for r in fakes.gpt_rows(rt)], [(100, 60, 0.6, 1, "sub")] * 3)
         calls = fakes.calls("rec")
         self.assertEqual([v["route"] for k, v in calls if k == "on_request"], ["chatgpt"] * 3)
         self.assertEqual([v.status for k, v in calls if k == "on_response_end"], [200] * 3)
@@ -115,8 +113,9 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(gpt["headers"]["content-length"], str(len(gpt["body"])))
         self.assertEqual((gpt["headers"]["authorization"], gpt["headers"]["x-api-key"]), ("Bearer claude-secret", "claude-key"))
         self.assertEqual(self.fake.seen, [])
-        self.assertEqual(fakes.request(port, "GET", "/__gateway/health")[1],
-                         health_line(rt.settings.current(), rt.chain, rt.log).encode())
+        rows = re.compile(r" db_rows=\d+")  # a row still queued may land between the two
+        self.assertEqual(rows.sub("", fakes.request(port, "GET", "/__gateway/health")[1].decode()),
+                         rows.sub("", health_line(rt.settings.current(), rt)))
 
     def test_guard_unknown_and_suffixes(self):
         rt, port = self.gateway()
@@ -139,7 +138,7 @@ class RouteTest(unittest.TestCase):
         refresh = [x for x in self.fake.seen if x["path"] == "/oauth/token"]
         self.assertEqual(len(refresh), 1)
         self.assertEqual(refresh[0]["headers"]["version"], "0.162.1")
-        self.assertIn("action=refresh", fakes.logged(rt))
+        self.assertEqual([e["fields"]["action"] for e in fakes.events(rt, "retry")], ["refresh"])
 
     def test_usage_limit_and_precommit_context_error(self):
         self.fake.script = [(429, {"error": {"type": "usage_limit_reached", "resets_at": clock.now() + 60}}),
@@ -160,7 +159,7 @@ class RouteTest(unittest.TestCase):
         self.fake.models_status = 503
         rt, port = self.gateway()
         self.assertEqual(self.send(port)[0].status, 200)
-        self.assertIn("catalog refresh failed", fakes.logged(rt))
+        self.assertGreaterEqual(len(fakes.events(rt, "catalog_refresh_failed")), 1)
         os.unlink(self.models_path)
         rt2, port2 = self.gateway()
         resp, data = self.send(port2)
@@ -214,7 +213,8 @@ class RouteRetryTest(unittest.TestCase):
         before, after = [json.loads(x["body"])["input"] for x in self.responses()]
         self.assertTrue(any(item.get("type") == "reasoning" for item in before))
         self.assertFalse(any(item.get("type") == "reasoning" for item in after))
-        self.assertIn("gpt drop-reasoning lane=", fakes.logged(rt))
+        self.assertEqual([(e["fields"], bool(e["lane"]), bool(e["request_id"])) for e in fakes.events(
+            rt, "drop_reasoning")], [({"slug": "gpt-test"}, True, True)])
         captured = next(Path(self.capture).rglob(SENT_BODY)).read_bytes()
         self.assertEqual(captured, self.responses()[-1]["body"])
         self.fake.script = [(503, {"error": {"message": "unavailable"}})] * 5
@@ -246,7 +246,7 @@ class RouteRetryTest(unittest.TestCase):
         self.assertEqual(resp.status, 502)
         self.assertEqual(json.loads(data)["type"], "error")
         self.assertEqual(len(self.responses()), 2)
-        self.assertIn("action=final", fakes.logged(rt))
+        self.assertEqual([e["fields"]["action"] for e in fakes.events(rt, "final_error")], ["final", "final"])
 
     def test_calibration_images_and_lane_bound(self):
         from model_gateway.chatgpt import lane, request
@@ -331,7 +331,7 @@ class RouteRetryTest(unittest.TestCase):
         left.set()
         readers[0].thread.join(3)
         self.assertFalse(readers[0].thread.is_alive())
-        self.assertIn("client disconnected mid-stream", fakes.logged(rt))
+        self.assertEqual([(r["route"], r["client_disconnected"]) for r in fakes.recorded(rt)], [("chatgpt", 1)])
 
     def test_edited_body_capture_holds_only_what_was_sent(self):
         rt, port = fakes.start_gateway(self, self.anthropic, env=self.env,
@@ -358,7 +358,8 @@ class RouteRetryTest(unittest.TestCase):
                 patch("model_gateway.chatgpt.errors.backoff", return_value=0):
             self.assertEqual(self.send(port)[0].status, 200)
         self.assertEqual(len(attempts), 2)
-        self.assertIn("status=transport attempt=1 action=retry", fakes.logged(rt))
+        self.assertEqual([(e["fields"]["status"], e["fields"]["attempt"]) for e in fakes.events(rt, "retry")],
+                         [("transport", 1)])
         with patch.object(rt.chatgpt.store, "credentials", side_effect=AuthError("invented transient")):
             resp, data = self.send(port)
         self.assertEqual(resp.status, 503)
@@ -376,7 +377,7 @@ class RouteRetryTest(unittest.TestCase):
         message = stream.accumulate(data)
         self.assertEqual((resp.status, len(self.responses()), message["content"]), (200, 1, []))
         self.assertEqual(message["stop_reason"], "end_turn")
-        self.assertIn(" empty=1\n", fakes.logged(rt))
+        self.assertEqual([r["empty"] for r in fakes.gpt_rows(rt)], [1])
 
 
 class CodexRouteTest(unittest.TestCase):
@@ -496,11 +497,11 @@ class CodexRouteTest(unittest.TestCase):
                 self.assertTrue(all(t not in threading.enumerate() for t in readers))
                 self.assertFalse(any(isinstance(getattr(getattr(t, "_target", None), "__self__", None), Reader)
                                      for t in set(threading.enumerate()) - before))
-                lines = self.gpt_lines(rt)
+                rows = fakes.gpt_rows(rt)
                 if mode == "stale":  # Upstream.send's own fresh retry marks the answer stale
-                    self.assertEqual([line[-31:] for line in lines], ["reused=0 stale=0 transport=http", "reused=0 stale=1 transport=http"])
+                    self.assertEqual([(r["reused"], r["stale"], r["transport"]) for r in rows], [(0, 0, "http"), (0, 1, "http")])
                 if mode == "held":  # the client had message_stop before the reader's 2 s join gave up
-                    self.assertLess(int(re.search(r" total_ms=(\d+) ", lines[0]).group(1)), 2000, lines[0])
+                    self.assertEqual([r["total_ms"] < 2000 for r in rows[:1]], [True], rows)
                 client.close()
 
     def keepalive(self, port, turns):
@@ -515,9 +516,6 @@ class CodexRouteTest(unittest.TestCase):
             answers.append((response.status, response.read()))
         return answers
 
-    def gpt_lines(self, rt):
-        return [x for x in fakes.logged(rt).splitlines() if "    gpt lane=" in x]
-
     def test_reused_connection_that_dies_before_the_first_body_byte_retries_once_silently(self):
         self.fake.script = [(200, fakes.responses_turn()), (200, fakes.CLOSE_AFTER_HEADERS),
                             (200, fakes.responses_turn())]
@@ -529,20 +527,16 @@ class CodexRouteTest(unittest.TestCase):
         self.assertIn(b"message_stop", answers[1][1])
         self.assertEqual(len(self.responses()), 3)
         backoff.assert_not_called()
-        log = fakes.logged(rt)
-        self.assertNotIn("gpt error", log)
-        first, second = self.gpt_lines(rt)
-        self.assertIn("attempts=1 ", first)
-        self.assertTrue(first.endswith("reused=0 stale=0 transport=http"), first)
-        self.assertIn("attempts=1 ", second)
-        self.assertTrue(second.endswith("reused=0 stale=1 transport=http"), second)
+        self.assertEqual(fakes.events(rt, "retry") + fakes.events(rt, "final_error"), [])
+        self.assertEqual([(r["attempts"], r["reused"], r["stale"], r["transport"]) for r in fakes.gpt_rows(rt)],
+                         [(1, 0, 0, "http"), (1, 0, 1, "http")])
 
     def test_a_fresh_failure_a_body_byte_or_a_second_failure_is_an_ordinary_retry(self):
         turn, cut, byte = ((200, fakes.responses_turn()), (200, fakes.CLOSE_AFTER_HEADERS),
                            (200, fakes.Cut(fakes.responses_event("response.created"))))
-        for name, script, turns, stale in (("fresh connection", [cut, turn], 1, "0"),
-                                           ("body byte first", [turn, byte, turn], 2, "0"),
-                                           ("after the silent retry", [turn, cut, cut, turn], 2, "1")):
+        for name, script, turns, stale in (("fresh connection", [cut, turn], 1, 0),
+                                           ("body byte first", [turn, byte, turn], 2, 0),
+                                           ("after the silent retry", [turn, cut, cut, turn], 2, 1)):
             with self.subTest(name):
                 self.fake.script = script
                 jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
@@ -550,45 +544,51 @@ class CodexRouteTest(unittest.TestCase):
                 with patch("model_gateway.chatgpt.errors.backoff", return_value=0) as backoff:
                     self.assertEqual({status for status, _ in self.keepalive(port, turns)}, {200})
                 backoff.assert_called_once_with(1)
-                log = fakes.logged(rt)
-                self.assertEqual(log.count("gpt error"), 1)
-                self.assertIn("status=transport attempt=1 action=retry body=b'IncompleteRead(0 bytes read)'", log)
-                line = self.gpt_lines(rt)[-1]
-                self.assertIn("attempts=2 ", line)
-                self.assertTrue(line.endswith("reused=0 stale=%s transport=http" % stale), line)
+                self.assertEqual([{k: e["fields"][k] for k in ("status", "attempt", "action", "error_head")}
+                                  for e in fakes.events(rt, "retry")], [{"status": "transport", "attempt": 1,
+                                  "action": "retry", "error_head": "IncompleteRead(0 bytes read)"}])
+                self.assertEqual(fakes.events(rt, "final_error"), [])
+                row = fakes.gpt_rows(rt)[-1]
+                self.assertEqual((row["attempts"], row["reused"], row["stale"], row["transport"]), (2, 0, stale, "http"))
 
-    def test_gpt_line_ends_with_the_measurement_fields(self):
+    def test_gpt_row_holds_the_measurement_fields(self):
         self.fake.script = [(200, fakes.responses_turn(reasoning=3)), (200, fakes.responses_turn())]
         jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
         rt, port = self.gateway()
         self.keepalive(port, 2)
-        pattern = re.compile(r"input=100 cached=60 ratio=0\.600 attempts=1 out=8 reasoning=(\S+) ttfb_ms=(\d+) "
-                             r"upstream_ms=(\d+) total_ms=(\d+) reused=([01]) stale=0 transport=http$")
-        first, second = (pattern.search(line) for line in self.gpt_lines(rt))
-        self.assertEqual((first.group(1), first.group(5)), ("3", "0"))
-        self.assertEqual((second.group(1), second.group(5)), ("-", "1"))
-        for match in (first, second):
-            ttfb, upstream, total = (int(match.group(i)) for i in (2, 3, 4))
-            self.assertLessEqual(ttfb, total)
-            self.assertLessEqual(upstream, total)
+        names = ("input_tokens", "cache_read_tokens", "hit", "attempts", "output_tokens", "reasoning_tokens",
+                 "reused", "stale", "transport", "status")
+        rows = fakes.gpt_rows(rt)
+        self.assertEqual([tuple(r[n] for n in names) for r in rows], [
+            (100, 60, 0.6, 1, 8, 3, 0, 0, "http", 200), (100, 60, 0.6, 1, 8, None, 1, 0, "http", 200)])
+        for row in rows:
+            self.assertLessEqual(row["ttfb_ms"], row["total_ms"])
+            self.assertLessEqual(row["upstream_ms"], row["total_ms"])
 
-    def test_terminal_line_measures_from_receipt_send_and_terminal_event(self):
+    def test_terminal_measures_from_receipt_send_and_terminal_event(self):
         from types import SimpleNamespace
         from model_gateway.chatgpt.route import Measure, Route
-        lines = []
+        events, row = [], {}
         route = Route.__new__(Route)
-        route.log, route.lock = lines.append, __import__("threading").Lock()
+        route.event, route.lock = lambda kind, **fields: events.append(kind), __import__("threading").Lock()
         translator = stream.Translator("gpt-test", {}, 10)
-        translator.terminal, translator.usage = "response.completed", {"output_tokens": 8, "cache_read_input_tokens": 60}
+        translator.terminal, translator.usage = "response.completed", {
+            "output_tokens": 8, "cache_read_input_tokens": 60, "cache_creation_input_tokens": 0}
         translator.input_tokens, translator.cache_ratio, translator.reasoning_tokens = 100, 0.6, 5
         reader = SimpleNamespace(first_byte_at=101.25, terminal_at=103.0, transport_error=None, error_head=b"")
         measure = Measure(started=100.0, sent_at=100.5, reused=True, stale=True)
         estimator = SimpleNamespace(observe=lambda *args: None)
         with patch.object(clock, "monotonic", return_value=104.5):
             route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1, notes=("a \"b\"",)),
-                            translator, estimator, 1, 200, reader, None, measure)
-        self.assertEqual(lines, ["    gpt lane=lane slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1 out=8 "
-                                 'reasoning=5 ttfb_ms=1250 upstream_ms=2500 total_ms=4500 reused=1 stale=1 transport=http notes=["a \\"b\\""]'])
+                            translator, estimator, 1, 200, reader, None, measure, row)
+        self.assertEqual((events, row), ([], {
+            "attempts": 1, "input_tokens": 100, "cache_read_tokens": 60, "cache_write_tokens": 0, "output_tokens": 8,
+            "reasoning_tokens": 5, "hit": 0.6, "ttfb_ms": 1250, "upstream_ms": 2500, "total_ms": 4500, "reused": True,
+            "stale": True, "turn_state": None, "transport": "http", "delta": None,
+            "translation_notes": '["a \\"b\\""]', "empty": False}))
+        route._terminal("lane", SimpleNamespace(slug="gpt-test"), SimpleNamespace(estimate_chars=1, notes=("damaged",) * 200),
+                        translator, estimator, 1, 200, reader, None, measure, row)  # notes: whole JSON within 600, then a count
+        self.assertEqual(row["translation_notes"], json.dumps(["damaged"] * 53 + ["147 more"]))
 
     def test_ttfb_counts_from_the_gateway_receipt_of_the_request(self):
         jail.write_json(self.models_path, fakes.CHATGPT_MODELS)
@@ -596,5 +596,5 @@ class CodexRouteTest(unittest.TestCase):
                                        middleware={"slow": 'NAME = "slow"\nfrom model_gateway import clock\n'
                                                            'def on_request(ctx, req):\n    clock.sleep(0.3)\n'})
         self.assertEqual(self.send(port)[0].status, 200)
-        (line,) = self.gpt_lines(rt)
-        self.assertGreaterEqual(int(re.search(r" ttfb_ms=(\d+) ", line).group(1)), 300, line)
+        rows = fakes.gpt_rows(rt)
+        self.assertEqual([r["ttfb_ms"] >= 300 for r in rows], [True], rows)

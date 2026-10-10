@@ -170,7 +170,7 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(out.events[2]["data"]["delta"], {"type": "text_delta", "text": "Running go test"})
         self.assertEqual(out.events[4]["data"]["delta"]["stop_reason"], "end_turn")
         self.assertEqual(out.events[4]["data"]["usage"], {"output_tokens": 3})
-        self.assertEqual(out.log, ("POST /v1/messages -> 200 kind=sub answered=status-label",))
+        self.assertEqual((out.log, out.row["answered_by"]), ((), "status-label"))
         self.assertEqual((out.result.status, out.result.completed), (200, True))
 
     def test_without_stream_it_is_one_json_message(self):

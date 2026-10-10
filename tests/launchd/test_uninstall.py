@@ -53,11 +53,17 @@ class UninstallTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
 
-    def test_purge_deletes_the_logs(self):
+    def test_purge_deletes_the_logs_and_the_database(self):
         h, logs = self.installed()
+        state = os.path.join(h.home, ".local", "state", "model-gateway")
+        os.makedirs(state, exist_ok=True)
+        for name in ("gateway.db", "gateway.db-wal", "gateway.db-shm", "chatgpt-models.json"):
+            open(os.path.join(state, name), "w").close()
         code, out = h.run("uninstall.sh", "--purge")
         self.assertEqual(code, 0, out)
         self.assertEqual(os.listdir(logs), [])
+        self.assertEqual(sorted(n for n in os.listdir(state) if n.startswith(("gateway", "chatgpt"))),
+                         ["chatgpt-models.json"])  # the catalog is no log
 
     def test_an_unknown_option_is_refused(self):
         h = Host(self)

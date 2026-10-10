@@ -4,7 +4,7 @@
 1-request.json (method, path, headers; secrets redacted), 2-request.body (as the client sent it),
 3-request.sent.body (only when a hook changed it), 4-response.json (status, headers),
 5-response.body (the literal bytes streamed back, SSE included). Capture never breaks a request:
-a write failure is logged once and capture stops for that exchange.
+a write failure is recorded once, as a `capture_error` event, and capture stops for that exchange.
 """
 import json
 import os
@@ -37,10 +37,10 @@ class Sequence:
 class Capture:
     """The capture of one exchange; every method is a no-op when capture is off or has failed."""
 
-    def __init__(self, root, seq, method, path, headers, kind, log):
+    def __init__(self, root, seq, method, path, headers, kind, event):
         self.dir = None
         self.body = None
-        self.log = log
+        self.seq, self.event = seq, event
         if not root:
             return
         try:
@@ -58,7 +58,7 @@ class Capture:
             self.fail(e)
 
     def fail(self, e):
-        self.log("    capture error %s: %r" % (self.dir, e))
+        self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e))
         self.dir = None
 
     def write(self, name, data):
@@ -101,5 +101,5 @@ class Capture:
             try:
                 self.body.close()
             except Exception as e:
-                self.log("    capture close error %s: %r" % (self.dir, e))
+                self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e), on="close")
             self.body = None

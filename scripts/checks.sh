@@ -76,6 +76,7 @@ facade log model_gateway/log.py '^[[:space:]]*(import|from) logging\b|\blogging\
 facade settings model_gateway/settings.py '["'"'"']settings\.json["'"'"']'
 facade upstream model_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\(|\bcreate_connection\('
 facade capture model_gateway/capture.py '[1-5]-(request|response)(\.sent)?\.(json|body)'
+facade db model_gateway/db.py '^[[:space:]]*(import|from) sqlite3\b|\bsqlite3\.'
 
 census spelling-predecessor all -noiE 'adv[i]sor'
 census spelling-old-name all -noiE 'cache[-_ ]?gateway'

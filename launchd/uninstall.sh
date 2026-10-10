@@ -4,7 +4,7 @@
 # there afterwards (run.sh was not running), this script removes it itself.
 # Then it deletes the launchd agent and the installed copy, keeping settings.json
 # and middleware/ in ~/.local/state/model-gateway/backups/ first.
-# --purge also deletes the logs.
+# --purge also deletes the logs and the database.
 set -eu
 
 PURGE=no
@@ -19,6 +19,7 @@ DEST="$HOME/.local/share/model-gateway"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGS="$HOME/Library/Logs"
 BACKUPS="$HOME/.local/state/model-gateway/backups"
+DB="$HOME/.local/state/model-gateway/gateway.db"
 DOMAIN="gui/$(id -u)"
 
 PORT=18787
@@ -62,6 +63,7 @@ rm -f "$PLIST"
 rm -rf "$DEST"
 if [ "$PURGE" = yes ]; then
   rm -f "$LOGS/model-gateway.log" "$LOGS/model-gateway.log.1" "$LOGS/model-gateway.stderr.log"
-  echo "logs deleted"
+  rm -f "$DB" "$DB-wal" "$DB-shm"
+  echo "logs and database deleted"
 fi
 echo "model-gateway removed"

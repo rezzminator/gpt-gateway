@@ -87,14 +87,15 @@ class CatalogStoreTest(unittest.TestCase):
         self.client, self.store = Mock(), Mock()
         self.client.models.return_value = fakes.CHATGPT_MODELS
         self.raw = fakes.CHATGPT_MODELS
-        self.lines = []
+        self.events = []
+        self.record = lambda kind, **fields: self.events.append((kind, fields))
 
     def test_lazy_ttl_disk_fallback_and_atomic_permissions(self):
         import os
         import stat
         from unittest.mock import patch
         with patch("model_gateway.clock.monotonic", return_value=100) as timer:
-            cache = catalog.Catalog(self.knobs, self.client, self.store, self.lines.append)
+            cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.client.models.assert_not_called()
             self.assertIsNone(cache.count())
             self.assertIn("gpt-test", cache.models())
@@ -112,8 +113,8 @@ class CatalogStoreTest(unittest.TestCase):
             timer.return_value = 460
             cache.models()
             self.assertEqual(self.client.models.call_count, 3)
-            self.assertIn("gpt catalog refresh failed: invented unavailable", self.lines[0])
-            loaded = catalog.Catalog(self.knobs, self.client, self.store, self.lines.append)
+            self.assertEqual(self.events, [("catalog_refresh_failed", {"cause": "invented unavailable"})] * 2)
+            loaded = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.assertEqual(loaded.count(), 1)
             self.assertIn("gpt-test", loaded.models())
             self.assertEqual(self.client.models.call_count, 3)
@@ -122,14 +123,14 @@ class CatalogStoreTest(unittest.TestCase):
         import concurrent.futures
         from unittest.mock import patch
         with patch("model_gateway.clock.monotonic", return_value=100):
-            cache = catalog.Catalog(self.knobs, self.client, self.store, self.lines.append)
+            cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                 results = list(pool.map(lambda _: cache.models(), range(6)))
             self.assertEqual(len(results), 6)
             self.assertEqual(self.client.models.call_count, 1)
         self.knobs.models_path += ".missing"
         self.client.models.side_effect = ValueError("invented failure")
-        cache = catalog.Catalog(self.knobs, self.client, self.store, self.lines.append)
+        cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
         with self.assertRaisesRegex(catalog.CatalogUnavailable, "invented failure"):
             cache.models()
 
@@ -137,7 +138,7 @@ class CatalogStoreTest(unittest.TestCase):
         import queue
         from unittest.mock import Mock, patch
         with patch("model_gateway.clock.monotonic", return_value=100) as timer:
-            cache = catalog.Catalog(self.knobs, self.client, self.store, self.lines.append)
+            cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             cache.pending = Mock()
             cache.pending.get.side_effect = queue.Empty
             with self.assertRaisesRegex(catalog.CatalogUnavailable, "10 seconds"):

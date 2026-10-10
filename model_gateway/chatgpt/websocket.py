@@ -95,8 +95,8 @@ class Kept:
 class Sockets:
     """The idle sockets of every lane and whether the WebSocket serves; every method is thread-safe."""
 
-    def __init__(self, upstream, log):
-        self.upstream, self.log = upstream, log
+    def __init__(self, upstream, event):
+        self.upstream, self.event = upstream, event
         self.lock = threading.Lock()
         self.returned = threading.Condition(self.lock)  # a socket went back to the pool or closed
         self.idle = collections.OrderedDict()  # Kept -> None, oldest check-in first
@@ -115,7 +115,7 @@ class Sockets:
             idle, self.idle = list(self.idle), collections.OrderedDict()
         for kept in idle:
             self.close(kept, "paused")
-        self.log("    gpt websocket paused seconds=%d reason=%s; HTTP serves until then" % (seconds, reason))
+        self.event("websocket_paused", seconds=seconds, reason=reason)
 
     def failed(self, reason):
         with self.lock:
@@ -151,7 +151,7 @@ class Sockets:
                     self.busy[pool_key] += 1
             if kept is None:
                 if timed_out:
-                    self.log("    gpt websocket lane-wait lane=%s timed out after %g s; another socket opens" % (pool_key[0], wait))
+                    self.event("lane_wait", lane=pool_key[0], wait_s=wait)
                 return None
             old = clock.monotonic() - kept.opened >= MAX_AGE
             if not old and kept.ws.alive():
@@ -185,8 +185,8 @@ class Sockets:
         if answer.socket is None:
             self.release(pool_key)
             return answer
-        self.log("    gpt websocket open lane=%s handshake_ms=%d" % (pool_key[0], round((clock.monotonic() - started) * 1000)))
-        kept = Kept(WebSocket(answer.socket, answer.pending, self.log), pool_key, answer.headers)
+        self.event("websocket_open", lane=pool_key[0], handshake_ms=clock.milliseconds(clock.monotonic() - started))
+        kept = Kept(WebSocket(answer.socket, answer.pending, self.event), pool_key, answer.headers)
         kept.out = True
         return kept
 
@@ -211,8 +211,8 @@ class Sockets:
         with self.lock:
             self._returned(kept)
         (kept.ws.abort if abort else kept.ws.close)()
-        self.log("    gpt websocket close lane=%s reason=%s age_s=%d exchanges=%d" % (
-            kept.key[0], reason, clock.monotonic() - kept.opened, kept.exchanges))
+        self.event("websocket_close", lane=kept.key[0], reason=reason, age_s=int(clock.monotonic() - kept.opened),
+                   exchanges=kept.exchanges)
 
 
 class Refusal:
@@ -268,7 +268,7 @@ class Answer(Refusal):
         except ValueError:
             event = None
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-            self.sockets.log("    gpt websocket skipped a %d-byte message that is no JSON event" % len(text))
+            self.sockets.event("websocket_skipped", bytes=len(text))
             return None
         return event
 

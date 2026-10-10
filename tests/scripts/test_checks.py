@@ -11,7 +11,7 @@ PREDECESSOR = "adv" + "isor"
 OLD_NAME = "cache" + "-gateway"
 PRODUCT_VARIANT = "Model" + " Gateway"
 IDS = ("size-src", "size-test", "negation-dirs", "module-purpose", "test-mirror", "test-jail", "stray-runners",
-       "facade-env", "facade-clock", "facade-log", "facade-settings", "facade-upstream", "facade-capture",
+       "facade-env", "facade-clock", "facade-log", "facade-settings", "facade-upstream", "facade-capture", "facade-db",
        "spelling-predecessor", "spelling-old-name", "spelling-product", "spelling-env-prefix", "spelling-kind",
        "dup-functions", "registry-parity", "orientation-truth")
 CTL_FALLBACK = '  *) echo "usage: ctl.sh'
@@ -130,6 +130,9 @@ VIOLATIONS = (
      "model_gateway/cli.py (new 1)"),
     ("facade-upstream", lambda t: t.append("model_gateway/proxy.py", "X = http.client.HTTPConnection('h')\n"),
      "model_gateway/proxy.py (new 1)"),
+    ("facade-db", lambda t: t.append("model_gateway/proxy.py", "import sqlite3\n"), "model_gateway/proxy.py (new 1)"),
+    ("facade-db", lambda t: t.append("model_gateway/cli.py", "X = sqlite3.connect(':memory:')\n"),
+     "model_gateway/cli.py (new 1)"),
     ("facade-capture", lambda t: t.append("model_gateway/proxy.py", 'X = "5-response.body"\n'),
      "model_gateway/proxy.py (new 1)"),
     ("spelling-predecessor", lambda t: t.append("README.md", PREDECESSOR.upper() + "\n"), "README.md (new 1)"),
@@ -140,8 +143,8 @@ VIOLATIONS = (
     ("spelling-env-prefix", lambda t: t.append("model_gateway/env.py", 'STRAY = "STRAY_KNOB"\n'), "new: STRAY_KNOB"),
     ("spelling-kind", lambda t: t.append("model_gateway/proxy.py", 'X = " conv=main"\n'),
      "model_gateway/proxy.py (new 1)"),
-    ("dup-functions", lambda t: t.append("model_gateway/hooks.py", "def request_meta():\n    pass\n"),
-     "new: request_meta: model_gateway/hooks.py model_gateway/proxy.py"),
+    ("dup-functions", lambda t: t.append("model_gateway/hooks.py", "def request_row():\n    pass\n"),
+     "new: request_row: model_gateway/hooks.py model_gateway/proxy.py"),
     ("registry-parity", add_ctl_arm, "new: ctl.sh:sideways"),
     ("orientation-truth", lambda t: t.append("README.md", "`docs/gone.md`\n"), "new: docs/gone.md"),
     ("orientation-truth", lambda t: t.append("README.md", "`MODEL_GATEWAY_NOWHERE`\n"), "new: MODEL_GATEWAY_NOWHERE"),

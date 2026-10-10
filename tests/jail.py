@@ -33,9 +33,10 @@ def free_port():
 
 
 def clean_env(home, **overrides):
-    """Drop CODEX_HOME and MODEL_GATEWAY_*; set HOME to `home`, then apply `overrides`."""
+    """Drop CODEX_HOME and MODEL_GATEWAY_*; set HOME to `home` and the database inside it, then apply `overrides`."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("MODEL_GATEWAY_") and k != "CODEX_HOME"}
     env["HOME"] = home
+    env["MODEL_GATEWAY_DB"] = os.path.join(home, "state", "gateway.db")
     env.update(overrides)
     return env
 

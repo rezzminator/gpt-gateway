@@ -10,7 +10,7 @@ import http.client
 import threading
 from typing import Optional
 
-from .. import clock
+from .. import clock, db
 from ..response import Response
 from ..upstream import UpstreamError, is_stale
 from . import auth, errors, estimate, lane, request, signature, stream, turn
@@ -82,9 +82,19 @@ def without_reasoning(body):
     return cleaned
 
 
+def notes_column(notes):
+    """The translation notes as a JSON list a text column holds whole: the first ones that fit, then how many more."""
+    notes, kept = list(notes), len(notes)
+    text = json.dumps(notes)
+    while len(text) > db.TEXT_CAP:
+        kept -= 1
+        text = json.dumps(notes[:kept] + ["%d more" % (len(notes) - kept)])
+    return text if notes else None
+
+
 @dataclass
 class Measure:
-    """One exchange's clock marks and connection facts, read by the `gpt` line of the attempt that answered."""
+    """One exchange's clock marks and connection facts, read into the request row by the attempt that answered."""
     started: float  # the gateway received the client request
     sent_at: float = 0.0  # the attempt's upstream request was sent
     reused: bool = False  # the attempt rode a kept-alive connection
@@ -105,17 +115,13 @@ class Lane:
     effort: Optional[str] = None
 
 
-def milliseconds(seconds):
-    return int(round(seconds * 1000))
-
-
 class Route:
-    def __init__(self, knobs, log):
-        self.log = log
+    def __init__(self, knobs, event):
+        self.event = event
         self.agent_contract = knobs.agent_contract
         self.store = auth.source(knobs)
-        self.client = Client(knobs, log)
-        self.catalog = Catalog(knobs, self.client, self.store, log)
+        self.client = Client(knobs, event)
+        self.catalog = Catalog(knobs, self.client, self.store, event)
         self.lanes = {}
         self.lock = threading.Lock()
 
@@ -130,46 +136,51 @@ class Route:
                 self.lanes[key] = Lane()
             return self.lanes[key]
 
-    def _error_line(self, key, slug, status, attempt, action, head, credentials=None, delay=None):
+    def _attempt_event(self, row, key, slug, status, attempt, action, head, credentials=None, delay=None):
+        """A failed attempt as a `retry` event, or the last one as `final_error`: at most 300 bytes of its error,
+        secrets redacted."""
         if not isinstance(head, bytes):
             head = json.dumps(head, ensure_ascii=False).encode()
         if credentials is not None:
             for secret in (credentials.access_token, credentials.account_id):
                 head = head.replace(secret.encode(), b"[redacted]")
-        advice = "" if delay is None else " retry_after=%g" % delay
-        self.log("    gpt error lane=%s slug=%s status=%s attempt=%d action=%s%s body=%r" %
-                 (key, slug, status, attempt, action, advice, head[:300]))
+        self.event("final_error" if action == "final" else "retry", request_id=row.get("request_id"), lane=key,
+                   slug=slug, status=status, attempt=attempt, action=action, retry_after=delay,
+                   error_head=head[:300].decode("utf-8", "replace"))
 
     def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
-                  ended=None):
-        """`ended`: when the client had the last byte, the stream's end before the reader's join; now when None."""
+                  row, ended=None):
+        """The answering attempt's fields into the request row. `ended`: when the client had the last byte, the
+        stream's end before the reader's join; now when None."""
         if translator.error is not None:
-            self._error_line(key, model.slug, "transport" if reader.transport_error else status,
-                             attempt, "final", translator.failure or reader.error_head, credentials,
-                             translator.error.delay)
+            self._attempt_event(row, key, model.slug, "transport" if reader.transport_error else status,
+                                attempt, "final", translator.failure or reader.error_head, credentials,
+                                translator.error.delay)
+        row["attempts"] = attempt
         if translator.usage is not None:
             if translator.terminal == "response.completed":
                 with self.lock:
                     estimator.observe(translation.estimate_chars, translator.input_tokens)
-            reasoning = "-" if translator.reasoning_tokens is None else translator.reasoning_tokens
-            self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d out=%d reasoning=%s "
-                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s transport=%s%s%s%s" %
-                     (key, model.slug, status, translator.input_tokens,
-                      translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt,
-                      translator.usage["output_tokens"], reasoning,
-                      milliseconds(reader.first_byte_at - measure.started),
-                      milliseconds(reader.terminal_at - measure.sent_at),
-                      milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
-                      measure.reused, measure.stale, " turn_state=" + measure.turn if measure.turn else "",
-                      measure.transport, " delta=" + measure.delta if measure.delta else "",
-                      " notes=" + json.dumps(list(translation.notes)) if translation.notes else "",
-                      " empty=1" if translator.empty else ""))
+            row.update(
+                input_tokens=translator.input_tokens, cache_read_tokens=translator.usage["cache_read_input_tokens"],
+                cache_write_tokens=translator.usage["cache_creation_input_tokens"],
+                output_tokens=translator.usage["output_tokens"], reasoning_tokens=translator.reasoning_tokens,
+                hit=translator.cache_ratio, ttfb_ms=clock.milliseconds(reader.first_byte_at - measure.started),
+                upstream_ms=clock.milliseconds(reader.terminal_at - measure.sent_at),
+                total_ms=clock.milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
+                reused=measure.reused, stale=measure.stale, turn_state=measure.turn or None,
+                transport=measure.transport, delta=measure.delta or None,
+                translation_notes=notes_column(translation.notes),
+                empty=translator.empty)
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
-    def exchange(self, body, model, headers, path, cap, started=None):
+    def exchange(self, body, model, headers, path, cap, started=None, row=None):
+        """The response for one request; `row`, the request's row, gets the lane, the slug and the attempts' fields."""
         measure = Measure(clock.monotonic() if started is None else started)
         silent = False  # the one free retry of a kept-alive connection that died before any body byte
         key = lane.key(headers.get("x-claude-code-session-id", ""), headers.get("x-claude-code-agent-id", ""))
+        row = {} if row is None else row
+        row.update(lane=key, slug=model.slug)
         state = self.lane_state(key)
         estimator = state.estimator
         try:
@@ -225,12 +236,12 @@ class Route:
                         if body.get("stream"):
                             reader.on_end = lambda: self._terminal(key, model, translation, translator,
                                                                   estimator, attempt, 200, reader, credentials, measure,
-                                                                  reader.ended_at)
+                                                                  row, reader.ended_at)
                             return Response(200, first, reader=reader)
                         data = stream.accumulate(first + Response(200, reader=reader).read())
                         code = 502 if data.get("type") == "error" else 200
                         self._terminal(key, model, translation, translator, estimator, attempt, code, reader,
-                                       credentials, measure)
+                                       credentials, measure, row)
                         return Response.json(code, data)
                     decision, head = translator.error, translator.failure or reader.error_head
                     if reader.transport_error:
@@ -256,9 +267,10 @@ class Route:
             if decision.refresh and refreshed or decision.drop_reasoning and dropped:
                 can_retry = False
             action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning else "retry")
-            self._error_line(key, model.slug, status, attempt, action if can_retry else "final", head, credentials,
-                             decision.delay)
+            self._attempt_event(row, key, model.slug, status, attempt, action if can_retry else "final", head,
+                                credentials, decision.delay)
             if not can_retry:
+                row["attempts"] = attempt
                 if decision.client_status == 401:
                     return login_required()
                 return Response.json(decision.client_status, decision.client_body, decision.client_headers)
@@ -273,7 +285,7 @@ class Route:
                     cap.sent_body(translation.body_bytes)
                     with self.lock:
                         estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
-                    self.log("    gpt drop-reasoning lane=%s slug=%s" % (key, model.slug))
+                    self.event("drop_reasoning", request_id=row.get("request_id"), lane=key, slug=model.slug)
             except auth.LoginRequired as error:
                 return login_required(str(error))
             except auth.AuthError as error:

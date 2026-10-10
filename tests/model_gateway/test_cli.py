@@ -2,74 +2,72 @@
 
 Each runs gateway.py as a process from a staged install, as run.sh does.
 """
-import os
 import io
-from contextlib import redirect_stdout
+import json
+import os
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 import subprocess
 import unittest
 
-from model_gateway import cli
+from model_gateway import cli, clock, db
 from tests import jail
 
 
 class ChatGPTStatsTest(unittest.TestCase):
-    def test_lane_totals_empty_and_unreadable(self):
-        import contextlib
-        import io
-        d = jail.scratch(self)
-        path = os.path.join(d, "gw.log")
-        with open(path, "w") as f:
-            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=100 cached=60 ratio=0.600 attempts=1\n")
-            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1\n")
-        with open(path + ".1", "w") as f:
-            f.write("stamp    gpt lane=b slug=gpt-test status=200 input=50 cached=40 ratio=0.800 attempts=1\n")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            code = cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path})
-        self.assertEqual(code, 0)
-        self.assertEqual(out.getvalue().splitlines(), ["a responses=1 input=20 cached=0 hit=0.000",
-                         "b responses=2 input=150 cached=100 hit=0.667",
-                         "total responses=3 input=170 cached=100 hit=0.588"])
-        with open(path, "w"):
-            pass
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["chatgpt-stats", path], d, {}), 0)
-        self.assertIn("no gpt responses in " + path, out.getvalue())
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(["chatgpt-stats", path + ".missing"], d, {}), 1)
-        self.assertIn(path + ".missing", err.getvalue())
-        os.unlink(path + ".1")  # a log that has not rotated yet: the default reads what exists
-        with open(path, "w") as f:
-            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=5 ratio=0.250 attempts=1\n")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(["chatgpt-stats"], d, {"MODEL_GATEWAY_LOG": path}), 0)
-        self.assertEqual(out.getvalue().splitlines()[0], "a responses=1 input=20 cached=5 hit=0.250")
+    def seed(self, path, *rows):
+        """A database at `path` holding `rows`: ChatGPT-route rows unless a row says otherwise."""
+        store = db.Db(path, [].append)
+        store.start()
+        for row in rows:
+            store.request(dict({"started": clock.now(), "route": "chatgpt", "method": "POST", "path": "/v1/messages",
+                                "slug": "gpt-test"}, **row))
+        self.assertTrue(store.close())
 
-    def test_timed_lines_add_p50_and_p95_per_slug_after_the_total(self):
-        import contextlib
-        import io
+    def stats(self, d, path, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["chatgpt-stats"] + list(args), d, {"MODEL_GATEWAY_DB": path})
+        return code, out.getvalue().splitlines(), err.getvalue()
+
+    def test_lane_totals_empty_unreadable_and_a_window(self):
         d = jail.scratch(self)
-        path = os.path.join(d, "gw.log")
-        tail = " out=8 reasoning=- ttfb_ms=%d upstream_ms=1 total_ms=%d reused=0 stale=0\n"
-        with open(path, "w") as f:
-            f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1\n")  # untimed
-            for n in (4, 1, 3, 2):
-                f.write("stamp    gpt lane=a slug=gpt-test status=200 input=20 cached=0 ratio=0.000 attempts=1" +
-                        tail % (n * 100, n * 1000))
-            f.write("stamp    gpt lane=b slug=gpt-other status=200 input=10 cached=5 ratio=0.500 attempts=2" +
-                    (tail % (50, 700)).replace("\n", " later_total_ms=9\n"))  # fields only ever grow at the end
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["chatgpt-stats", path], d, {}), 0)
-        self.assertEqual(out.getvalue().splitlines(), [
+        path = os.path.join(d, "gateway.db")
+        self.seed(path, {"lane": "b", "input_tokens": 100, "cache_read_tokens": 60},
+                  {"lane": "a", "input_tokens": 20, "cache_read_tokens": 0},
+                  {"lane": "b", "input_tokens": 50, "cache_read_tokens": 40, "started": clock.now() - 7200},
+                  {"lane": "c", "input_tokens": None},  # a failed exchange: no usage
+                  {"lane": None, "route": "anthropic", "input_tokens": 900, "cache_read_tokens": 900})
+        self.assertEqual(self.stats(d, path), (0, ["a responses=1 input=20 cached=0 hit=0.000",
+                                                   "b responses=2 input=150 cached=100 hit=0.667",
+                                                   "total responses=3 input=170 cached=100 hit=0.588"], ""))
+        self.assertEqual(self.stats(d, path, "--since", "1h")[1][:2], ["a responses=1 input=20 cached=0 hit=0.000",
+                                                                      "b responses=1 input=100 cached=60 hit=0.600"])
+        empty = os.path.join(d, "empty.db")
+        self.seed(empty, {"route": "anthropic", "input_tokens": 5})
+        self.assertEqual(self.stats(d, empty), (0, ["no gpt responses in " + empty], ""))
+        self.seed(empty, {"lane": "a", "input_tokens": 5, "started": clock.now() - 7200})
+        self.assertEqual(self.stats(d, empty, "--since", "30m"), (0, ["no gpt responses in %s in the last 30m" % empty], ""))
+        code, out, err = self.stats(d, path + ".missing")
+        self.assertEqual((code, out), (1, []))
+        self.assertIn(path + ".missing: no database", err)
+        for args in (["gw.log"], ["--since"], ["--since", "0h"], ["--since", "5w"], ["--since", "1h", "x"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.stats(d, path, *args)[0], 2)
+
+    def test_timed_rows_add_p50_and_p95_per_slug_after_the_total(self):
+        d = jail.scratch(self)
+        path = os.path.join(d, "gateway.db")
+        self.seed(path, {"lane": "a", "input_tokens": 20, "cache_read_tokens": 0},  # untimed
+                  *[{"lane": "a", "input_tokens": 20, "cache_read_tokens": 0, "ttfb_ms": n * 100, "total_ms": n * 1000}
+                    for n in (4, 1, 3, 2)],
+                  {"lane": "b", "slug": "gpt-other", "input_tokens": 10, "cache_read_tokens": 5, "ttfb_ms": 50,
+                   "total_ms": 700})
+        self.assertEqual(self.stats(d, path), (0, [
             "a responses=5 input=100 cached=0 hit=0.000", "b responses=1 input=10 cached=5 hit=0.500",
             "total responses=6 input=110 cached=5 hit=0.045",
             "slug=gpt-other timed=1 ttfb_ms p50=50 p95=50 total_ms p50=700 p95=700",
-            "slug=gpt-test timed=4 ttfb_ms p50=200 p95=400 total_ms p50=2000 p95=4000"])
+            "slug=gpt-test timed=4 ttfb_ms p50=200 p95=400 total_ms p50=2000 p95=4000"], ""))
 
 
 MW_CLI = '''
@@ -99,6 +97,11 @@ class CliCase(unittest.TestCase):
     def logged(self):
         with open(self.log) as f:
             return f.read()
+
+    def recorded(self, kind):
+        """The fields of the events of `kind` in the jail's database."""
+        rows = db.query(jail.clean_env(self.tmp)["MODEL_GATEWAY_DB"], "SELECT fields FROM events WHERE kind = ?", (kind,))
+        return [json.loads(r["fields"]) for r in rows]
 
 
 class ServeTest(CliCase):
@@ -163,9 +166,10 @@ class MwTest(CliCase):
     def test_mw_runs_the_cli_and_exits_with_its_value(self):
         code, out, _ = self.run_gateway("mw", "tool", "3", "x")
         self.assertEqual((code, out), (3, "hello 3,x log=%s\n" % self.log))
-        self.assertIn("tool ran 3 x", self.logged())
         code, out, _ = self.run_gateway("mw", "tool", MODEL_GATEWAY_TOOL_GREETING="env-hi")
         self.assertEqual((code, out), (0, "env-hi  log=%s\n" % self.log))
+        self.assertEqual(self.recorded("middleware_log"), [{"line": "tool ran 3 x"}, {"line": "tool ran "}])
+        self.assertNotIn("tool ran", self.logged() if os.path.exists(self.log) else "")
 
     def test_an_unknown_name_exits_2_listing_the_loaded_modules(self):
         code, _, err = self.run_gateway("mw", "nope")
@@ -182,6 +186,8 @@ class MwTest(CliCase):
         code, _, err = self.run_gateway("mw", "crash")
         self.assertEqual(code, 1)
         self.assertIn("middleware crash cli failed: RuntimeError('bad')", err)
+        self.assertEqual([(e["module"], e["hook"], e["error"]) for e in self.recorded("middleware_failed")],
+                         [("crash", "cli", "RuntimeError('bad')")])
 
 
 class UsageTest(CliCase):

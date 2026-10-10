@@ -23,7 +23,9 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | cli | core and `chatgpt-login`, `chatgpt-status`, `chatgpt-stats` commands; usage | `model_gateway/cli.py` | assumed: a new command adds a table row and its function together |
 | env | environment reads, `MODEL_GATEWAY_*`, `CoreEnv`, `ChatGPTEnv` | `model_gateway/env.py` | assumed: a new knob lands here alone |
 | clock | wall time, local-time stamps, sleeping | `model_gateway/clock.py` | assumed: never co-changes |
-| log | the locked, rotating gateway log | `model_gateway/log.py` | assumed: rotation and line format change together |
+| log | the locked, rotating text log: start, stop, fatal, settings-error and database-failure lines | `model_gateway/log.py` | assumed: rotation and line format change together |
+| db | the SQLite database: its schema and views, the one writer thread off a bounded queue, drops and failures counted, retention, the readers | `model_gateway/db.py` | assumed: a column, its view and its reader change together |
+| usage | a relayed response's token usage and error code, read beside the relay | `model_gateway/usage.py` | assumed: changes with the Messages API usage shape only |
 | settings | `settings.json`: the core keys, the `middleware` entries, env over file over default for core keys and each module's `SETTINGS`, `check()`, the strict start read, the mtime/size/inode reload with last-good | `model_gateway/settings.py` | assumed: a new core key changes its default, validator and reload together |
 | middleware | loading `{middleware_dir}/{module}.py`, the module attribute checks, the `SETTINGS` shape | `model_gateway/middleware.py` | assumed: the module half of the contract |
 | hooks | `Context`, `Request`, `Result`, the hook chain in list order, failure isolation, error counters, the single re-serialization, a hook's answer, the last turn message | `model_gateway/hooks.py` | assumed: the per-request half of the contract |
@@ -32,11 +34,11 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | capture | the capture folder layout, secret redaction, sequence numbers | `model_gateway/capture.py` | assumed: the layout and its file names change together |
 | upstream | the per-thread upstream connection, the one fresh retry, TLS, the WebSocket upgrade | `model_gateway/upstream.py` | assumed: never co-changes with the hooks |
 | frames | RFC 6455 frames on an upgraded socket: masking, fragments, pings, closes, the idle check | `model_gateway/frames.py` | assumed: the wire format changes alone |
-| proxy | one exchange: read the body (chunked included), run the hooks, forward or take a hook's answer, relay chunk by chunk, the request log line | `model_gateway/proxy.py` | assumed: the exchange's steps co-change, so they are one unit (see § Tree, flow order) |
+| proxy | one exchange: read the body (chunked included), run the hooks, forward or take a hook's answer, relay chunk by chunk, the request's row | `model_gateway/proxy.py` | assumed: the exchange's steps co-change, so they are one unit (see § Tree, flow order) |
 | response | the in-memory response the relay reads where no upstream HTTP response exists: a hook's answer, a ChatGPT-route body | `model_gateway/response.py` | assumed: changes with the relay's reading surface only |
 | health | the health line | `model_gateway/health.py` | assumed: changes with the health contract only |
 | server | the listening socket with `SO_REUSEPORT`, in-flight tracking, SIGTERM drain | `model_gateway/server.py` | assumed: graceful restart and drain change together |
-| runtime | composing env, log, settings, middleware, upstream and drain into one object | `model_gateway/runtime.py` | assumed: changes when a new mechanism joins |
+| runtime | composing env, log, database, settings, middleware, upstream and drain into one object | `model_gateway/runtime.py` | assumed: changes when a new mechanism joins |
 | harness | the public middleware test harness | `model_gateway/harness.py` | assumed: changes with the hooks contract |
 | chatgpt signature | reasoning signature codec | `model_gateway/chatgpt/signature.py` | assumed: replay and stream share the codec |
 | chatgpt auth | credential source selection, own token storage and refresh | `model_gateway/chatgpt/auth.py` | assumed: token lifecycle co-changes |
@@ -77,7 +79,8 @@ model_gateway/__init__.py                 package purpose
 model_gateway/cli.py                      COMMANDS table → serve | check | mw | chatgpt-login | chatgpt-status | chatgpt-stats
 model_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 model_gateway/clock.py                    façade: time
-model_gateway/log.py                      façade: the gateway log
+model_gateway/log.py                      façade: the text log
+model_gateway/db.py                       façade: Db, query, chatgpt_responses, DbError
 model_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
 model_gateway/middleware.py               Module, load_modules, MiddlewareError
 model_gateway/hooks.py                    Context, Request, Answer, Result, Chain, last_turn_message
@@ -86,7 +89,8 @@ model_gateway/events.py                   EventSplitter, json_event
 model_gateway/capture.py                  façade: Capture, Sequence
 model_gateway/upstream.py                 façade: Upstream, UpstreamError, Upgrade
 model_gateway/frames.py                   WebSocket, mask, parse_frame: RFC 6455 frames on an upgraded socket
-model_gateway/proxy.py                    Handler
+model_gateway/proxy.py                    Handler, the request row
+model_gateway/usage.py                    Meter: usage and error code off a relayed response
 model_gateway/response.py                 Response: the in-memory response the relay reads
 model_gateway/health.py                   health_line
 model_gateway/server.py                   Server, Drain, serve
@@ -129,7 +133,7 @@ tests/fakes.py                            fake upstreams (SSE, split SSE, slow S
 tests/test_gateway.py                     ↔ gateway.py
 tests/test_jail.py                        ↔ tests/jail.py
 tests/model_gateway/__init__.py
-tests/model_gateway/test_{cli,env,clock,log,settings,middleware,hooks,headers,events,capture,upstream,frames,proxy,response,health,server,runtime,harness}.py
+tests/model_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,headers,events,capture,upstream,frames,proxy,response,health,server,runtime,harness}.py
 tests/model_gateway/chatgpt/__init__.py
 tests/model_gateway/chatgpt/test_codex_login.py
 tests/model_gateway/chatgpt/test_response.py
@@ -162,7 +166,7 @@ Anatomy: every source module opens with a purpose docstring and has a test home 
 | a middleware file | module (`module` key, file stem) | plugin, extension, filter | `settings.json` `middleware[].module`, `middleware.Module`, `load_modules` |
 | a middleware's label | `NAME` | id, title | health line, hook failure lines, `gateway.py mw NAME` |
 | a hook | `on_request`, `on_event`, `on_response_end`, `health`, `cli`, `check` | callbacks, handlers | `hooks.Chain`, the example, README § Middleware |
-| main session vs sub-agent | kind (`main`, `sub`) | conv, conversation type | `ctx.kind`, log note `kind=`; ChatGPT capture uses `gpt`; census `spelling-kind` |
+| main session vs sub-agent | kind (`main`, `sub`) | conv, conversation type | `ctx.kind`, the row's `kind`; ChatGPT capture uses `gpt`; census `spelling-kind` |
 | the capture folder tree | capture | dump, trace, record | `capture_dir`, `MODEL_GATEWAY_CAPTURE_DIR`, `capture.Capture` |
 | the API the gateway forwards to | upstream | backend, origin server | `MODEL_GATEWAY_UPSTREAM`, `upstream.Upstream` |
 | SIGTERM wind-down | drain | graceful shutdown | `MODEL_GATEWAY_DRAIN_SECONDS`, `server.Drain` |
@@ -170,7 +174,7 @@ Anatomy: every source module opens with a purpose docstring and has a test home 
 | cache affinity per session and agent | lane key | conversation id, session-only key | `chatgpt/lane.py`, `prompt_cache_key`, `session-id`, `x-client-request-id` |
 | sticky routing within one agent turn | turn-state token | sticky id, routing cookie | `chatgpt/turn.py`, `x-codex-turn-state`, gpt line `turn_state=` |
 | models and their capabilities | catalog | allowlist, model table | `chatgpt/catalog.py`, disk cache, route decision |
-| a response a hook gives in place of upstream's | answer (`req.answer`, `Answer`) | reply, short-circuit, local response | `model_gateway/hooks.py`, log note `answered=`, harness `out.answer` |
+| a response a hook gives in place of upstream's | answer (`req.answer`, `Answer`) | reply, short-circuit, local response | `model_gateway/hooks.py`, the note's ` answered=`, the row's `answered_by`, harness `out.answer` |
 | Claude Code's request for a sub-agent's status label | activity-summary fork | label call, status call, summary request | `chatgpt/turn.py` `FORK`, `chatgpt/request.py` `activity_summary`, `middleware/status_label.py` |
 | catalog-selected Responses wire variant | Responses-Lite | lite mode, Sol protocol | `use_responses_lite`, `additional_tools`, `x-openai-internal-codex-responses-lite` |
 | replayable encrypted reasoning envelope | reasoning signature | thinking cache, reasoning blob | `chatgpt/signature.py`, `model-gateway:chatgpt:v1:` |
@@ -184,14 +188,15 @@ The census of the product spelling exempts this document alone, since its glossa
 | environment reads | `model_gateway/env.py` | `os.environ`, `os.getenv` |
 | clock | `model_gateway/clock.py` | `time.time`, `time.sleep`, `time.strftime`, `time.localtime`, `time.monotonic` |
 | logging | `model_gateway/log.py` | appending to the log file, rotation, the `logging` module |
+| the database | `model_gateway/db.py` | the `sqlite3` module: connections, the schema, every read and write |
 | settings | `model_gateway/settings.py` | reading `settings.json` and its file name |
 | upstream HTTP | `model_gateway/upstream.py` | `http.client.HTTPConnection`, `HTTPSConnection`, `ssl.create_default_context`, `socket.create_connection` |
 | capture writes | `model_gateway/capture.py` | the capture file names and their writes |
 | test scratch root | `tests/jail.py` | `tempfile.mkdtemp`, `mkstemp`, `TemporaryDirectory`, `NamedTemporaryFile` in tests |
 
-The harness creates its own temporary log file through `tempfile`; it is production code, so the test-jail count does not cover it.
+Every other line the gateway observes is a `requests` row or an `events` row of the database, written only through `model_gateway/db.py`; the text log keeps the start, stop, fatal, settings-error and database-failure lines.
 
-The ChatGPT route introduces no new primitive façade: it uses `model_gateway/upstream.py` for its separate HTTP client and its WebSocket upgrades, `model_gateway/env.py` for its knobs and `model_gateway/clock.py` for time and backoff. Logging and capture continue through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
+The ChatGPT route introduces no new primitive façade: it uses `model_gateway/upstream.py` for its separate HTTP client and its WebSocket upgrades, `model_gateway/env.py` for its knobs and `model_gateway/clock.py` for time and backoff. Its rows and events, and capture, go through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
 
 ## 5. Registries
 
@@ -222,6 +227,7 @@ There is no hand-kept list of modules, commands or knobs beside the one that def
 | facade-settings | Façade | the `settings.json` name only in `model_gateway/settings.py` among Python sources | `FAIL path (new N)` | `facade-settings.txt` |
 | facade-upstream | Façade | no HTTP connection or TLS context outside `model_gateway/upstream.py` | `FAIL path (new N)` | `facade-upstream.txt` |
 | facade-capture | Façade | capture file names only in `model_gateway/capture.py` | `FAIL path (new N)` | `facade-capture.txt` |
+| facade-db | Façade | no `sqlite3` import or call outside `model_gateway/db.py` | `FAIL path (new N)` | `facade-db.txt` |
 | spelling-predecessor | Spelling census | zero hits of the predecessor's name family, any case, every file | `FAIL path (new N)` | `spelling-predecessor.txt` |
 | spelling-old-name | Spelling census | zero hits of the predecessor's dashed, underscored and env-prefix spellings | `FAIL path (new N)` | `spelling-old-name.txt` |
 | spelling-product | Spelling census | the two words appear only as `model-gateway`, `model_gateway`, `MODEL_GATEWAY` | `FAIL path (new N)` | `spelling-product.txt` |

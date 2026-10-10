@@ -13,17 +13,23 @@ class RuntimeTest(unittest.TestCase):
         d = jail.scratch(self)
         jail.write_middleware(os.path.join(d, "middleware"), "a", 'NAME = "a"\n')
         jail.write_json(os.path.join(d, "settings.json"), {"middleware": [{"module": "a"}]})
-        rt = Runtime({"MODEL_GATEWAY_LOG": os.path.join(d, "gw.log")}, os.path.join(d, "settings.json"))
+        rt = Runtime({"MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"), "MODEL_GATEWAY_DB": os.path.join(d, "gateway.db")},
+                     os.path.join(d, "settings.json"))
         self.assertEqual(rt.chain.modules, ())
         rt.load()
+        self.addCleanup(rt.db.close)
         self.assertEqual([m.NAME for m in rt.chain.modules], ["a"])
-        self.assertEqual(rt.log.path, os.path.join(d, "gw.log"))
+        self.assertEqual((rt.log.path, rt.db.path), (os.path.join(d, "gw.log"), os.path.join(d, "gateway.db")))
+        self.assertEqual((rt.db.thread is not None and rt.db.thread.is_alive(), rt.db.flush()), (True, True))
+        from unittest import mock
+        with mock.patch.object(rt.settings, "current", side_effect=AssertionError("a settings reload on the writer")):
+            self.assertEqual(rt.db.retention(), 30)  # the writer reads the snapshot the requests keep current
 
     def test_chatgpt_is_lazy_and_knobs_are_conditional(self):
         from unittest.mock import patch
         import builtins
         d = jail.scratch(self)
-        env = {"HOME": d, "MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"),
+        env = {"HOME": d, "MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"),  # the database under this HOME
                "MODEL_GATEWAY_CHATGPT_ORIGIN": "invalid", "MODEL_GATEWAY_CHATGPT_AUTH_STORE": "file"}
         rt = Runtime(env, os.path.join(d, "settings.json"))
         with patch("builtins.__import__", wraps=builtins.__import__) as imports:
@@ -58,8 +64,9 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), "ChatGPT Keychain unavailable")
 
     def test_a_bad_env_stops_it(self):
-        with self.assertRaises(EnvError):
-            Runtime({"MODEL_GATEWAY_PORT": "x"}, "/nonexistent/settings.json")
+        for mapping in ({"MODEL_GATEWAY_PORT": "x"}, {}):  # {}: no HOME to place the database under
+            with self.subTest(mapping=mapping), self.assertRaises(EnvError):
+                Runtime(mapping, "/nonexistent/settings.json")
 
 
 if __name__ == "__main__":

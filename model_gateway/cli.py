@@ -1,8 +1,9 @@
 """The gateway's commands — serve (the default), check [FILE], mw NAME [ARGS...] — and the usage built from them."""
-import os
 import re
 import sys
 
+from . import clock
+from . import db as dbmod
 from . import env as envmod
 from . import server as servermod
 from .hooks import Chain, Context
@@ -37,9 +38,12 @@ def cmd_serve(args, install_dir, environ):
     except OSError as e:
         return start_error(rt.log, "cannot listen on 127.0.0.1:%d" % rt.env.port, repr(e))
     snap = rt.settings.current()
-    rt.log.write("start port=%d %s settings=%s file=%s upstream=%s middleware=[%s] python=%s" % (
-        rt.env.port, describe(snap), snap.state, rt.settings.path, rt.env.upstream,
-        ", ".join(m.NAME for m in rt.settings.modules), sys.version.split()[0]))
+    names, python = [m.NAME for m in rt.settings.modules], sys.version.split()[0]
+    rt.log.write("start port=%d %s settings=%s file=%s upstream=%s middleware=[%s] python=%s db=%s" % (
+        rt.env.port, describe(snap), snap.state, rt.settings.path, rt.env.upstream, ", ".join(names), python,
+        rt.db.path))
+    rt.db.event("start", port=rt.env.port, settings=describe(snap), state=snap.state, file=rt.settings.path,
+                upstream=rt.env.upstream, middleware=names, python=python)
     return servermod.serve(rt, server)
 
 
@@ -57,8 +61,9 @@ def cmd_check(args, install_dir, environ):
     return 0
 
 
-def invoke(module, argv, ctx, log):
-    """`module.cli(argv, ctx)` as `gateway.py mw` runs it; its int return value (None: 0) is the exit status."""
+def invoke(module, argv, ctx, event):
+    """`module.cli(argv, ctx)` as `gateway.py mw` runs it; its int return value (None: 0) is the exit status.
+    A cli that raises is a `middleware_failed` event, its line printed on stderr too."""
     if module.cli is None:
         print("model-gateway: middleware %s has no cli" % module.NAME, file=sys.stderr)
         return 2
@@ -71,7 +76,12 @@ def invoke(module, argv, ctx, log):
             print(code, file=sys.stderr)
             code = 1
     except Exception as e:
-        Chain((module,), lambda line: (log.write(line), print(line, file=sys.stderr))).fail(module, "cli", e)
+        def failed(kind, request_id=None, lane=None, **fields):
+            event(kind, request_id=request_id, lane=lane, **fields)
+            print("middleware %s cli failed: %s%s" % (module.NAME, fields["error"],
+                                                       " at " + fields["where"] if fields["where"] else ""),
+                  file=sys.stderr)
+        Chain((module,), failed).fail(module, "cli", e)
         return 1
     finally:
         ctx._module = None
@@ -103,8 +113,14 @@ def cmd_mw(args, install_dir, environ):
         print("model-gateway: unknown middleware %r; loaded: %s" % (
             args[0], ", ".join(m.NAME for m in settings.modules) or "none"), file=sys.stderr)
         return 2
-    ctx = Context(log=log.write, log_path=log.path, settings=settings.snapshot.module_settings)
-    return invoke(module, list(args[1:]), ctx, log)
+    db = dbmod.Db(core.db_path, log.write, lambda: settings.snapshot.db_retention_days)
+    db.start()
+    try:
+        ctx = Context(log=lambda line: db.event("middleware_log", line=line), log_path=log.path,
+                      settings=settings.snapshot.module_settings)
+        return invoke(module, list(args[1:]), ctx, db.event)
+    finally:
+        db.close()
 
 
 def cmd_chatgpt_login(args, install_dir, environ):
@@ -142,35 +158,33 @@ def percentile(values, percent):
     return ordered[max(1, -(-len(ordered) * percent // 100)) - 1]
 
 
+WINDOW = re.compile(r"^([1-9][0-9]*)([mhd])$")
+WINDOW_SECONDS = {"m": 60, "h": 3600, "d": 86400}
+
+
 def cmd_chatgpt_stats(args, install_dir, environ):
-    name = None
+    match = WINDOW.match(args[1]) if len(args) == 2 and args[0] == "--since" else None
+    if args and match is None:
+        return usage_error()
+    since = clock.now() - int(match.group(1)) * WINDOW_SECONDS[match.group(2)] if match else 0.0
     try:
-        path = envmod.CoreEnv.parse(environ).log_path
-        # The default rotation exists only once the log has passed its size limit; a named file is required.
-        files = args or [path] + ([path + ".1"] if os.path.exists(path + ".1") else [])
-        lanes, timed = {}, {}
-        pattern = re.compile(r"    gpt lane=(\S+) slug=(\S+) status=\d+ input=(\d+) cached=(\d+) ratio=\S+ attempts=\d+(.*)")
-        timing = re.compile(r" ttfb_ms=(\d+) upstream_ms=\d+ total_ms=(\d+) ")
-        for name in files:
-            with open(name, encoding="utf-8") as source:
-                for line in source:
-                    match = pattern.search(line)
-                    if match:
-                        key, slug, tokens, cached, tail = match.groups()
-                        row = lanes.setdefault(key, [0, 0, 0])
-                        row[0] += 1
-                        row[1] += int(tokens)
-                        row[2] += int(cached)
-                        times = timing.search(tail)  # lines from before the measurement fields have none
-                        if times:
-                            timed.setdefault(slug, ([], []))
-                            for column, value in zip(timed[slug], times.groups()):
-                                column.append(int(value))
-    except (OSError, UnicodeError, envmod.EnvError) as error:
-        print("model-gateway: chatgpt-stats: %s%s" % ((str(name) + ": ") if name else "", error), file=sys.stderr)
+        path = envmod.CoreEnv.parse(environ).db_path
+        responses = dbmod.chatgpt_responses(path, since)
+    except (dbmod.DbError, envmod.EnvError) as error:
+        print("model-gateway: chatgpt-stats: %s" % error, file=sys.stderr)
         return 1
+    lanes, timed = {}, {}
+    for response in responses:
+        row = lanes.setdefault(response["lane"], [0, 0, 0])
+        row[0] += 1
+        row[1] += response["input_tokens"]
+        row[2] += response["cache_read_tokens"] or 0
+        if response["ttfb_ms"] is not None and response["total_ms"] is not None:
+            ttfb, whole = timed.setdefault(response["slug"], ([], []))
+            ttfb.append(response["ttfb_ms"])
+            whole.append(response["total_ms"])
     if not lanes:
-        print("no gpt responses in " + ", ".join(files))
+        print("no gpt responses in %s%s" % (path, " in the last " + args[1] if match else ""))
         return 0
     total = [0, 0, 0]
     for key, row in sorted(lanes.items()):
@@ -187,7 +201,8 @@ def cmd_chatgpt_stats(args, install_dir, environ):
 
 
 COMMANDS = {
-    "chatgpt-stats": (cmd_chatgpt_stats, "chatgpt-stats [LOG...]", "print the ChatGPT cache hit rate per lane and response times per slug"),
+    "chatgpt-stats": (cmd_chatgpt_stats, "chatgpt-stats [--since 30m|24h|7d]",
+                      "print the ChatGPT cache hit rate per lane and response times per slug, from the database"),
     "chatgpt-login": (cmd_chatgpt_login, "chatgpt-login [--device]", "log in to ChatGPT using a browser or device code"),
     "chatgpt-status": (cmd_chatgpt_status, "chatgpt-status", "show login presence, masked account and token expiry"),
     "serve": (cmd_serve, "serve", "run the gateway (the default when no command is given)"),

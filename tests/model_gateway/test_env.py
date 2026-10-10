@@ -1,6 +1,7 @@
 """Tests for model_gateway.env: the core knobs, their defaults, and refusal by name."""
 import os
 import unittest
+from unittest.mock import patch
 
 from model_gateway import env
 from tests import jail
@@ -44,20 +45,32 @@ class CoreEnvTest(unittest.TestCase):
         self.assertEqual(knobs.codex_auth, os.path.join(home, "chosen"))
 
     def test_defaults(self):
-        core = env.CoreEnv.parse({})
+        core = env.CoreEnv.parse({"HOME": "/jail"})
         self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug),
                          (18787, "https://api.anthropic.com", 600.0, False))
         self.assertEqual(core.log_path, os.path.expanduser("~/Library/Logs/model-gateway.log"))
+        self.assertEqual(core.db_path, "/jail/.local/state/model-gateway/gateway.db")
+
+    def test_the_database_resolves_against_the_mappings_home_never_the_process_home(self):
+        with patch.dict(os.environ, {"HOME": "/process-home"}):
+            self.assertEqual([env.CoreEnv.parse(m).db_path for m in (
+                {"HOME": "/jail"}, {"HOME": "/jail", "MODEL_GATEWAY_DB": "~/x/gw.db"}, {"MODEL_GATEWAY_DB": "/abs/gw.db"})],
+                ["/jail/.local/state/model-gateway/gateway.db", "/jail/x/gw.db", "/abs/gw.db"])
+            for mapping, named in (({}, "env HOME"), ({"HOME": "relative"}, "env HOME"),
+                                   ({"HOME": "/jail", "MODEL_GATEWAY_DB": "gw.db"}, "env MODEL_GATEWAY_DB")):
+                with self.subTest(mapping=mapping), self.assertRaises(env.EnvError) as cm:
+                    env.CoreEnv.parse(mapping)
+                self.assertIn(named, str(cm.exception))
 
     def test_every_knob_is_read_under_its_prefix(self):
         core = env.CoreEnv.parse({"MODEL_GATEWAY_PORT": "1234", "MODEL_GATEWAY_UPSTREAM": "http://127.0.0.1:9",
                                   "MODEL_GATEWAY_LOG": "/x/gw.log", "MODEL_GATEWAY_DRAIN_SECONDS": "0.5",
-                                  "MODEL_GATEWAY_DEBUG": "1"})
-        self.assertEqual((core.port, core.upstream, core.log_path, core.drain_seconds, core.debug),
-                         (1234, "http://127.0.0.1:9", "/x/gw.log", 0.5, True))
+                                  "MODEL_GATEWAY_DEBUG": "1", "MODEL_GATEWAY_DB": "/x/gw.db"})
+        self.assertEqual((core.port, core.upstream, core.log_path, core.drain_seconds, core.debug, core.db_path),
+                         (1234, "http://127.0.0.1:9", "/x/gw.log", 0.5, True, "/x/gw.db"))
 
     def test_an_empty_value_means_unset(self):
-        self.assertEqual(env.CoreEnv.parse({"MODEL_GATEWAY_PORT": "  "}).port, 18787)
+        self.assertEqual(env.CoreEnv.parse({"MODEL_GATEWAY_PORT": "  ", "HOME": "/jail"}).port, 18787)
         self.assertIsNone(env.value({"X": " "}, "X"))
         self.assertEqual(env.value({"X": " a "}, "X"), "a")
 

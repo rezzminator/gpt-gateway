@@ -30,13 +30,14 @@ class SettingsCase(unittest.TestCase):
         self.path = os.path.join(self.tmp, "settings.json")
         self.log = os.path.join(self.tmp, "gw.log")
         self.mdir = os.path.join(self.tmp, "middleware")
-        self.lines = []
+        self.lines = []  # the text log
+        self.events = []  # the database
 
     def write(self, data, bump=0):
         jail.write_json(self.path, data, bump)
 
     def settings(self, **env):
-        return Settings(self.path, env, self.lines.append)
+        return Settings(self.path, env, self.lines.append, lambda kind, **fields: self.events.append((kind, fields)))
 
     def loaded(self, **env):
         s = self.settings(**env)
@@ -72,13 +73,16 @@ class CoreSettingsTest(SettingsCase):
         self.assertEqual((snap.capture_dir, snap.middleware_dir, snap.modules, snap.state),
                          (None, self.mdir, (), "missing"))
         self.assertEqual(dict(snap.sources), {"capture_dir": "default", "middleware_dir": "default",
-                                              "middleware": "default", "chatgpt": "default"})
+                                              "middleware": "default", "chatgpt": "default",
+                                              "db_retention_days": "default"})
+        self.assertEqual(snap.db_retention_days, 30)
 
     def test_reads_the_file(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw", "middleware": []})
         snap = self.loaded().current()
         self.assertEqual((snap.capture_dir, snap.middleware_dir, snap.state), ("/cap", "/mw", "ok"))
-        self.assertEqual(dict(snap.sources), {"capture_dir": "file", "middleware_dir": "file", "middleware": "file", "chatgpt": "default"})
+        self.assertEqual(dict(snap.sources), {"capture_dir": "file", "middleware_dir": "file", "middleware": "file",
+                                              "chatgpt": "default", "db_retention_days": "default"})
 
     def test_env_wins_over_the_file_which_wins_over_the_default(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw"})
@@ -107,6 +111,17 @@ class CoreSettingsTest(SettingsCase):
                 self.loaded()
             self.assertIn(message, str(cm.exception), data)
 
+    def test_db_retention_days_is_a_whole_number_of_days_at_least_one(self):
+        self.write({"db_retention_days": 7})
+        s = self.loaded()
+        self.assertEqual((s.current().db_retention_days, s.current().sources["db_retention_days"]), (7, "file"))
+        self.write({"db_retention_days": 90}, bump=1)
+        self.assertEqual(s.current().db_retention_days, 90)  # applies without a restart
+        for bad in (0, -1, True, 1.5, "30", None):
+            self.write({"db_retention_days": bad})
+            with self.assertRaisesRegex(SettingsError, "db_retention_days must be a whole number of days >= 1, got"):
+                self.loaded()
+
     def test_a_bad_env_value_is_refused_not_defaulted(self):
         for env in ({"MODEL_GATEWAY_CAPTURE_DIR": "relative"}, {"MODEL_GATEWAY_MIDDLEWARE_DIR": "rel/mw"}):
             with self.assertRaises(SettingsError) as cm:
@@ -118,7 +133,10 @@ class CoreSettingsTest(SettingsCase):
         s = self.loaded()
         self.write({"capture_dir": "/b"}, bump=1)
         self.assertEqual((s.current().capture_dir, s.current().state), ("/b", "ok"))
-        self.assertIn("settings reloaded from", self.lines[-1])
+        self.assertEqual(self.lines, [])  # a reload goes to the database alone
+        self.assertEqual(self.events[-1], ("settings_reload", {
+            "path": self.path, "state": "ok", "db_retention_days": 30,
+            "settings": "capture_dir=/b(file) middleware_dir=%s(default) middleware=[](default)" % self.mdir}))
         os.remove(self.path)
         snap = s.current()
         self.assertEqual((snap.capture_dir, snap.sources["capture_dir"], snap.state), (None, "default", "missing"))
@@ -132,6 +150,9 @@ class CoreSettingsTest(SettingsCase):
         self.assertTrue(snap.state.startswith("error(") and "capture_dir must be an absolute path" in snap.state)
         s.current()
         self.assertEqual(sum("settings error, keeping the last good settings" in line for line in self.lines), 1)
+        refused = [fields for kind, fields in self.events if kind == "settings_error"]
+        self.assertEqual([f["path"] for f in refused], [self.path])
+        self.assertIn("capture_dir must be an absolute path", refused[0]["error"])
         self.write({"capture_dir": "/c"}, bump=2)
         self.assertEqual((s.current().capture_dir, s.current().state), ("/c", "ok"))
 

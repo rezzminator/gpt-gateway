@@ -87,7 +87,7 @@ class Server(ThreadingHTTPServer):
         err = sys.exc_info()[1]
         if isinstance(err, (ConnectionResetError, BrokenPipeError, socket.timeout)):
             return
-        self.runtime.log.write("    client error %s: %r" % (client_address[1], err))
+        self.runtime.db.event("client_error", port=client_address[1], error=repr(err))
 
 
 def bind(runtime):
@@ -96,7 +96,7 @@ def bind(runtime):
 
 
 def serve(runtime, server):
-    """Serve until SIGTERM or SIGINT, then drain; the exit status."""
+    """Serve until SIGTERM or SIGINT, then drain and let the database writer finish; the exit status."""
     def on_term(signum, frame):
         if runtime.drain.draining:
             return
@@ -108,5 +108,8 @@ def serve(runtime, server):
     signal.signal(signal.SIGINT, on_term)
     server.serve_forever()
     server.server_close()  # no new connections from here on; the successor takes them
-    runtime.drain.wait(runtime.env.drain_seconds, runtime.log.write)
+    left = runtime.drain.wait(runtime.env.drain_seconds, runtime.log.write)
+    runtime.db.event("stop", left=left, drain_seconds=runtime.env.drain_seconds)
+    if not runtime.db.close(5.0):
+        runtime.log.write("stop: the database writer did not finish within 5s; the rows still queued are lost")
     return 0
