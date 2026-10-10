@@ -252,7 +252,7 @@ class Cut:
 CLOSE_AFTER_HEADERS = Cut()  # the wire shape http.client reports as IncompleteRead(0 bytes read)
 
 
-def responses_turn(tool=False, reasoning=None):
+def responses_turn(tool=False, reasoning=None, response_id=None):
     frames = [responses_event("response.created"),
               responses_event("response.output_item.done", output_index=0,
                               item=dict(type="reasoning", id="rs_invented", encrypted_content="opaque-invented"))]
@@ -266,7 +266,8 @@ def responses_turn(tool=False, reasoning=None):
     usage = {"input_tokens": 100, "output_tokens": 8, "input_tokens_details": {"cached_tokens": 60}}
     if reasoning is not None:
         usage["output_tokens_details"] = {"reasoning_tokens": reasoning}
-    frames.append(responses_event("response.completed", response={"usage": usage}))
+    response = {"usage": usage} if response_id is None else {"id": response_id, "usage": usage}
+    frames.append(responses_event("response.completed", response=response))
     return b"".join(frames)
 
 

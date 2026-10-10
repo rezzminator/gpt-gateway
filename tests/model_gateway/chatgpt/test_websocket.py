@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from model_gateway.capture import SENT_BODY
-from model_gateway.chatgpt import websocket
+from model_gateway.chatgpt import stream, websocket
 from model_gateway.chatgpt.auth import Credentials
 from tests import fakes
 from tests.model_gateway.chatgpt import test_errors as errors_tests
@@ -16,6 +16,7 @@ from tests.model_gateway.chatgpt import test_turn as turn_tests
 
 CALL = dict(role="assistant", content=[dict(type="tool_use", id="call_invented", name="lookup", input={"city": "Harbor"})])
 RESULT = dict(role="user", content=[dict(type="tool_result", tool_use_id="call_invented", content="sunny")])
+FULL = " delta=full:none"  # the ending of a WebSocket lane line with no completed response to continue
 
 
 class MessageTest(unittest.TestCase):
@@ -41,6 +42,7 @@ class MessageTest(unittest.TestCase):
     def test_unserved_statuses(self):
         self.assertEqual([s for s in (101, 200, 301, 400, 401, 403, 404, 405, 426, 429, 500) if websocket.unserved(s)],
                          [200, 301, 400, 404, 405, 426])
+
 
 
 class PauseTest(unittest.TestCase):
@@ -83,8 +85,8 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(len(self.fake.upgrades), 2)
         self.assertEqual([x["method"] for x in self.responses()], ["WS"] * 4)
         endings = [line.split(" reused=", 1)[1] for line in self.lines(rt)]
-        self.assertEqual(endings, ["0 stale=0 transport=ws", "1 stale=0 transport=ws", "1 stale=0 transport=ws",
-                                   "0 stale=0 transport=ws"])
+        self.assertEqual(endings, ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL,
+                                   "0 stale=0 transport=ws" + FULL])
         for h in self.fake.upgrades:
             self.assertEqual(h["openai-beta"], "responses_websockets=2026-02-06")
             self.assertEqual({h["session-id"], h["thread-id"], h["x-client-request-id"]}, {h["session-id"]})
@@ -108,7 +110,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(second["client_metadata"], {"x-codex-turn-state": "ts-ws"})
         self.assertNotIn("x-codex-turn-state", self.fake.upgrades[0])
         self.assertEqual([line.rsplit(" stale=0 ", 1)[1] for line in self.lines(rt)],
-                         ["turn_state=issued transport=ws", "turn_state=sent transport=ws"])
+                         ["turn_state=issued transport=ws" + FULL, "turn_state=sent transport=ws" + FULL])
 
     def test_a_kept_socket_that_dies_before_its_answer_or_while_idle_gives_way_silently(self):
         self.fake.vanish, self.fake.hangup = [False, True], [False, True]
@@ -116,7 +118,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual([self.send(port)[0].status for _ in range(3)], [200, 200, 200])
         self.assertEqual(len(self.fake.upgrades), 3)
         self.assertEqual([line.split(" attempts=", 1)[1][:1] + line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["10 stale=0 transport=ws", "10 stale=1 transport=ws", "10 stale=0 transport=ws"])
+                         ["10 stale=0 transport=ws" + FULL, "10 stale=1 transport=ws" + FULL, "10 stale=0 transport=ws" + FULL])
         log = fakes.logged(rt)
         self.assertNotIn("gpt error", log)
         self.assertIn("reason=closed-while-idle", log)
@@ -133,7 +135,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(self.send(port)[0].status, 200)
         self.assertEqual(len(self.fake.upgrades), 3)
         self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
-                         ["0 stale=0 transport=ws", "0 stale=1 transport=ws", "0 stale=0 transport=ws"])
+                         ["0 stale=0 transport=ws" + FULL, "0 stale=1 transport=ws" + FULL, "0 stale=0 transport=ws" + FULL])
         log = fakes.logged(rt)
         self.assertIn("gpt error lane=", log)
         self.assertIn("status=429 attempt=1 action=final retry_after=3", log)
@@ -203,7 +205,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(self.concurrent(port, agent, fork), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
         self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
-                         ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
+                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL])
 
     def test_an_agent_request_waits_for_the_fork_holding_its_lanes_socket(self):
         # The agent's next request can arrive while the fork still holds the socket; a second socket would read the
@@ -215,7 +217,7 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(self.concurrent(port, fork, agent), {"first": 200, "second": 200})
         self.assertEqual(len(self.fake.upgrades), 1)
         self.assertEqual(sorted(line.split(" reused=", 1)[1] for line in self.lines(rt)),  # the waiter can log first
-                         ["0 stale=0 transport=ws", "1 stale=0 transport=ws"])
+                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws" + FULL])
 
     def test_a_request_arriving_while_its_lanes_first_socket_opens_waits_for_it(self):
         # Until the upgrade answers, the opening socket is neither idle nor busy; a fork arriving then must still wait.
@@ -252,6 +254,42 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(logged.count("gpt websocket lane-wait lane="), 1)
         self.assertIn("timed out after 0.1 s; another socket opens", logged)
         self.assertEqual(logged.count("reason=lane-spare"), 1)
+
+    def test_a_request_extending_its_sockets_last_response_sends_only_its_new_items_after_its_id(self):
+        self.fake.script = [(200, fakes.responses_turn(True, response_id="resp_one")), (200, fakes.responses_turn())]
+        rt, port = self.gateway()
+        resp, data = self.send(port)
+        self.assertEqual(resp.status, 200)
+        self.body["messages"] += [dict(role="assistant", content=stream.accumulate(data)["content"]), RESULT]
+        self.assertEqual(self.send(port)[0].status, 200)
+        first, second = (json.loads(x["body"]) for x in self.responses())
+        self.assertNotIn("previous_response_id", first)
+        self.assertEqual(second.pop("previous_response_id", None), "resp_one")
+        self.assertEqual(second.pop("input"), [{"type": "function_call_output", "call_id": "call_invented", "output": "sunny"}])
+        first.pop("input")
+        self.assertEqual(second, first)
+        self.assertEqual(len(self.fake.upgrades), 1)
+        n = len(json.loads(Path(sorted(Path(self.capture).rglob(SENT_BODY))[1]).read_bytes())["input"])
+        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+                         ["0 stale=0 transport=ws" + FULL, "1 stale=0 transport=ws delta=1/%d" % n])
+
+    def test_a_continuation_the_backend_no_longer_holds_goes_again_whole_on_a_fresh_socket(self):
+        gone = {"error": {"code": "previous_response_not_found", "message": "Previous response not found."}}
+        self.fake.script = [(200, fakes.responses_turn(True, response_id="resp_one")), (400, gone),
+                            (200, fakes.responses_turn())]
+        rt, port = self.gateway()
+        resp, data = self.send(port)
+        self.body["messages"] += [dict(role="assistant", content=stream.accumulate(data)["content"]), RESULT]
+        self.assertEqual(self.send(port)[0].status, 200)
+        first, refused, whole = (json.loads(x["body"]) for x in self.responses())
+        self.assertEqual((refused.get("previous_response_id"), len(refused["input"])), ("resp_one", 1))
+        self.assertNotIn("previous_response_id", whole)
+        self.assertEqual(whole["input"][:len(first["input"])], first["input"])
+        self.assertEqual(len(whole["input"]), len(first["input"]) + 3)
+        self.assertEqual(len(self.fake.upgrades), 2)
+        self.assertEqual([line.split(" reused=", 1)[1] for line in self.lines(rt)],
+                         ["0 stale=0 transport=ws" + FULL, "0 stale=1 transport=ws" + FULL])
+        self.assertNotIn("gpt error", fakes.logged(rt))
 
     # The route's error, retry and refresh behaviour, over the WebSocket.
     test_refresh_once_and_oauth_identity = route_tests.RouteTest.test_refresh_once_and_oauth_identity

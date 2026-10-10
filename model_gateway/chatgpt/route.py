@@ -90,6 +90,7 @@ class Measure:
     stale: bool = False  # a kept-alive connection failed before any body byte and the request went on a fresh one
     turn: str = ""  # "sent": the attempt carried the turn-state token; "issued": its response's token was kept
     transport: str = "http"  # "ws": the attempt went over the lane's WebSocket; "http": as an HTTP POST
+    delta: str = ""  # over the WebSocket: "{K}/{N}", K of N input items sent continuing a response; "full:{why}"
 
 
 @dataclass
@@ -150,7 +151,7 @@ class Route:
                     estimator.observe(translation.estimate_chars, translator.input_tokens)
             reasoning = "-" if translator.reasoning_tokens is None else translator.reasoning_tokens
             self.log("    gpt lane=%s slug=%s status=%s input=%d cached=%d ratio=%.3f attempts=%d out=%d reasoning=%s "
-                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s transport=%s%s" %
+                     "ttfb_ms=%d upstream_ms=%d total_ms=%d reused=%d stale=%d%s transport=%s%s%s" %
                      (key, model.slug, status, translator.input_tokens,
                       translator.usage["cache_read_input_tokens"], translator.cache_ratio, attempt,
                       translator.usage["output_tokens"], reasoning,
@@ -158,7 +159,7 @@ class Route:
                       milliseconds(reader.terminal_at - measure.sent_at),
                       milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
                       measure.reused, measure.stale, " turn_state=" + measure.turn if measure.turn else "",
-                      measure.transport,
+                      measure.transport, " delta=" + measure.delta if measure.delta else "",
                       " notes=" + json.dumps(list(translation.notes)) if translation.notes else ""))
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
@@ -204,7 +205,7 @@ class Route:
                         if state.turn_state.observe(where, issued):
                             measure.turn = "issued"
                 response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK)
-                reused, retried, measure.transport = self.client.reuse()
+                reused, retried, measure.transport, measure.delta = self.client.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
                 if status != 200:

@@ -8,6 +8,7 @@ holds only what that socket sent. Claude Code's activity-summary fork runs while
 the agent's next request can arrive while the fork runs, so a request whose lane's socket is busy waits for it, a
 fork the longest, and opens another only once that wait runs out; every socket coming back goes to the pool as its lane's one idle socket,
 and a spare the lane already holds there closes. A socket answering anything but a completed response is closed.
+A socket keeps its last completed response for the next request to continue (continuation.py).
 """
 import collections
 import hashlib
@@ -88,6 +89,7 @@ class Kept:
         self.opened = clock.monotonic()
         self.exchanges = 0
         self.out = False  # checked out: one exchange owns it
+        self.baseline = None  # the last exchange's completed response, which the next request may continue
 
 
 class Sockets:
@@ -244,14 +246,17 @@ class Answer(Refusal):
     """One response.create on a kept socket, read as an http.client response: a refusal the backend wrapped in an
     error event (codex-api/src/endpoint/responses_websocket.rs:603-662) as its status, headers and body; otherwise
     status 200, the upgrade's headers on the socket's first exchange, and each message as one SSE event. A
-    `response.metadata` event's turn-state token goes to `observe` (codex-api/src/sse/responses.rs:210-218)."""
+    `response.metadata` event's turn-state token goes to `observe` (codex-api/src/sse/responses.rs:210-218). A
+    completed response with an id becomes the socket's baseline for its `request`; any other end leaves it none."""
 
     will_close = False
 
-    def __init__(self, sockets, kept, observe=None):
+    def __init__(self, sockets, kept, observe=None, request=None):
         super().__init__(Upgrade(200, list(kept.headers) if kept.exchanges == 0 else []))
-        self.sockets, self.kept, self.observe = sockets, kept, observe
+        self.sockets, self.kept, self.observe, self.request = sockets, kept, observe, request
         kept.exchanges += 1
+        kept.baseline = None  # this exchange replaces the response the backend keeps for the socket
+        self.output, self.response_id = [], None
         self.lock = threading.Lock()
         self.state = "open"  # "kept": back in the pool; "closed"
         self.ended = None  # the type of the message that ended the response
@@ -314,6 +319,10 @@ class Answer(Refusal):
                     token = header(json_headers(event.get("headers")), turn.HEADER)
                     if token:
                         self.observe(token)
+                if kind == "response.output_item.done" and isinstance(event.get("item"), dict):
+                    self.output.append(event["item"])
+                elif kind == "response.completed" and isinstance(event.get("response"), dict):
+                    self.response_id = event["response"].get("id")
                 if kind in ENDED:
                     self.ended = kind
                 if b"\n" in text:  # SSE frames one data line; a message's JSON may span lines
@@ -332,6 +341,9 @@ class Answer(Refusal):
             keep = self.ended in KEPT_AFTER
             self.state = "kept" if keep else "closed"
         if keep:
+            if self.ended == "response.completed" and self.request is not None and self.response_id \
+                    and isinstance(self.response_id, str):
+                self.kept.baseline = self.request.baseline(self.response_id, self.output)
             self.sockets.succeeded()
             self.sockets.checkin(self.kept)
         else:

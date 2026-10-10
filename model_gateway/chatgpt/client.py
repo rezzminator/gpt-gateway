@@ -9,7 +9,7 @@ import json
 import threading
 
 from ..upstream import Upgrade, Upstream, UpstreamError
-from . import identity, turn, websocket
+from . import continuation, identity, turn, websocket
 
 
 class Client:
@@ -55,9 +55,9 @@ class Client:
     def _over_websocket(self, translation, lane_key, credentials, turn_state, observe, fork=False):
         """The started Answer or a Refusal; None when the upgrade showed the endpoint serves no WebSocket. A kept socket
         that fails before its first message, or that the backend asks to replace, gives way once to a fresh one."""
-        data = websocket.message(translation.body_bytes, turn_state)
+        request = continuation.Request(translation.body_bytes, turn_state)
         pool_key = websocket.socket_key(lane_key, translation.lite, credentials)
-        self.local.transport, self.local.reused, self.local.stale = "ws", False, False
+        self.local.transport, self.local.reused, self.local.stale, self.local.delta = "ws", False, False, ""
         for attempt in (1, 2):
             wait = websocket.FORK_WAIT_SECONDS if fork else websocket.LANE_WAIT_SECONDS
             kept = self.sockets.checkout(pool_key, wait if attempt == 1 else 0)
@@ -74,7 +74,8 @@ class Client:
                         return None
                     return websocket.Refusal(kept)
             self.local.reused = kept.exchanges > 0
-            answer = websocket.Answer(self.sockets, kept, observe)
+            data, self.local.delta = request.frame(kept.baseline)
+            answer = websocket.Answer(self.sockets, kept, observe, request)
             self.local.answer = answer
             try:
                 answer.start(data)
@@ -90,10 +91,11 @@ class Client:
                 raise UpstreamError(reason)
 
     def reuse(self):
-        """(reused, stale, transport) of this thread's last Responses send: `ws` or `http`."""
+        """(reused, stale, transport, delta) of this thread's last Responses send: `ws` with the WebSocket's
+        continuation delta, or `http` and an empty one."""
         if getattr(self.local, "transport", "http") == "ws":
-            return self.local.reused, self.local.stale, "ws"
-        return self.upstream.reuse() + ("http",)
+            return self.local.reused, self.local.stale, "ws", self.local.delta
+        return self.upstream.reuse() + ("http", "")
 
     # codex-lb/app/core/clients/model_fetcher.py:132-153; rewritten with the core upstream façade.
     def models(self, credentials):
