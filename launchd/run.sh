@@ -42,17 +42,23 @@ edit() {
   fi
 }
 
+# Tool search rides the link: Claude Code turns it off behind a non-Anthropic base URL unless this is set. A value the
+# user chose is kept, linked or not; only the "true" this script wrote is removed with the URL.
+tool_search() { "$JQ" -r '.env.ENABLE_TOOL_SEARCH // ""' "$SETTINGS" 2>/dev/null; }
+
 link() {
   cur=$(current)
-  if [ "$cur" = "$URL" ]; then return 0; fi
-  if [ -n "$cur" ]; then log "settings point at $cur, not this gateway; left unchanged"; return 0; fi
+  if [ -n "$cur" ] && [ "$cur" != "$URL" ]; then log "settings point at $cur, not this gateway; left unchanged"; return 0; fi
+  if [ "$cur" = "$URL" ] && [ -n "$(tool_search)" ]; then return 0; fi
   # shellcheck disable=SC2016 # $url is a jq variable bound by --arg, not a shell expansion
-  edit '.env = ((.env // {}) + {ANTHROPIC_BASE_URL: $url})' && log "linked: Claude Code uses $URL"
+  edit '.env = ((.env // {}) + {ANTHROPIC_BASE_URL: $url}) | if .env | has("ENABLE_TOOL_SEARCH") then . else .env.ENABLE_TOOL_SEARCH = "true" end' \
+    && log "linked: Claude Code uses $URL with tool search on"
 }
 
 unlink() {
   if [ "$(current)" != "$URL" ]; then return 0; fi
-  edit 'del(.env.ANTHROPIC_BASE_URL)' && log "unlinked: Claude Code talks to the API directly"
+  edit 'del(.env.ANTHROPIC_BASE_URL) | if .env.ENABLE_TOOL_SEARCH == "true" then del(.env.ENABLE_TOOL_SEARCH) else . end' \
+    && log "unlinked: Claude Code talks to the API directly"
 }
 
 health_pid() {

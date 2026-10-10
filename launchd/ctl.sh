@@ -45,7 +45,7 @@ case "${1:-}" in
       while linked && [ $i -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
     fi
     if linked; then
-      echo "ctl.sh: the setting is still there; remove env.ANTHROPIC_BASE_URL from $SETTINGS by hand" >&2
+      echo "ctl.sh: the setting is still there; remove env.ANTHROPIC_BASE_URL, and env.ENABLE_TOOL_SEARCH if it is \"true\", from $SETTINGS by hand" >&2
       exit 1
     fi
     echo "off: Claude Code talks to the API directly; in-flight streams finish on the gateway first"

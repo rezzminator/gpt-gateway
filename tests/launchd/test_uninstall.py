@@ -16,7 +16,7 @@ class UninstallTest(unittest.TestCase):
         logs = os.path.join(h.home, "Library", "Logs")
         for name in ("model-gateway.log", "model-gateway.log.1", "model-gateway.stderr.log"):
             open(os.path.join(logs, name), "w").close()
-        h.write_claude({"env": {"KEEP": "1", "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % h.port}})
+        h.write_claude({"env": {"KEEP": "1", "ENABLE_TOOL_SEARCH": "true", "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % h.port}})
         return h, logs
 
     def test_removes_the_agent_and_copy_unlinks_and_keeps_settings_and_middleware(self):
@@ -34,6 +34,13 @@ class UninstallTest(unittest.TestCase):
             self.assertEqual(json.load(f), {"capture_dir": None, "middleware": []})
         self.assertTrue(any(d.startswith("settings.json.pre-uninstall-") for d in os.listdir(backups)))
         self.assertTrue(os.path.exists(os.path.join(logs, "model-gateway.log")))
+
+    def test_a_tool_search_value_the_user_chose_stays(self):
+        h, _ = self.installed()
+        h.write_claude({"env": {"ENABLE_TOOL_SEARCH": "auto:5", "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % h.port}})
+        code, out = h.run("uninstall.sh")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(h.read_claude()["env"], {"ENABLE_TOOL_SEARCH": "auto:5"})
 
     def test_the_jq_the_install_recorded_unlinks_whatever_jq_is_on_path(self):
         h, _ = self.installed()

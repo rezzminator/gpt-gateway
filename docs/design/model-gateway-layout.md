@@ -113,7 +113,7 @@ model_gateway/chatgpt/response.py         Response, Reader: the relay's response
 examples/middleware/model_note.py         NAME "model-note", SETTINGS enabled, on_request
 launchd/install.sh                        copies the SHIP list to ~/.local/share/model-gateway/, writes the plist
 launchd/uninstall.sh                      stops the agent, unlinks, removes the plist and the install dir
-launchd/run.sh                            the agent's program: supervises gateway.py, sets env.ANTHROPIC_BASE_URL only while healthy
+launchd/run.sh                            the agent's program: supervises gateway.py, sets env.ANTHROPIC_BASE_URL and env.ENABLE_TOOL_SEARCH only while healthy
 launchd/ctl.sh                            on | off | restart | status
 scripts/checks.sh                         every countable law, one CHECK line each
 scripts/gate.sh                           the only definition of ready

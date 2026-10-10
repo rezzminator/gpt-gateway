@@ -50,10 +50,12 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork or a compaction
     request to its lane. agent_contract appends AGENT_CONTRACT to the system text's developer item, a second part so
     the system text itself, and the model-switch text quoting it, stay byte-identical."""
-    registered, names, tool_notes = tools.translate_tools(body)
+    registered, deferred, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
-    items = _request_items(body.get('messages', []), model.slug, instructions, notes)
+    items = _request_items(body.get('messages', []), model.slug, instructions, notes, deferred if model.responses_lite else {})
+    if not model.responses_lite:
+        registered = registered + list(deferred.values())
     if instructions:
         parts = [{'type': 'input_text', 'text': instructions}]
         if agent_contract:
@@ -160,9 +162,12 @@ def _response_message(role, parts):
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:865-980.
 # codex-rs/core/src/context/model_switch_instructions.rs:17-40.
-def _request_items(messages, slug, instructions, notes):
+def _request_items(messages, slug, instructions, notes, deferred):
+    """deferred: tool name to lowered tool, each delivered once, as an additional_tools item right after the first
+    tool result that holds a tool_reference to it, so the first item, and the prompt prefix behind it, never changes."""
     items = []
     switch_after = None
+    delivered = set()
     for message in messages:
         role = 'developer' if message['role'] == 'system' else message['role']
         parts = []
@@ -195,6 +200,12 @@ def _request_items(messages, slug, instructions, notes):
                     items.append(_response_message(role, parts))
                     parts = []
                 items.append(item)
+                if kind == 'tool_result':
+                    loaded = [tool for tool in _referenced(block) if tool in deferred and tool not in delivered]
+                    delivered.update(loaded)
+                    if loaded:
+                        items.append({'type': 'additional_tools', 'role': 'developer',
+                                      'tools': [deferred[tool] for tool in loaded]})
             else:
                 parts.append(_content_part(block, role))
         if parts:
@@ -227,7 +238,17 @@ def _content_part(block, role='user'):
         if source.get('type') == 'base64' and source.get('media_type') == 'application/pdf':
             return {'type': 'input_file', 'filename': 'document.pdf',
                     'file_data': 'data:application/pdf;base64,' + source['data']}
+    if kind == 'tool_reference' and isinstance(block.get('tool_name'), str):
+        return {'type': text_type, 'text': 'Tool loaded: ' + block['tool_name']}
     return {'type': text_type, 'text': '[unsupported ' + kind + ']'}
+
+
+def _referenced(block):
+    """The tool names a tool result's tool_reference blocks load, in order, each once."""
+    content = block.get('content')
+    names = [part['tool_name'] for part in content if isinstance(part, dict) and part.get('type') == 'tool_reference'
+             and isinstance(part.get('tool_name'), str)] if isinstance(content, list) else []
+    return list(dict.fromkeys(names))
 
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:877-908.

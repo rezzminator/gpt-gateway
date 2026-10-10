@@ -51,11 +51,12 @@ fi
 
 CUR=$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS")
 if [ -n "$CUR" ] && [ "$CUR" != "$URL" ]; then
-  # Another URL (an earlier port, another proxy) would keep run.sh from linking; this install replaces it.
+  # Another URL (an earlier port, another proxy) would keep run.sh from linking; this install replaces it,
+  # and the tool search switch that rode that link.
   mkdir -p "$BACKUPS"
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-install-$(date +%Y%m%d-%H%M%S)"
   TMP=$(mktemp "$SETTINGS.XXXXXX")
-  "$JQ" 'del(.env.ANTHROPIC_BASE_URL)' "$SETTINGS" > "$TMP"
+  "$JQ" 'del(.env.ANTHROPIC_BASE_URL) | if .env.ENABLE_TOOL_SEARCH == "true" then del(.env.ENABLE_TOOL_SEARCH) else . end' "$SETTINGS" > "$TMP"
   chmod 644 "$TMP"
   mv "$TMP" "$SETTINGS"
   echo "removed the earlier ANTHROPIC_BASE_URL $CUR (backup in $BACKUPS)"

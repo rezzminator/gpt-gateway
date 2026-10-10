@@ -9,7 +9,7 @@ class ToolsTest(unittest.TestCase):
                           {'type': 'web_search_20250305', 'name': 'web_search',
                            'allowed_domains': ['example.com'], 'blocked_domains': ['invalid.example']},
                           {'type': 'remote_20260101', 'name': 'remote'}]}
-        converted, reverse, notes = tools.translate_tools(body)
+        converted, _, reverse, notes = tools.translate_tools(body)
         self.assertEqual(converted, [
             {'type': 'function', 'name': 'inspect', 'description': 'Inspect', 'strict': False,
              'parameters': {'type': 'string'}},
@@ -26,7 +26,7 @@ class ToolsTest(unittest.TestCase):
         self.assertNotEqual(short, tools.short_name(long + 'z'))
         self.assertEqual(tools.short_name('a' * 64), 'a' * 64)
         body = {'tools': [{'name': long, 'input_schema': {}}], 'tool_choice': {'type': 'tool', 'name': long}}
-        converted, reverse, _ = tools.translate_tools(body)
+        converted, _, reverse, _ = tools.translate_tools(body)
         self.assertEqual(reverse, {short: long})
         self.assertEqual(converted[0]['name'], short)
         self.assertEqual(tools.tool_choice(body, reverse), {'type': 'function', 'name': short})
@@ -46,3 +46,18 @@ class ToolsTest(unittest.TestCase):
         body = {'tool_choice': {'type': 'tool', 'name': 'web_search'},
                 'tools': [{'name': 'web_search', 'input_schema': {'type': 'object'}}]}
         self.assertEqual(tools.tool_choice(body, {}), {'type': 'function', 'name': 'web_search'})
+
+    def test_defer_loading_tools_are_set_apart_in_order_and_keep_their_short_names(self):
+        long = 'mcp__' + 'x' * 85
+        body = {'tools': [{'name': 'inline', 'input_schema': {}},
+                          {'name': 'late', 'input_schema': {}, 'defer_loading': True},
+                          {'name': long, 'input_schema': {}, 'defer_loading': True},
+                          {'name': 'off', 'input_schema': {}, 'defer_loading': False}]}
+        converted, deferred, reverse, _ = tools.translate_tools(body)
+        self.assertEqual([t['name'] for t in converted], ['inline', 'off'])
+        self.assertEqual(list(deferred), ['late', long])
+        self.assertEqual(deferred[long]['name'], tools.short_name(long))
+        self.assertEqual(reverse, {tools.short_name(long): long})
+        with self.assertRaises(ValueError):
+            tools.translate_tools({'tools': [{'name': 'a', 'input_schema': {}},
+                                             {'name': 'a', 'input_schema': {}, 'defer_loading': True}]})

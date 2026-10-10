@@ -77,6 +77,7 @@ class RunTest(unittest.TestCase):
         self.start()
         self.assertTrue(jail.wait_for(self.linked), "never linked")
         self.assertTrue(self.healthy())
+        self.assertEqual(self.read_settings()["env"]["ENABLE_TOOL_SEARCH"], "true")
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.proc.wait(timeout=10), 0)
         settings = self.read_settings()
@@ -84,7 +85,7 @@ class RunTest(unittest.TestCase):
         self.assertFalse(self.healthy())
 
     def test_missing_python_fails_open(self):
-        self.write_settings({"ANTHROPIC_BASE_URL": self.url, "KEEP": "1"})
+        self.write_settings({"ANTHROPIC_BASE_URL": self.url, "ENABLE_TOOL_SEARCH": "true", "KEEP": "1"})
         self.start(python=os.path.join(self.dir, "no-such-python"))
         self.assertEqual(self.proc.wait(timeout=10), 1)
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
@@ -105,10 +106,10 @@ class RunTest(unittest.TestCase):
         blocker.bind(("127.0.0.1", self.port))
         blocker.listen(1)
         self.addCleanup(blocker.close)
-        self.write_settings({"ANTHROPIC_BASE_URL": self.url})
+        self.write_settings({"ANTHROPIC_BASE_URL": self.url, "ENABLE_TOOL_SEARCH": "true"})
         self.start()
         self.assertEqual(self.proc.wait(timeout=20), 1)
-        self.assertNotIn("ANTHROPIC_BASE_URL", self.read_settings()["env"])
+        self.assertEqual(self.read_settings()["env"], {})
 
     def test_rejected_settings_fail_open(self):
         jail.write_json(os.path.join(self.app, "settings.json"), {"capture_dir": "relative"})
@@ -143,13 +144,31 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0)
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
 
+    def test_a_gateway_linked_before_tool_search_existed_gets_it_on_start(self):
+        self.write_settings({"ANTHROPIC_BASE_URL": self.url, "KEEP": "1"})
+        self.start()
+        self.assertTrue(jail.wait_for(lambda: self.read_settings()["env"].get("ENABLE_TOOL_SEARCH") == "true"),
+                        "tool search never linked")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
+
+    def test_a_tool_search_value_the_user_chose_is_never_replaced_or_removed(self):
+        self.write_settings({"ENABLE_TOOL_SEARCH": "auto:5"})
+        self.start()
+        self.assertTrue(jail.wait_for(self.linked), "never linked")
+        self.assertEqual(self.read_settings()["env"]["ENABLE_TOOL_SEARCH"], "auto:5")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertEqual(self.read_settings()["env"], {"ENABLE_TOOL_SEARCH": "auto:5"})
+
     def test_other_url_is_left_alone(self):
         other = "http://127.0.0.1:1/other-proxy"
         self.write_settings({"ANTHROPIC_BASE_URL": other})
         self.start()
         self.assertTrue(jail.wait_for(self.healthy), "gateway never answered")
         time.sleep(0.5)
-        self.assertEqual(self.read_settings()["env"]["ANTHROPIC_BASE_URL"], other)
+        self.assertEqual(self.read_settings()["env"], {"ANTHROPIC_BASE_URL": other})
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.proc.wait(timeout=10), 0)
         self.assertEqual(self.read_settings()["env"]["ANTHROPIC_BASE_URL"], other)

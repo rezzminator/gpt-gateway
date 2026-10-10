@@ -130,7 +130,7 @@ ok pid=4242 capture=off settings=ok middleware=[model-note errors=0]
 
 ## Fail-open
 
-`run.sh` supervises the gateway under launchd and owns `env.ANTHROPIC_BASE_URL` in Claude Code's `settings.json`: it sets it only once the gateway answers its health check, and removes it when Python is missing, when the gateway cannot start (a bad `settings.json`, a middleware that fails to load, a taken port), when the gateway exits, and when the agent stops. A URL other than the gateway's is never touched. HUP starts a new gateway on the same port (`SO_REUSEPORT`) and, once it answers, lets the old one drain: no in-flight stream is cut.
+`run.sh` supervises the gateway under launchd and owns `env.ANTHROPIC_BASE_URL` in Claude Code's `settings.json`, and `env.ENABLE_TOOL_SEARCH=true` beside it (Claude Code turns tool search off behind any base URL that is not Anthropic's; the gateway forwards `defer_loading` and `tool_reference` intact): it sets them only once the gateway answers its health check, and removes them when Python is missing, when the gateway cannot start (a bad `settings.json`, a middleware that fails to load, a taken port), when the gateway exits, and when the agent stops. A URL other than the gateway's is never touched, and an `ENABLE_TOOL_SEARCH` you set yourself is kept. HUP starts a new gateway on the same port (`SO_REUSEPORT`) and, once it answers, lets the old one drain: no in-flight stream is cut.
 
 ## Capture
 
@@ -146,7 +146,7 @@ Capture never breaks a request: a write that fails is logged and capture stops f
 
 ## ChatGPT route
 
-The optional ChatGPT route runs GPT models as Claude Code sub-agents over your ChatGPT subscription. It translates Claude Code's Anthropic requests into Codex backend Responses requests and translates the results back, including tools, reasoning signatures and usage. Text, base64 images and base64 PDFs reach the model, in a message or a tool result; any other content block becomes an `[unsupported {type}]` placeholder. Claude Code keeps running the tools and owning compaction. The main session remains on Claude.
+The optional ChatGPT route runs GPT models as Claude Code sub-agents over your ChatGPT subscription. It translates Claude Code's Anthropic requests into Codex backend Responses requests and translates the results back, including tools, reasoning signatures and usage. Text, base64 images and base64 PDFs reach the model, in a message or a tool result; a `tool_reference` becomes the line `Tool loaded: {name}`; any other content block becomes an `[unsupported {type}]` placeholder. With Claude Code's tool search on, a `defer_loading` tool stays out of the model's tool list until a tool result names it, then reaches it as one `additional_tools` item right after that result, so the list ahead of it, and the prompt cache, never change. Claude Code keeps running the tools and owning compaction. The main session remains on Claude.
 
 Enable it with `"chatgpt": true` in `settings.json`, or `MODEL_GATEWAY_CHATGPT=true` in the gateway's environment, then restart. The setting defaults to false; env overrides file, then default. Invalid env values are rejected with the variable's name. With the setting false, every model follows the existing Anthropic path and the ChatGPT modules are not loaded; ChatGPT-specific knobs are validated at gateway start only when it is enabled.
 

@@ -16,10 +16,17 @@ def short_name(name):
     return name[:47] + '_' + hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]
 
 
+# Claude Code's tool search leaves this one deferred tool in every request to keep the list non-empty; no model calls it.
+_PLACEHOLDER = 'DeferredToolPlaceholder'
+
+
 # claude-code-proxy/src/providers/codex/translate/request.rs:637-711 (changed server-tool policy).
 def translate_tools(body):
-    """(tools, short-to-original names, notes), retaining the client's order."""
-    converted, names, notes = [], {}, []
+    """(tools, deferred tools by original name, short-to-original names, notes), retaining the client's order.
+
+    A tool marked defer_loading stays out of tools and is returned in deferred: it reaches the model only after a
+    tool_reference names it. Its short name is in the name map like any other."""
+    converted, deferred, names, notes = [], {}, {}, []
     registered = set()
     for tool in body.get('tools', []):
         kind = tool.get('type', 'function')
@@ -31,6 +38,8 @@ def translate_tools(body):
             converted.append(hosted)
         elif kind in ('function', 'custom'):
             original = tool['name']
+            if original == _PLACEHOLDER:
+                continue
             name = short_name(original)
             if name in registered:
                 raise ValueError('duplicate or colliding tool name: ' + name)
@@ -39,10 +48,13 @@ def translate_tools(body):
                 names[name] = original
             function = {'type': 'function', 'name': name, 'description': tool.get('description', ''),
                         'strict': False, 'parameters': schema.sanitize(tool.get('input_schema', {}))}
-            converted.append(function)
+            if tool.get('defer_loading') is True:
+                deferred[original] = function
+            else:
+                converted.append(function)
         else:
             notes.append('dropped server tool: ' + str(kind))
-    return converted, names, tuple(notes)
+    return converted, deferred, names, tuple(notes)
 
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:803-862.

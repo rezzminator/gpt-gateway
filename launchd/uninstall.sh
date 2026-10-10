@@ -45,7 +45,7 @@ if [ -f "$SETTINGS" ] && [ "$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTING
   mkdir -p "$BACKUPS"
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-uninstall-$(date +%Y%m%d-%H%M%S)"
   TMP=$(mktemp "$SETTINGS.XXXXXX")
-  "$JQ" 'del(.env.ANTHROPIC_BASE_URL)' "$SETTINGS" > "$TMP"
+  "$JQ" 'del(.env.ANTHROPIC_BASE_URL) | if .env.ENABLE_TOOL_SEARCH == "true" then del(.env.ENABLE_TOOL_SEARCH) else . end' "$SETTINGS" > "$TMP"
   chmod 644 "$TMP"
   mv "$TMP" "$SETTINGS"
 fi

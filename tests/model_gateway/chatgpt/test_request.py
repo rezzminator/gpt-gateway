@@ -252,6 +252,74 @@ class RequestTest(unittest.TestCase):
             {'type': 'output_text', 'text': '[unsupported redacted_thinking]'},
             {'type': 'output_text', 'text': '[unsupported document]'}]}])
 
+    def deferred_body(self, loaded=True, referenced=('WebFetch',), tools_extra=()):
+        """A Claude Code request with tool search on: the discovery call, its tool_reference result, the loaded tools."""
+        fetch = {'name': 'WebFetch', 'description': 'Fetch a page.', 'input_schema': {'type': 'object'}, 'defer_loading': True}
+        monitor = {'name': 'Monitor', 'description': 'Watch.', 'input_schema': {'type': 'object'}, 'defer_loading': True}
+        placeholder = {'name': 'DeferredToolPlaceholder', 'description': 'Placeholder.', 'input_schema': {'type': 'object'},
+                       'defer_loading': True}
+        search = {'name': 'ToolSearch', 'description': 'Search tools.', 'input_schema': {'type': 'object'}}
+        bash = {'name': 'Bash', 'description': 'Run.', 'input_schema': {'type': 'object'}}
+        server = {'type': 'server_tool_20260301', 'name': 'remote', 'defer_loading': True}
+        found = [{'type': 'tool_reference', 'tool_name': name} for name in referenced]
+        messages = [{'role': 'user', 'content': 'Fetch the page.'},
+                    {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_1', 'name': 'ToolSearch',
+                                                       'input': {'query': 'select:WebFetch'}}]},
+                    {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': found},
+                                                 {'type': 'text', 'text': 'Tool loaded.'}]}]
+        return {'tools': [bash, search, placeholder, server] + ([fetch, monitor] if loaded else []) + list(tools_extra),
+                'messages': messages, 'system': 'Help.'}
+
+    def test_deferred_tools_reach_the_model_after_the_result_that_names_them(self):
+        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+        value, translated = self.result(self.deferred_body(), **lite)
+        names = lambda item: [t['name'] for t in item['tools']]
+        self.assertEqual([x['type'] for x in value['input']],
+                         ['additional_tools', 'message', 'message', 'function_call', 'function_call_output',
+                          'additional_tools', 'message'])
+        self.assertEqual(names(value['input'][0]), ['Bash', 'ToolSearch'])
+        self.assertEqual(value['input'][4]['output'], 'Tool loaded: WebFetch')
+        self.assertEqual(names(value['input'][5]), ['WebFetch'])
+        self.assertEqual(value['input'][5]['role'], 'developer')
+        self.assertEqual(value['input'][6]['content'], [{'type': 'input_text', 'text': 'Tool loaded.'}])
+        self.assertNotIn('[unsupported', translated.body_bytes.decode())
+        self.assertNotIn('Monitor', translated.body_bytes.decode())
+
+    def test_the_first_item_is_the_same_before_and_after_a_discovery(self):
+        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+        before = self.deferred_body(loaded=False)
+        before['messages'] = before['messages'][:1]
+        after = self.deferred_body(referenced=('WebFetch', 'Monitor'))
+        first, _ = self.result(before, **lite)
+        later, _ = self.result(after, **lite)
+        self.assertEqual(first['input'][0], later['input'][0])
+        self.assertEqual([t['name'] for t in later['input'][5]['tools']], ['WebFetch', 'Monitor'])
+        self.assertEqual(later['input'][4]['output'], 'Tool loaded: WebFetch\nTool loaded: Monitor')
+        self.assertEqual(first['input'][1:], later['input'][1:3])
+
+    def test_a_tool_is_delivered_once_and_an_unlisted_or_inline_name_adds_nothing(self):
+        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+        body = self.deferred_body(referenced=('WebFetch', 'Bash', 'Gone'))
+        body['messages'] += [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_2', 'name': 'ToolSearch',
+                                                                'input': {}}]},
+                             {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': [
+                                 {'type': 'tool_reference', 'tool_name': 'WebFetch'}]}]}]
+        value, _ = self.result(body, **lite)
+        added = [x for x in value['input'] if x['type'] == 'additional_tools'][1:]
+        self.assertEqual([[t['name'] for t in x['tools']] for x in added], [['WebFetch']])
+        outputs = [x['output'] for x in value['input'] if x['type'] == 'function_call_output']
+        self.assertEqual(outputs, ['Tool loaded: WebFetch\nTool loaded: Bash\nTool loaded: Gone', 'Tool loaded: WebFetch'])
+
+    def test_a_deferred_tool_names_stay_reversible_and_a_model_without_lite_gets_them_in_tools(self):
+        long = 'mcp__' + 'y' * 85
+        extra = [{'name': long, 'description': 'Long.', 'input_schema': {'type': 'object'}, 'defer_loading': True}]
+        body = self.deferred_body(referenced=(long,), tools_extra=extra)
+        _, translated = self.result(body, slug='gpt-6-sol', responses_lite=True)
+        self.assertEqual(translated.tool_names, {tools.short_name(long): long})
+        value, _ = self.result(body)
+        self.assertEqual([t['name'] for t in value['tools']],
+                         ['Bash', 'ToolSearch', 'WebFetch', 'Monitor', tools.short_name(long)])
+
 
 class AgentContractRouteTest(unittest.TestCase):
     setUp = route_tests.RouteTest.setUp

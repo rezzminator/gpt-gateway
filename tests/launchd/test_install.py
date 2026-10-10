@@ -79,7 +79,7 @@ class InstallTest(unittest.TestCase):
 
     def test_another_base_url_is_removed_with_a_backup(self):
         h = Host(self)
-        h.write_claude({"env": {"KEEP": "1", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}})
+        h.write_claude({"env": {"KEEP": "1", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ENABLE_TOOL_SEARCH": "true"}})
         code, out = h.install()
         self.assertEqual(code, 0, out)
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
