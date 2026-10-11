@@ -41,8 +41,26 @@ JQ=${MODEL_GATEWAY_JQ:-$(command -v jq)} || { echo "install.sh: jq is required" 
 # run.sh rewrites the file the setting lives in, so it gets the real path, not a symlink to it.
 SETTINGS=$("$PY" -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${MODEL_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}")
 [ -f "$SETTINGS" ] || { echo "install.sh: no Claude Code settings at $SETTINGS" >&2; exit 1; }
-"$PY" -I -B -m unittest discover -s "$SRC/tests" -t "$SRC" >/dev/null 2>&1 \
-  || { echo "install.sh: tests fail; run: $PY -I -B -m unittest discover -s $SRC/tests -t $SRC" >&2; exit 1; }
+# The suite's whole output is kept in TEST_LOG. A failure names its tests and the log. A run still going after
+# TEST_SECONDS dumps every thread's stack into the log and exits (faulthandler's own exit, so no crash report).
+TEST_SECONDS=${MODEL_GATEWAY_TEST_SECONDS:-1800}
+TEST_LOG="$LOGS/model-gateway-install-tests.log"
+mkdir -p "$LOGS"
+TEST_RC=0
+"$PY" -I -B -c 'import faulthandler, sys, unittest
+faulthandler.dump_traceback_later(float(sys.argv[1]), exit=True)
+unittest.main(module=None, argv=["unittest", "discover", "-v", "-s", sys.argv[2] + "/tests", "-t", sys.argv[2]])' \
+  "$TEST_SECONDS" "$SRC" >"$TEST_LOG" 2>&1 || TEST_RC=$?
+if [ "$TEST_RC" -ne 0 ]; then
+  if grep -q 'Timeout (0:' "$TEST_LOG"; then
+    echo "install.sh: tests hung past ${TEST_SECONDS}s; last test started: $(grep ' \.\.\. ' "$TEST_LOG" | tail -n 1)" >&2
+    echo "install.sh: every thread's stack is at the end of $TEST_LOG" >&2
+  else
+    echo "install.sh: tests fail; output: $TEST_LOG" >&2
+    { grep -E '^(FAIL|ERROR): ' "$TEST_LOG" || tail -n 15 "$TEST_LOG"; } | sed 's/^/install.sh:   /' >&2
+  fi
+  exit 1
+fi
 
 # settings.json: an existing file is kept once it validates against the middleware installed beside it.
 if [ -f "$DEST/settings.json" ]; then

@@ -151,21 +151,24 @@ def answer(sock):
     head, _, rest = data.partition(b"\r\n\r\n")
     length = int(head.lower().split(b"content-length: ")[1].split()[0])
     while len(rest) < length:
-        rest += sock.recv(4096)
+        got = sock.recv(4096)
+        if not got:
+            raise AssertionError("closed inside the body: %d of %d bytes" % (len(rest), length))
+        rest += got
     return head
 
 
 class IdleClientTest(unittest.TestCase):
     def test_a_client_idle_past_the_limit_is_closed_and_each_request_restarts_the_clock(self):
-        with mock.patch.object(proxy, "CLIENT_IDLE_SECONDS", 0.6, create=True):
+        with mock.patch.object(proxy, "CLIENT_IDLE_SECONDS", 1.0, create=True):
             rt, port = fakes.start_gateway(self, fakes.start_upstream(self, fakes.SlowUpstream))
-            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sock = socket.create_connection(("127.0.0.1", port), timeout=30)
             self.addCleanup(sock.close)
-            for _ in range(3):  # 0.9 s in all, never 0.6 s between two requests
+            for _ in range(3):  # 0.9 s in all, never 1 s between two requests (the 1.5 s stream below outlasts the limit)
                 sock.sendall(HEALTH)
                 self.assertNotIn(b"keep-alive", answer(sock).lower())  # no Keep-Alive hint: the reply's headers are the upstream's
                 time.sleep(0.3)
-            sock.settimeout(3)
+            sock.settimeout(15)
             try:
                 closed = sock.recv(1) == b""
             except socket.timeout:
@@ -178,6 +181,7 @@ class IdleClientTest(unittest.TestCase):
 
 class BurstTest(unittest.TestCase):
     def test_a_burst_of_100_simultaneous_connects_is_served_without_a_reset(self):
+        jail.raise_open_files(self, 1024)  # 100 clients and their 100 accepted ends, from a shell that starts at 256
         rt, _ = fakes.start_gateway(self)
         server = Server(("127.0.0.1", 0), rt)  # listening, not yet serving: every connect waits in the backlog
         self.addCleanup(server.server_close)

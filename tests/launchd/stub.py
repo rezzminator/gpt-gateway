@@ -21,12 +21,14 @@ esac
 """
 PASSING = "import unittest\n\n\nclass Ok(unittest.TestCase):\n    def test_ok(self):\n        pass\n"
 FAILING = "import unittest\n\n\nclass Bad(unittest.TestCase):\n    def test_bad(self):\n        self.fail('no')\n"
+HANGING = ("import threading\nimport unittest\n\n\nclass Stuck(unittest.TestCase):\n"
+           "    def test_stuck(self):\n        threading.Event().wait()\n")
 
 
 class Host:
     """A scratch HOME with Claude Code settings, a source tree with a one-test suite, and the stub on PATH."""
 
-    def __init__(self, test, tests_pass=True):
+    def __init__(self, test, tests_pass=True, hangs=False):
         self.root = jail.scratch(test)
         self.home = os.path.join(self.root, "home")
         self.src = os.path.join(self.root, "src")
@@ -35,6 +37,7 @@ class Host:
         self.plist = os.path.join(self.home, "Library", "LaunchAgents", "local.model-gateway.plist")
         self.calls = os.path.join(self.root, "launchctl.calls")
         self.port = jail.free_port()
+        self.env = {}
         os.makedirs(os.path.dirname(self.claude))
         self.write_claude({"env": {"KEEP": "1"}})
         for item in jail.ship_list() + ["middleware", "launchd/install.sh", "launchd/uninstall.sh"]:
@@ -47,7 +50,7 @@ class Host:
         os.makedirs(os.path.join(self.src, "tests"))
         open(os.path.join(self.src, "tests", "__init__.py"), "w").close()
         with open(os.path.join(self.src, "tests", "test_one.py"), "w") as f:
-            f.write(PASSING if tests_pass else FAILING)
+            f.write(HANGING if hangs else PASSING if tests_pass else FAILING)
         bin_dir = os.path.join(self.root, "bin")
         os.makedirs(bin_dir)
         with open(os.path.join(bin_dir, "launchctl"), "w") as f:
@@ -68,7 +71,7 @@ class Host:
 
     def run(self, script, *args, disabled=True):
         env = jail.clean_env(self.home, PATH=self.path, LAUNCHCTL_STUB_LOG=self.calls,
-                             LAUNCHCTL_STUB_DISABLED="local.model-gateway" if disabled else "")
+                             LAUNCHCTL_STUB_DISABLED="local.model-gateway" if disabled else "", **self.env)
         p = subprocess.run(["/bin/sh", os.path.join(self.src, "launchd", script)] + list(args), env=env,
                            capture_output=True, text=True, timeout=120)
         return p.returncode, p.stdout + p.stderr

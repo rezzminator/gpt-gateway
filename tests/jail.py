@@ -7,6 +7,7 @@ the real home or a live gateway's settings.
 import json
 import os
 import re
+import resource
 import shutil
 import socket
 import tempfile
@@ -56,6 +57,18 @@ def write_middleware(directory, module, source):
     with open(path, "w") as f:
         f.write(textwrap.dedent(source))
     return path
+
+
+def raise_open_files(test, wanted):
+    """Give this process room for `wanted` descriptors for the rest of `test`: macOS starts a shell's soft limit at
+    256, which a test holding a hundred sockets and their hundred accepted ends cannot live in. A hard limit below
+    `wanted` skips the test, saying so."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        if hard != resource.RLIM_INFINITY and hard < wanted:
+            test.skipTest("the hard open-file limit is %d, under the %d this test needs" % (hard, wanted))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+        test.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
 
 
 def wait_for(check, timeout=10.0):

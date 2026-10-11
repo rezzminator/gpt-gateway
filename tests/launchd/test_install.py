@@ -87,6 +87,23 @@ class InstallTest(unittest.TestCase):
         code, out = h.install()
         self.assertEqual(code, 1)
         self.assertIn("install.sh: tests fail", out)
+        self.assertIn("FAIL: test_bad", out)
+        log = os.path.join(h.home, "Library", "Logs", "model-gateway-install-tests.log")
+        self.assertIn(log, out)
+        with open(log) as f:
+            self.assertIn("AssertionError: no", f.read())
+        self.assertFalse(os.path.exists(h.dest))
+
+    def test_a_hung_test_run_is_a_failure_that_names_the_test_and_keeps_the_stacks(self):
+        h = Host(self, hangs=True)
+        h.env = {"MODEL_GATEWAY_TEST_SECONDS": "3"}
+        code, out = h.install()
+        self.assertEqual(code, 1)
+        self.assertIn("install.sh: tests hung past 3s", out)
+        self.assertIn("test_stuck", out)
+        log = os.path.join(h.home, "Library", "Logs", "model-gateway-install-tests.log")
+        with open(log) as f:
+            self.assertIn("most recent call first", f.read())
         self.assertFalse(os.path.exists(h.dest))
 
     def test_another_base_url_is_removed_with_a_backup(self):

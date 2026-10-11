@@ -192,7 +192,8 @@ class WebSocketRouteTest(unittest.TestCase):
         thread.start()
         time.sleep(0.2)
         statuses["second"] = self.send(port, second)[0].status
-        thread.join()
+        thread.join(60)
+        self.assertFalse(thread.is_alive(), "the first request never finished")
         return statuses
 
     def test_an_activity_summary_fork_waits_for_its_lanes_busy_socket_and_rides_its_cache(self):

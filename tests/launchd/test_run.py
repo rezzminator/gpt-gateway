@@ -16,6 +16,12 @@ from tests import fakes, jail
 JQ = shutil.which("jq") or "/usr/bin/jq"
 
 
+def restore_hangup():
+    """A shell cannot trap a signal it inherits ignored, and nohup, cron and many agent harnesses start the suite with
+    HUP ignored: run.sh gets the default back, as launchd starts it."""
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
+
 class RunTest(unittest.TestCase):
     def setUp(self):
         self.dir = jail.scratch(self)
@@ -24,18 +30,20 @@ class RunTest(unittest.TestCase):
         self.port = jail.free_port()
         self.url = "http://127.0.0.1:%d" % self.port
         self.proc = None
+        self.stopped = False
         self.addCleanup(self.stop)
 
     def stop(self):
         """Kills run.sh's whole process group: run.sh, its gateways, serving, draining or starting, and their sleeps."""
-        if self.proc is None:
+        if self.proc is None or self.stopped:
             return
+        self.stopped = True  # a test may stop early; the cleanup then finds the group gone, or only zombies
         try:
             os.killpg(self.proc.pid, signal.SIGKILL)
-        except ProcessLookupError:  # every process of the group has already exited
-            pass
+        except (ProcessLookupError, PermissionError):  # every process of the group has exited, or macOS refuses a
+            pass  # group whose last members are zombies waiting to be reaped
         self.proc.wait()
-        self.proc.stderr.close()
+        self.errors.close()
 
     def write_settings(self, env):
         with open(self.settings, "w") as f:
@@ -50,8 +58,16 @@ class RunTest(unittest.TestCase):
                              MODEL_GATEWAY_RETRY_SECONDS="0", MODEL_GATEWAY_CLAUDE_SETTINGS=self.settings,
                              MODEL_GATEWAY_PORT=str(self.port), MODEL_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
                              MODEL_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
+        # A file, not a pipe: a read to the end of a pipe waits for every gateway still draining to let go of it.
+        self.errors = open(os.path.join(self.dir, "run.err"), "wb")
         self.proc = subprocess.Popen(["/bin/sh", os.path.join(self.app, "run.sh"), "serve"], env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+                                     stdout=subprocess.DEVNULL, stderr=self.errors, start_new_session=True,
+                                     preexec_fn=restore_hangup)
+
+    def stderr(self):
+        """What run.sh and its gateways have written to stderr so far."""
+        with open(os.path.join(self.dir, "run.err"), "rb") as f:
+            return f.read()
 
     def healthy(self):
         try:
@@ -101,7 +117,7 @@ class RunTest(unittest.TestCase):
         self.start(python=os.path.join(self.dir, "no-such-python"))
         self.assertEqual(self.proc.wait(timeout=10), 1)
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
-        self.assertIn(b"missing or older", self.proc.stderr.read())
+        self.assertIn(b"missing or older", self.stderr())
 
     def test_gateway_that_dies_fails_open(self):
         self.write_settings({})
@@ -129,7 +145,7 @@ class RunTest(unittest.TestCase):
         self.start()
         self.assertEqual(self.proc.wait(timeout=20), 1)
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
-        err = self.proc.stderr.read()
+        err = self.stderr()
         self.assertIn(b"settings error", err)
         self.assertIn(b"exited with status 1 before answering", err)
 
@@ -140,7 +156,7 @@ class RunTest(unittest.TestCase):
         self.start()
         self.assertEqual(self.proc.wait(timeout=20), 1)
         self.assertNotIn("ANTHROPIC_BASE_URL", self.read_settings()["env"])
-        self.assertIn(b"middleware error: middleware broken: NAME must be a string", self.proc.stderr.read())
+        self.assertIn(b"middleware error: middleware broken: NAME must be a string", self.stderr())
 
     def test_a_stop_while_the_gateway_starts_stops_it_too(self):
         slow = os.path.join(self.dir, "slow-python")
@@ -200,9 +216,9 @@ class RunTest(unittest.TestCase):
         self.assertIn(b"message_stop", got[0])
         self.assertTrue(self.linked())
         self.assertIsNone(self.proc.poll(), "run.sh exited on HUP")
+        self.assertTrue(jail.wait_for(lambda: b"restarted: gateway" in self.stderr(), 30), self.stderr())
         self.proc.send_signal(signal.SIGTERM)
-        self.assertEqual(self.proc.wait(timeout=15), 0)
-        self.assertIn(b"restarted: gateway", self.proc.stderr.read())
+        self.assertEqual(self.proc.wait(timeout=30), 0)
 
     def test_stop_unlinks_first_then_drains_the_stream(self):
         self.write_settings({})

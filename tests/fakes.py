@@ -240,6 +240,7 @@ def start_gateway(test, upstream=None, env=None, settings=None, middleware=None)
     rt = Runtime(run, path)
     rt.load()
     test.addCleanup(rt.db.close)
+    test.addCleanup(rt.upstream.close)  # the idle upstream connections its pool keeps
     server = Server(("127.0.0.1", 0), rt)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     test.addCleanup(server.server_close)

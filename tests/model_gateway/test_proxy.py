@@ -139,7 +139,7 @@ class PassthroughTest(unittest.TestCase):
         rt, port = fakes.start_gateway(self, self.up)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            s = socket.create_connection(("127.0.0.1", port))
+            s = socket.create_connection(("127.0.0.1", port), timeout=30)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             time.sleep(0.2)
             s.close()
@@ -224,7 +224,7 @@ class HookExchangeTest(unittest.TestCase):
     def test_a_client_that_leaves_mid_stream_is_reported(self):
         up = fakes.start_upstream(self, fakes.SlowUpstream)
         rt, port = fakes.start_gateway(self, up, settings=chain("rec"), middleware={"rec": RECORDER.format(name="rec")})
-        s = socket.create_connection(("127.0.0.1", port))
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
         s.sendall(b"POST /v1/messages HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\n\r\n{}")
         s.recv(100)
         s.close()
@@ -238,7 +238,7 @@ class HookExchangeTest(unittest.TestCase):
     def test_a_client_that_leaves_before_the_response_headers_is_reported(self):
         up = fakes.start_upstream(self, fakes.LateUpstream)
         rt, port = fakes.start_gateway(self, up, settings=chain("rec"), middleware={"rec": RECORDER.format(name="rec")})
-        s = socket.create_connection(("127.0.0.1", port))
+        s = socket.create_connection(("127.0.0.1", port), timeout=30)
         s.sendall(b"POST /v1/json HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\n\r\n{}")
         time.sleep(0.1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))

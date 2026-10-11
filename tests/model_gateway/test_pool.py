@@ -26,7 +26,9 @@ def in_thread(fn):
     out = []
     t = threading.Thread(target=lambda: out.append(fn()))
     t.start()
-    t.join(20)
+    t.join(60)
+    if not out:
+        raise AssertionError("a thread did not finish within 60 s")
     return out[0]
 
 
@@ -103,10 +105,11 @@ class PoolTest(unittest.TestCase):
         # The ChatGPT reader thread finishes the body just as the serving thread aborts: the connection must not be
         # pooled, taken by another request and then shut down under it, which sends that request a second time.
         resp = self.get()
+        mine = self.up.local.conn.sock  # other threads of earlier tests shut their own sockets down meanwhile
         late, real = [], socket.socket.shutdown
 
         def shutdown(sock, how):
-            if not late:  # the moment between the abort's decision and its shutdown
+            if sock is mine and not late:  # the moment between the abort's decision and its shutdown
                 late.append(in_thread(lambda: drain(resp)))
                 threading.Thread(target=lambda: late.append(drain(self.get("/hold"))), daemon=True).start()
                 jail.wait_for(lambda: len(self.fake.ports) == 2, 3)
@@ -114,7 +117,7 @@ class PoolTest(unittest.TestCase):
         with unittest.mock.patch.object(socket.socket, "shutdown", shutdown):
             self.up.abort()
         self.fake.release.set()
-        self.assertTrue(jail.wait_for(lambda: len(late) == 2, 10), late)
+        self.assertTrue(jail.wait_for(lambda: len(late) == 2, 30), late)
         self.assertEqual(late[1], fakes.JSON_BODY)
         self.assertEqual(len(self.fake.ports), 2, "the request on the next lease went upstream twice")
 

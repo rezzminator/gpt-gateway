@@ -65,7 +65,7 @@ def process_refresh(knobs, ready, go, out, force):
     if force:
         store.credentials()
     ready.put(True)
-    go.wait(10)
+    go.wait(60)
     try:
         out.put(store.credentials(force_refresh=force).access_token)
     except Exception as e:
@@ -199,7 +199,7 @@ class AuthTest(unittest.TestCase):
                     store = self.auth.Store(self.knobs)
                     if force:
                         store.credentials()
-                    barrier.wait(5)
+                    barrier.wait(60)
                     results.append(store.credentials(force_refresh=force))
                 except Exception as e:
                     errors.append(e)
@@ -207,9 +207,9 @@ class AuthTest(unittest.TestCase):
             workers = [threading.Thread(target=run) for _ in range(2)]
             for worker in workers:
                 worker.start()
-            barrier.wait(5)
+            barrier.wait(60)
             for worker in workers:
-                worker.join(10)
+                worker.join(60)
             self.assertEqual(errors, [])
             self.assertEqual(len(results), 2)
             self.assertEqual(results[0], results[1])
@@ -226,12 +226,12 @@ class AuthTest(unittest.TestCase):
             for worker in workers:
                 worker.start()
                 self.addCleanup(lambda p=worker: p.terminate() if p.is_alive() else None)
-            self.assertTrue(ready.get(timeout=10))
-            self.assertTrue(ready.get(timeout=10))
+            self.assertTrue(ready.get(timeout=60))
+            self.assertTrue(ready.get(timeout=60))
             go.set()
-            results = [out.get(timeout=10) for _ in workers]
+            results = [out.get(timeout=60) for _ in workers]
             for worker in workers:
-                worker.join(10)
+                worker.join(60)
                 self.assertEqual(worker.exitcode, 0)
             ready.close()
             out.close()

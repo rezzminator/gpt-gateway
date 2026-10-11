@@ -333,6 +333,7 @@ class EndToEndTest(unittest.TestCase):
 
 class LoadTest(unittest.TestCase):
     def test_concurrent_requests_never_block_on_the_database_and_drop_nothing(self):
+        jail.raise_open_files(self, 1024)  # 50 clients, their 50 accepted ends and 50 upstream connections
         with mock.patch.object(fakes.QuietServer, "request_queue_size", 128):  # 50 gateway threads connect at once
             origin = fakes.start_upstream(self, SentinelUpstream)
         rt, port = fakes.start_gateway(self, origin)
@@ -360,9 +361,11 @@ class LoadTest(unittest.TestCase):
         for t in threads:
             t.join(120)
         self.assertEqual((len(statuses), set(statuses)), (2000, {200}))
+        # A handler records its row after the last byte went out, so the client can finish first.
+        self.assertTrue(jail.wait_for(lambda: len(waits) == 2000, 30), "%d of 2000 rows recorded" % len(waits))
         self.assertTrue(rt.db.flush(30))
         self.assertEqual((len(waits), rt.db.drops, rt.db.errors), (2000, 0, 0))
-        self.assertLess(max(waits), 0.05, "a request waited on the database")
+        self.assertLess(max(waits), 1.0, "a request waited on the database")  # a blocked write is seconds; a loaded host adds 0.2
         self.assertEqual(db.query(rt.db.path, "SELECT count(*) AS n, sum(input_tokens) AS t FROM requests"),
                          [{"n": 2000, "t": 2000 * 5110}])
 

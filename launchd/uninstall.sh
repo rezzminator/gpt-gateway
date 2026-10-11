@@ -62,7 +62,7 @@ fi
 rm -f "$PLIST"
 rm -rf "$DEST"
 if [ "$PURGE" = yes ]; then
-  rm -f "$LOGS/model-gateway.log" "$LOGS/model-gateway.log.1" "$LOGS/model-gateway.stderr.log"
+  rm -f "$LOGS/model-gateway.log" "$LOGS/model-gateway.log.1" "$LOGS/model-gateway.stderr.log" "$LOGS/model-gateway-install-tests.log"
   rm -f "$DB" "$DB-wal" "$DB-shm"
   echo "logs and database deleted"
 fi
