@@ -39,6 +39,7 @@ class Decision:
     client_body: dict
     client_headers: dict
     delay: Optional[float] = None  # seconds the server advised before a retry, None when it advised none
+    drop_retention: bool = False  # the backend refused prompt_cache_retention: the retry goes without it
 
 
 # claude-code-proxy/src/providers/codex/mod.rs:1439-1572; response envelopes.
@@ -47,7 +48,7 @@ def classify(status, body_head, phase, headers=None):
 
     body_head accepts a parsed envelope, UTF-8 bytes or text; headers, the upstream answer's
     headers as a mapping or (name, value) pairs, carry its retry advice. The caller enforces
-    MAX_RETRIES, one token refresh and one reasoning replay reset per request.
+    MAX_RETRIES, one token refresh, one reasoning replay reset and one retention strip per request.
     Synthetic codes: stream_closed, idle_timeout.
     """
     if phase not in ("before-output", "after-output"):
@@ -67,7 +68,7 @@ def classify(status, body_head, phase, headers=None):
     code = str(detail.get("code") or detail.get("type") or "")
     message = str(detail.get("message") or raw or code or "request failed")
     lower = (code + " " + message).lower()
-    retry, refresh, drop = False, False, False
+    retry, refresh, drop, drop_retention = False, False, False, False
     stream_limit = status is None and code in _RATE_CODES
     delay = _header_delay(headers)
     if delay is None and stream_limit:
@@ -106,6 +107,8 @@ def classify(status, body_head, phase, headers=None):
         client_status, kind = 400, "invalid_request_error"
     elif "invalid_encrypted_content" in lower:
         client_status, kind, retry, drop = 400, "invalid_request_error", True, True
+    elif "prompt_cache_retention" in lower and status in (None, 400, 422):
+        client_status, kind, retry, drop_retention = 400, "invalid_request_error", True, True
     elif status == 401:
         client_status, kind, retry, refresh = 401, "authentication_error", True, True
     elif status == 429:
@@ -128,7 +131,7 @@ def classify(status, body_head, phase, headers=None):
     body = FrozenDict(type="error", error=FrozenDict(type=kind, message="chatgpt upstream: " + message))
     if phase == "after-output":
         return ("event: error\ndata: " + json.dumps(body, separators=(",", ":")) + "\n\n").encode()
-    return Decision(retry, refresh, drop, client_status, body, FrozenDict(headers), delay)
+    return Decision(retry, refresh, drop, client_status, body, FrozenDict(headers), delay, drop_retention)
 
 
 def _header_delay(headers):

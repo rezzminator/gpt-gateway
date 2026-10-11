@@ -59,6 +59,7 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt identity | Codex client version and identity headers | `model_gateway/chatgpt/identity.py` | assumed: OAuth and backend share identity |
 | chatgpt client | Responses over the WebSocket or HTTP, and models requests | `model_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
 | chatgpt websocket | the Responses WebSocket: per-lane socket pool, response.create, the answer the route reads | `model_gateway/chatgpt/websocket.py` | assumed: socket lifecycle and Codex's WebSocket contract co-change |
+| chatgpt keeper | the thread that answers and pings the idle pooled WebSockets, and takes a dead one out of the pool | `model_gateway/chatgpt/keeper.py` | assumed: pool lifecycle and the server's idle behaviour co-change |
 | chatgpt continuation | Codex's incremental request: a socket's last completed response, what the next request sends, output-item identity | `model_gateway/chatgpt/continuation.py` | assumed: Codex's continuation rule and the translator's round trip co-change |
 | chatgpt route | routing decision, attempts, stream commit, lanes | `model_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
 | chatgpt response | the reader thread behind a translated SSE body, read through the core's `Response` | `model_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
@@ -118,6 +119,7 @@ model_gateway/chatgpt/estimate.py         Estimator
 model_gateway/chatgpt/identity.py         CODEX_CLIENT_VERSION, headers
 model_gateway/chatgpt/client.py           separate ChatGPT Upstream, responses and models
 model_gateway/chatgpt/websocket.py        Sockets, Answer, Refusal, message: the Responses WebSocket
+model_gateway/chatgpt/keeper.py           Keeper: answers and pings the idle pooled sockets
 model_gateway/chatgpt/continuation.py     Request, Baseline, produced: the continuation of a socket's last response
 model_gateway/chatgpt/route.py            decision, retries, Lane: estimator and turn state
 model_gateway/chatgpt/response.py         Reader: the reader thread behind a translated SSE body
@@ -141,7 +143,7 @@ tests/model_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,h
 tests/model_gateway/chatgpt/__init__.py
 tests/model_gateway/chatgpt/test_codex_login.py
 tests/model_gateway/chatgpt/test_response.py
-tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,websocket,continuation}.py
+tests/model_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,websocket,keeper,retention,continuation}.py
 tests/model_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py

@@ -26,6 +26,15 @@ class Response:
     def getheader(self, name, default=None):
         return next((v for k, v in self.headers.items() if k.lower() == name.lower()), default)
 
+    def complete(self):
+        """Whether the upstream's response was read to its end: a streamed body whose terminal event came."""
+        return self.reader is not None and self.reader.complete()
+
+    def abandon(self):
+        """The client left: end the stream's reader, keeping what the upstream already reported."""
+        if self.reader is not None:
+            self.reader.abandon()
+
     def read1(self, n):
         if not self.data and self.reader:
             self.data = self.reader.next()

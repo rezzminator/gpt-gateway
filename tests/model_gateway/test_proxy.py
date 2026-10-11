@@ -333,6 +333,71 @@ class RelayRouteTest(unittest.TestCase):
                 self.assertFalse(result.completed)
                 self.assertEqual(result.client_disconnected, isinstance(failure, BrokenPipeError))
 
+    def broken_relay(self, up, path):
+        """Relay `up`'s answer to `path` to a client whose socket breaks on the first body write, then end the client's
+        connection as Handler.finish does. Returns the upstream connection the answer rode and the handler."""
+        from unittest.mock import Mock
+        from model_gateway import clock
+        from model_gateway.proxy import Handler
+        rt = Mock()
+        rt.chain.event_sink.return_value = None
+        handler = Handler.__new__(Handler)
+        handler.command, handler.path, handler.close_connection = "POST", path, False
+        handler.send_response = handler.send_header = handler.end_headers = Mock()
+        handler.wfile = Mock()
+        handler.wfile.write.side_effect = BrokenPipeError()
+        resp = up.send("POST", path, b"{}", (("content-length", "2"),))
+        conn = up.local.conn
+        handler.relay(rt, Mock(), resp, "", "", Mock(), clock.monotonic(), up, {"request_id": 1, "route": "anthropic"})
+        up.drop()
+        return conn, handler
+
+    def test_a_connection_whose_body_was_read_whole_stays_pooled_when_the_client_leaves(self):
+        from model_gateway.upstream import Upstream as Pooled
+        up = Pooled(fakes.start_upstream(self))
+        conn, handler = self.broken_relay(up, "/v1/json")
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(up.pool.idle, [conn])
+        self.assertIsNotNone(conn.sock)
+        up.send("POST", "/v1/json", b"{}", (("content-length", "2"),)).read()
+        self.assertEqual((up.reuse(), up.local.conn is conn), ((True, False), True))
+
+    def test_a_connection_whose_body_was_cut_short_is_spent_when_the_client_leaves(self):
+        from model_gateway.upstream import Upstream as Pooled
+        up = Pooled(fakes.start_upstream(self, fakes.SlowUpstream))
+        conn, handler = self.broken_relay(up, "/v1/messages")
+        self.assertTrue(handler.close_connection)
+        self.assertEqual((up.pool.idle, conn.sock), ([], None))
+
+    def test_a_streamed_reply_whose_client_left_keeps_what_the_upstream_already_reported(self):
+        from unittest.mock import Mock
+        from model_gateway import clock
+        from model_gateway.chatgpt.response import Reader
+        from model_gateway.chatgpt.stream import Translator
+        from model_gateway.proxy import Handler
+        from model_gateway.response import Response
+        for sent, reported in (([fakes.responses_turn(), b""], True),  # the terminal event arrived before the client left
+                               ([fakes.responses_event("response.output_text.delta", delta="x"), b""], False)):
+            with self.subTest(reported=reported):
+                upstream, client, rt, row = Mock(), Mock(), Mock(), {"request_id": 1, "route": "chatgpt"}
+                upstream.will_close = False
+                upstream.read1.side_effect = sent
+                rt.chain.event_sink.return_value = None
+                translator = Translator("gpt-test", {}, 10)
+                reader = Reader(upstream, translator, client)
+                reader.thread.join(5)  # everything the upstream said is queued before the client leaves
+                reader.on_end = lambda: row.update(input_tokens=translator.input_tokens)
+                handler = Handler.__new__(Handler)
+                handler.command, handler.path, handler.close_connection = "POST", "/v1/messages", False
+                handler.send_response = handler.send_header = handler.end_headers = Mock()
+                handler.wfile = Mock()
+                handler.wfile.write.side_effect = BrokenPipeError()
+                handler.relay(rt, Mock(), Response(200, reader=reader), "", "", Mock(), clock.monotonic(), client, row)
+                self.assertEqual(row.get("input_tokens", "unreported"), 100 if reported else "unreported")
+                self.assertTrue(row["client_disconnected"])
+                # a reply read to its end gives its connection back; any other is cancelled
+                self.assertEqual((client.release.call_count, client.drop.call_count), (1, 0) if reported else (0, 1))
+
 
 class ClaudeRouteTimingTest(unittest.TestCase):
     def test_a_streamed_reply_carries_ttfb_ms_and_upstream_ms(self):

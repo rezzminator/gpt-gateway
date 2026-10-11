@@ -17,7 +17,8 @@ from . import env as envmod
 from . import middleware
 
 FILE_NAME = "settings.json"
-KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days")
+KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention")
+CACHE_RETENTIONS = ("off", "24h")
 ENTRY_KEYS = ("module", "settings")
 MODULE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\Z")
 CAPTURE_OFF = ("off", "0")
@@ -45,6 +46,7 @@ class Snapshot:
     state: str                # "ok" | "missing" | "unread" | "error(...)"
     chatgpt: bool = False
     db_retention_days: int = DEFAULT_RETENTION_DAYS
+    chatgpt_cache_retention: str = "off"  # "24h": every ChatGPT Responses request asks for 24-hour prompt-cache retention
 
 
 def absolute_dir(value, where, key):
@@ -111,6 +113,11 @@ def read_file(path):
         if type(days) is not int or days < 1:
             raise SettingsError("%s: db_retention_days must be a whole number of days >= 1, got %s" % (path, json.dumps(days)))
         out["db_retention_days"] = days
+    if "chatgpt_cache_retention" in data:
+        if data["chatgpt_cache_retention"] not in CACHE_RETENTIONS or type(data["chatgpt_cache_retention"]) is not str:
+            raise SettingsError("%s: chatgpt_cache_retention must be off or 24h, got %s"
+                                % (path, json.dumps(data["chatgpt_cache_retention"])))
+        out["chatgpt_cache_retention"] = data["chatgpt_cache_retention"]
     for key in ("capture_dir", "middleware_dir"):
         if key in data:
             out[key] = None if data[key] is None else absolute_dir(data[key], path, key)
@@ -180,7 +187,8 @@ class Settings:
         return os.path.join(os.path.dirname(os.path.abspath(self.path)), "middleware")
 
     def core(self, file_values):
-        """(capture_dir, middleware_dir, entries, sources, chatgpt, db_retention_days) from env, file and defaults."""
+        """(capture_dir, middleware_dir, entries, sources, chatgpt, db_retention_days, chatgpt_cache_retention) from env,
+        file and defaults."""
         sources = {}
         raw = envmod.value(self.env, envmod.CAPTURE_DIR)
         if raw is not None:
@@ -210,14 +218,16 @@ class Settings:
             sources["chatgpt"] = "file" if file_values.get("chatgpt") is not None else "default"
         retention = file_values.get("db_retention_days", DEFAULT_RETENTION_DAYS)
         sources["db_retention_days"] = "file" if "db_retention_days" in file_values else "default"
-        return capture, mdir, entries, sources, chatgpt, retention
+        sources["chatgpt_cache_retention"] = "file" if "chatgpt_cache_retention" in file_values else "default"
+        return (capture, mdir, entries, sources, chatgpt, retention,
+                file_values.get("chatgpt_cache_retention", "off"))
 
     def build(self, core, modules, state):
-        capture, mdir, entries, sources, chatgpt, retention = core
+        capture, mdir, entries, sources, chatgpt, retention, cache_retention = core
         per_module = {m.module: module_settings(m, values, self.env, self.path)
                       for m, (_, values) in zip(modules, entries)}
         return Snapshot(capture, mdir, tuple(name for name, _ in entries), MappingProxyType(per_module),
-                        MappingProxyType(sources), state, chatgpt, retention)
+                        MappingProxyType(sources), state, chatgpt, retention, cache_retention)
 
     def stat_key(self):
         try:
@@ -277,4 +287,4 @@ class Settings:
             return
         self.snapshot = snap
         self.event("settings_reload", path=self.path, state=snap.state, settings=describe(snap),
-                   db_retention_days=snap.db_retention_days)
+                   db_retention_days=snap.db_retention_days, chatgpt_cache_retention=snap.chatgpt_cache_retention)

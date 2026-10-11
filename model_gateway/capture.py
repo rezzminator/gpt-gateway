@@ -4,14 +4,16 @@
 1-request.json (method, path, headers; secrets redacted), 2-request.body (as the client sent it),
 3-request.sent.body (only when a hook changed it), 4-response.json (status, headers),
 5-response.body (the literal bytes streamed back, SSE included). Capture never breaks a request:
-a write failure is recorded once, as a `capture_error` event, and capture stops for that exchange.
+a write failure is recorded as a `capture_error` event, and capture stops for that exchange; a failure
+that is the process running out of handles is an `fd_exhausted` event instead (`handles.announce`: one per
+window, the ones held back counted).
 """
 import json
 import os
 import re
 import threading
 
-from . import clock
+from . import clock, handles
 from .headers import SECRET
 
 REQUEST = "1-request.json"
@@ -58,7 +60,12 @@ class Capture:
             self.fail(e)
 
     def fail(self, e):
-        self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e))
+        shortage = handles.diagnose(e)
+        if shortage is None:
+            self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e))
+        else:
+            handles.announce(self.event, "fd_exhausted", where="capture", error=repr(e), open=shortage.open,
+                             limit=shortage.limit)
         self.dir = None
 
     def write(self, name, data):
@@ -101,5 +108,5 @@ class Capture:
             try:
                 self.body.close()
             except Exception as e:
-                self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e), on="close")
+                self.fail(e)
             self.body = None

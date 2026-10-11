@@ -27,7 +27,7 @@ class ChatGPTStatsTest(unittest.TestCase):
     def stats(self, d, path, *args):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = cli.main(["chatgpt-stats"] + list(args), d, {"MODEL_GATEWAY_DB": path})
+            code = cli.main(["chatgpt-stats"] + list(args), d, {"HOME": d, "MODEL_GATEWAY_DB": path})
         return code, out.getvalue().splitlines(), err.getvalue()
 
     def test_lane_totals_empty_unreadable_and_a_window(self):

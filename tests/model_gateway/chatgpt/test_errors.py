@@ -12,6 +12,22 @@ from tests.model_gateway.chatgpt import test_route as route_tests
 
 
 class ErrorsTest(unittest.TestCase):
+    def test_a_refused_cache_retention_is_a_retry_that_drops_the_parameter(self):
+        refused = [(400, {"error": {"message": "Unsupported parameter: 'prompt_cache_retention'",
+                                    "type": "invalid_request_error", "code": "unsupported_parameter"}}),
+                   (422, "prompt_cache_retention: extra fields not permitted"),
+                   (None, {"type": "error", "status": 400, "error": {"message": "Unknown parameter: prompt_cache_retention",
+                                                                      "code": "unknown_parameter"}})]
+        for status, body in refused:
+            with self.subTest(status=status):
+                result = errors.classify(status, body, "before-output")
+                self.assertEqual((result.retry, result.refresh, result.drop_reasoning, result.drop_retention),
+                                 (True, False, False, True))
+                self.assertEqual((result.client_status, result.client_body["error"]["type"]), (400, "invalid_request_error"))
+        for status, body in ((400, {"error": {"message": "Unsupported parameter: 'seed'"}}), (500, "down"),
+                             (400, {"error": {"code": "invalid_encrypted_content"}})):
+            self.assertFalse(errors.classify(status, body, "before-output").drop_retention)
+
     def test_table(self):
         cases = [
             (None, "connection reset", 502, "api_error", True, False, False),

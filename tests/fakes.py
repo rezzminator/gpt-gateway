@@ -241,6 +241,8 @@ def start_gateway(test, upstream=None, env=None, settings=None, middleware=None)
     rt.load()
     test.addCleanup(rt.db.close)
     test.addCleanup(rt.upstream.close)  # the idle upstream connections its pool keeps
+    if rt.chatgpt is not None:
+        test.addCleanup(rt.chatgpt.client.close)  # its keeper thread and idle sockets
     server = Server(("127.0.0.1", 0), rt)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     test.addCleanup(server.server_close)
@@ -365,9 +367,19 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     hangup = []  # per WebSocket message answered, True: the socket closes after the answer
     stall = []  # per WebSocket message, seconds the answer waits
     slow_upgrade = []  # per WebSocket upgrade, seconds the 101 waits; a test assigns its own list
+    idle = []  # per WebSocket upgrade, how the server treats the socket idle: dict(ping=, miss=, hard=), see websocket()
+    unsupported = ()  # request body parameters the backend answers with a 400 instead of the script
 
     def log_message(self, *args):
         pass
+
+    def reply(self, body):
+        """The next script entry for a Responses request `body`, or the 400 naming an `unsupported` parameter it carries."""
+        named = [name for name in self.unsupported if name.encode() in body]
+        if named:
+            return 400, {"error": {"message": "Unsupported parameter: '%s'" % named[0], "type": "invalid_request_error",
+                                   "code": "unsupported_parameter"}}
+        return self.script.pop(0) if self.script else (200, responses_turn())
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
@@ -379,7 +391,7 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
         elif self.path == "/oauth/token":
             status, payload = 200, self.tokens
         elif self.path == "/backend-api/codex/responses":  # a script entry may add a third item: its extra headers
-            status, payload, *extra = self.script.pop(0) if self.script else (200, responses_turn())
+            status, payload, *extra = self.reply(body)
         else:
             status, payload = 404, {"error": "unknown fake path"}
         if isinstance(payload, Cut):
@@ -429,16 +441,45 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.flush()
+        self.wlock, self.last_frame, self.last_message = threading.Lock(), time.monotonic(), time.monotonic()
+        stop = threading.Event()
+        policy = self.idle.pop(0) if self.idle else None
+        if policy:
+            threading.Thread(target=self.watch, args=(policy, stop), daemon=True).start()
+        try:
+            self.serve_messages(headers)
+        finally:
+            stop.set()
+
+    def watch(self, policy, stop):
+        """An idle socket's fate. `ping`: the server pings every `ping` seconds and closes the socket once `miss` seconds
+        pass without any frame from the client. `hard`: it closes `hard` seconds after the last request message, pings
+        or no pings."""
+        sent = time.monotonic()
+        while not stop.wait(0.02):
+            now = time.monotonic()
+            if (policy.get("miss") and now - self.last_frame > policy["miss"]) or \
+                    (policy.get("hard") and now - self.last_message > policy["hard"]):
+                return self.connection.shutdown(socket.SHUT_RDWR)
+            if policy.get("ping") and now - sent >= policy["ping"]:
+                sent = now
+                try:
+                    self.ws_send(b"", frames.PING)
+                except OSError:
+                    return
+
+    def serve_messages(self, headers):
         while True:
             data = self.ws_receive()
             if data is None:
                 return
+            self.last_message = time.monotonic()
             self.seen.append({"method": "WS", "path": self.path, "headers": headers, "body": data})
             if self.stall:
                 time.sleep(self.stall.pop(0))
             if self.vanish and self.vanish.pop(0):
                 return self.connection.shutdown(socket.SHUT_RDWR)
-            status, payload, *extra = self.script.pop(0) if self.script else (200, responses_turn())
+            status, payload, *extra = self.reply(data)
             if isinstance(payload, Cut):
                 for text in sse_data(payload.sent):
                     self.ws_send(text)
@@ -472,6 +513,7 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
             key = self.rfile.read(4)
             payload = frames.mask(self.rfile.read(length), key)
             opcode = head[0] & 0x0F
+            self.last_frame = time.monotonic()
             if opcode == frames.CLOSE:
                 return None
             if opcode in (frames.PING, frames.PONG):
@@ -483,5 +525,6 @@ class ChatGPTUpstream(BaseHTTPRequestHandler):
     def ws_send(self, data, opcode=frames.TEXT):
         n = len(data)
         size = bytes([n]) if n < 126 else (bytes([126]) + struct.pack("!H", n) if n < 65536 else bytes([127]) + struct.pack("!Q", n))
-        self.wfile.write(bytes([0x80 | opcode]) + size + data)
-        self.wfile.flush()
+        with self.wlock:
+            self.wfile.write(bytes([0x80 | opcode]) + size + data)
+            self.wfile.flush()

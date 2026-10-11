@@ -34,3 +34,15 @@ class ClientTest(unittest.TestCase):
         client.watch(reader)
         client.drop()
         reader.stop.set.assert_called_once_with()
+
+    def test_release_lets_a_finished_response_settle_where_drop_cancels_it(self):
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
+        reader, answer, client.upstream = Mock(), Mock(), Mock()
+        client.watch(reader)
+        client.local.answer = answer
+        client.release()
+        reader.stop.set.assert_called_once_with()
+        answer.abort.assert_not_called()
+        client.upstream.release.assert_called_once_with()
+        client.upstream.abort.assert_not_called()
+        self.assertEqual((client.local.reader, client.local.answer), (None, None))

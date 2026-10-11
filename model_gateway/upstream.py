@@ -197,6 +197,14 @@ class Upstream:
         """Spend this thread's connection, a failed or abandoned exchange's, unless another thread has it now."""
         self.forget(idle=True)
 
+    def release(self):
+        """Let go of this thread's connection after a response read to its end: it stays in the pool, whatever
+        becomes of the client, for any thread to take. Never for a response cut short: that is `drop`."""
+        conn = getattr(self.local, "conn", None)
+        self.local.conn = None
+        if conn is not None:
+            self.pool.disown(conn)
+
     def close(self):
         """Close this thread's connection and every idle one."""
         self.drop()

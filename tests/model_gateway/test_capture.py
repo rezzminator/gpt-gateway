@@ -1,9 +1,12 @@
 """Tests for model_gateway.capture: off by default, on by setting or env, one folder per exchange, secrets redacted."""
+import errno
 import http.client
 import json
 import os
 import unittest
+from unittest import mock
 
+from model_gateway import capture, clock, handles
 from tests import fakes, jail
 from tests.fakes import RECORDER, Upstream, calls
 
@@ -72,6 +75,48 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual([(e["request_id"], e["fields"]["error"].startswith("NotADirectoryError"))
                           for e in fakes.events(rt, "capture_error")], [(1, True)])
+
+
+class CaptureShortageTest(unittest.TestCase):
+    """A capture that runs the process out of handles counts it, says so once per window, and never raises."""
+
+    def setUp(self):
+        handles.THROTTLE.clear()
+        self.root = os.path.join(jail.scratch(self), "cap")
+        self.events, self.now = [], [1000.0]
+        patcher = mock.patch.object(clock, "monotonic", lambda: self.now[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def exchange(self, seq, **failing):
+        """One exchange, every step run, in which the named `os`/`open` call fails with EMFILE."""
+        short = OSError(errno.EMFILE, "Too many open files")
+        with mock.patch("model_gateway.capture.os.makedirs", side_effect=short if "makedirs" in failing else os.makedirs), \
+                mock.patch("builtins.open", side_effect=short if "open" in failing else open):
+            cap = capture.Capture(self.root, seq, "POST", "/v1/messages", {"x": "1"}, "main",
+                                  lambda kind, **fields: self.events.append((kind, fields)))
+            cap.request_body(b"{}")
+            cap.response(200, "OK", [("a", "b")])
+            cap.chunk(b"data")
+            cap.close()
+
+    def test_running_out_of_handles_is_one_event_per_window_with_the_held_back_count(self):
+        for seq, failing in enumerate(("makedirs", "makedirs", "open", "makedirs"), 1):
+            self.exchange(seq, **{failing: True})
+        self.assertEqual([k for k, _ in self.events], ["fd_exhausted"])
+        fields = self.events[0][1]
+        self.assertEqual((fields["where"], fields["suppressed"]), ("capture", 0))
+        self.assertIn("Too many open files", fields["error"])
+        self.now[0] += handles.EVENT_SECONDS + 1
+        self.exchange(5, makedirs=True)
+        self.assertEqual([(k, f["suppressed"]) for k, f in self.events], [("fd_exhausted", 0), ("fd_exhausted", 3)])
+
+    def test_any_other_failure_stays_a_capture_error(self):
+        blocker = os.path.join(jail.scratch(self), "a-file")
+        open(blocker, "w").close()
+        self.root = blocker
+        self.exchange(1)
+        self.assertEqual([k for k, _ in self.events], ["capture_error"])
 
 
 if __name__ == "__main__":

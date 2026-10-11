@@ -15,7 +15,8 @@ from . import clock, handles
 from .proxy import Handler
 
 REQUEST_QUEUE_SIZE = 256  # the listen backlog; the stdlib's 5 reset a burst of simultaneous connects (the kernel caps it)
-ACCEPT_BACKOFF = 0.1  # seconds to wait after a failed accept, so a listener that cannot accept does not spin
+ACCEPT_BACKOFF = 0.1  # seconds to wait after a first failed accept, so a listener that cannot accept does not spin
+ACCEPT_BACKOFF_MAX = 2.0  # the wait doubles with each failure in a row, up to this
 
 
 class Drain:
@@ -77,6 +78,7 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = REQUEST_QUEUE_SIZE
+    accept_failures = 0  # accepts that failed in a row
 
     def __init__(self, address, runtime, handler=Handler):
         self.runtime = runtime
@@ -89,16 +91,20 @@ class Server(ThreadingHTTPServer):
     def get_request(self):
         # socketserver swallows an accept failure; a process out of descriptors is the one that matters.
         try:
-            return super().get_request()
+            accepted = super().get_request()
         except OSError as error:
             shortage = handles.diagnose(error)
             if shortage is None:
                 handles.announce(self.runtime.db.event, "accept_failed", error=repr(error))
             else:
                 handles.announce(self.runtime.db.event, "fd_exhausted", where="accept", error=repr(error),
-                               open=shortage.open, limit=shortage.limit)
-                clock.sleep(ACCEPT_BACKOFF)
+                                 open=shortage.open, limit=shortage.limit)
+            self.accept_failures += 1
+            doublings = min(self.accept_failures - 1, 16)  # 2 ** 1024 overflows a float; 16 is past the bound already
+            clock.sleep(min(ACCEPT_BACKOFF * 2 ** doublings, ACCEPT_BACKOFF_MAX))
             raise
+        self.accept_failures = 0
+        return accepted
 
     def handle_error(self, request, client_address):
         # Claude Code drops idle keep-alive connections; that is not an error worth a traceback.
@@ -127,6 +133,8 @@ def serve(runtime, server):
     server.serve_forever()
     server.server_close()  # no new connections from here on; the successor takes them
     left = runtime.drain.wait(runtime.env.drain_seconds, runtime.log.write)
+    if runtime.chatgpt is not None:
+        runtime.chatgpt.client.close()
     runtime.db.event("stop", left=left, drain_seconds=runtime.env.drain_seconds)
     if not runtime.db.close(5.0):
         runtime.log.write("stop: the database writer did not finish within 5s; the rows still queued are lost")

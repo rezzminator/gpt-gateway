@@ -68,3 +68,34 @@ class ReaderTest(unittest.TestCase):
         self.assertIsNone(reader.first_byte_at)
         self.assertIsInstance(reader.transport_exception, http.client.IncompleteRead)
         self.assertEqual(reader.transport_error, "IncompleteRead(0 bytes read)")
+
+    def test_a_reply_read_to_its_terminal_event_is_complete_and_one_cut_short_is_not(self):
+        # one event per read, as the WebSocket answer reads: the relay has taken only the first when the client leaves
+        events = [event + b"\n\n" for event in fakes.responses_turn().split(b"\n\n") if event]
+        for sent, complete in (([fakes.responses_turn(), b""], True),
+                               (events + [b""], True),  # the terminal event still queued, unread by the relay
+                               ([fakes.responses_event("response.output_text.delta", delta="x"), b""], False)):
+            upstream = Mock()
+            upstream.will_close = False
+            upstream.read1.side_effect = sent
+            reader = Reader(upstream, Translator("gpt-test", {}, 10), Mock())
+            self.assertTrue(reader.next())
+            reader.thread.join(5)
+            self.assertEqual(reader.complete(), complete)
+
+    def test_abandoned_it_reports_the_usage_it_already_holds_and_invents_nothing(self):
+        for sent, reported in (([fakes.responses_turn(), b""], True),
+                               ([fakes.responses_event("response.output_text.delta", delta="x"), b""], False)):
+            upstream = Mock()
+            upstream.read1.side_effect = sent
+            translator = Translator("gpt-test", {}, 10)
+            reader = Reader(upstream, translator, Mock())
+            reader.thread.join(5)
+            reader.on_end = done = Mock()
+            reader.abandon()
+            reader.abandon()
+            self.assertEqual((done.call_count, translator.usage is not None, translator.error), (int(reported), reported, None))
+            self.assertEqual(reader.next(), b"")
+            self.assertEqual(done.call_count, int(reported))
+            self.assertTrue(reader.stop.is_set())
+            self.assertEqual((reader.terminal_at is not None, reader.ended_at is not None), (reported, reported))

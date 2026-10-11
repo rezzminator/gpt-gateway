@@ -81,7 +81,9 @@ class CoreEnv:
             parts.port
         except ValueError as e:
             raise EnvError("env %s: bad port in %r: %s" % (UPSTREAM, upstream, e))
-        log_path = os.path.expanduser(value(env, LOG) or DEFAULT_LOG)
+        log_path = under_home(env, value(env, LOG) or DEFAULT_LOG, "the log, or set %s" % LOG)
+        if not os.path.isabs(log_path):
+            raise EnvError("env %s: must be an absolute path, got %r" % (LOG, log_path))
         raw = value(env, DRAIN_SECONDS)
         drain = DEFAULT_DRAIN_SECONDS
         if raw is not None:

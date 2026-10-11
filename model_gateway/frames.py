@@ -12,6 +12,7 @@ from .upstream import UpstreamError
 
 CONTINUATION, TEXT, BINARY, CLOSE, PING, PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA  # § 5.2
 MESSAGE_LIMIT = 64 * 1024 * 1024
+SEND_SECONDS = 2  # how long `alive` waits to send a pong or a ping: it runs on a thread that must not hang
 
 
 def mask(data, key):
@@ -106,9 +107,10 @@ class WebSocket:
                     raise UpstreamError("websocket protocol error: a binary message")
                 return b"".join(parts)
 
-    def alive(self):
-        """Whether a socket nobody read while it idled is still open; answers the pings the server sent meanwhile.
-        False once the server closed it, reset it, or sent anything but a ping or pong."""
+    def alive(self, ping=False):
+        """Whether a socket nobody read while it idled is still open; answers the pings the server sent meanwhile, and
+        with `ping` sends one of its own after them. False once the server closed it, reset it, or sent anything but a
+        ping or pong. Sends wait at most SEND_SECONDS."""
         if self.closed:
             return False
         try:
@@ -124,14 +126,22 @@ class WebSocket:
                 pass
             finally:
                 self.sock.settimeout(timeout)
-            while True:
-                frame = self._frame(block=False)
-                if frame is None:
-                    return True
-                if frame[1] == PING:
-                    self.send(frame[2], PONG)
-                elif frame[1] != PONG:
-                    return False
+            self.sock.settimeout(SEND_SECONDS)
+            try:
+                while True:
+                    frame = self._frame(block=False)
+                    if frame is None:
+                        break
+                    if frame[1] == PING:
+                        self.send(frame[2], PONG)
+                    elif frame[1] != PONG:  # a close or a stray message: dead for good, whoever asks next
+                        self.closed = True
+                        return False
+                if ping:
+                    self.send(b"", PING)
+                return True
+            finally:
+                self.sock.settimeout(timeout)
         except (OSError, UpstreamError):
             return False
 

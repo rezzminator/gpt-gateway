@@ -45,12 +45,13 @@ def _compact_json(value):
 # codex-rs/codex-api/src/common.rs:278-304; core/src/client.rs:947-1071.
 # claude-code-proxy/src/providers/codex/translate/request.rs:480-549.
 def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None,
-              agent_contract: bool = False) -> Translation:
+              agent_contract: bool = False, retention: Optional[str] = None) -> Translation:
     """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded.
 
     effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork or a compaction
     request to its lane. agent_contract appends AGENT_CONTRACT to the system text's developer item, a second part so
-    the system text itself, and the model-switch text quoting it, stay byte-identical."""
+    the system text itself, and the model-switch text quoting it, stay byte-identical. retention, when given
+    ("24h"), rides as prompt_cache_retention right after the cache key; nothing else in the body changes."""
     registered, deferred, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
@@ -93,6 +94,8 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     result['store'] = False
     result['include'] = ['reasoning.encrypted_content']
     result['prompt_cache_key'] = lane_key
+    if retention is not None:
+        result['prompt_cache_retention'] = retention
     text = {}
     if model.default_verbosity is not None:
         text['verbosity'] = model.default_verbosity

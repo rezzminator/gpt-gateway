@@ -124,9 +124,38 @@ class Route:
         self.catalog = Catalog(knobs, self.client, self.store, event)
         self.lanes = {}
         self.lock = threading.Lock()
+        self.retention_settings = None  # the settings snapshot the last exchange ran under
+        self.retention_rejected = False  # the backend refused it: no exchange sends it until the settings change
 
     def decide(self, method, path, body, headers):
         return decide(self.catalog, method, path, body, headers)
+
+    def retention_sends(self, settings):
+        """The cache retention to send under the settings snapshot `settings`: None when off or refused. Any change of
+        the settings, a new snapshot, re-asks, whether or not a request ran in between."""
+        with self.lock:
+            if settings is not self.retention_settings:
+                self.retention_settings, self.retention_rejected = settings, False
+            requested = settings.chatgpt_cache_retention
+            return None if requested == "off" or self.retention_rejected else requested
+
+    def retention_state(self, settings):
+        """The health line's word under the settings snapshot `settings`: off, 24h, or 24h(rejected)."""
+        requested = settings.chatgpt_cache_retention
+        with self.lock:
+            refused = self.retention_rejected and settings is self.retention_settings
+        return requested + "(rejected)" if refused and requested != "off" else requested
+
+    def reject_retention(self, settings, request_id, key, slug):
+        """The backend refused the retention of `settings`: stop sending it, and say so once however many exchanges meet
+        the refusal. A refusal under settings that changed since is the `retry` event's `drop_retention` alone."""
+        with self.lock:
+            current = settings is self.retention_settings
+            first = current and not self.retention_rejected
+            self.retention_rejected = self.retention_rejected or current
+        if first:
+            self.event("retention_rejected", request_id=request_id, lane=key, slug=slug,
+                       retention=settings.chatgpt_cache_retention)
 
     def lane_state(self, key):
         with self.lock:
@@ -174,8 +203,10 @@ class Route:
                 empty=translator.empty)
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
-    def exchange(self, body, model, headers, path, cap, started=None, row=None):
-        """The response for one request; `row`, the request's row, gets the lane, the slug and the attempts' fields."""
+    def exchange(self, body, model, headers, path, cap, started=None, row=None, settings=None):
+        """The response for one request; `row`, the request's row, gets the lane, the slug and the attempts' fields.
+        `settings`: the request's settings snapshot, whose cache retention goes on each Responses request unless the
+        backend refused it; None sends none."""
         measure = Measure(clock.monotonic() if started is None else started)
         silent = False  # the one free retry of a kept-alive connection that died before any body byte
         key = lane.key(headers.get("x-claude-code-session-id", ""), headers.get("x-claude-code-agent-id", ""))
@@ -188,7 +219,8 @@ class Route:
             summary = where == turn.FORK or request.compaction(body)  # sent at another effort than the lane's turns
             with self.lock:
                 pinned = state.effort if summary else None
-            translation = request.translate(body, model, key, pinned, self.agent_contract)
+            sending = None if settings is None else self.retention_sends(settings)
+            translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
@@ -264,9 +296,12 @@ class Route:
                 continue
             can_retry = (decision.retry and attempt <= errors.MAX_RETRIES
                          and (decision.delay is None or decision.delay <= errors.MAX_ADVISED_SLEEP))
-            if decision.refresh and refreshed or decision.drop_reasoning and dropped:
+            strip = decision.drop_retention and sending is not None
+            unsent = decision.drop_retention and sending is None  # nothing to strip: judged as any other failure
+            if decision.refresh and refreshed or decision.drop_reasoning and dropped or unsent and status in (400, 422):
                 can_retry = False
-            action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning else "retry")
+            action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning
+                      else "drop_retention" if strip else "retry")
             self._attempt_event(row, key, model.slug, status, attempt, action if can_retry else "final", head,
                                 credentials, decision.delay)
             if not can_retry:
@@ -278,14 +313,19 @@ class Route:
                 if decision.refresh:
                     refreshed = True
                     credentials = self.store.credentials(force_refresh=True)
+                if strip:
+                    self.reject_retention(settings, row.get("request_id"), key, model.slug)
+                    sending = None
                 if decision.drop_reasoning:
                     dropped = True
                     body = without_reasoning(body)
-                    translation = request.translate(body, model, key, pinned, self.agent_contract)
+                if decision.drop_reasoning or strip:
+                    translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
                     cap.sent_body(translation.body_bytes)
                     with self.lock:
                         estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
-                    self.event("drop_reasoning", request_id=row.get("request_id"), lane=key, slug=model.slug)
+                    if decision.drop_reasoning:
+                        self.event("drop_reasoning", request_id=row.get("request_id"), lane=key, slug=model.slug)
             except auth.LoginRequired as error:
                 return login_required(str(error))
             except auth.AuthError as error:

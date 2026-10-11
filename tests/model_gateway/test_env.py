@@ -48,19 +48,32 @@ class CoreEnvTest(unittest.TestCase):
         core = env.CoreEnv.parse({"HOME": "/jail"})
         self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug),
                          (18787, "https://api.anthropic.com", 600.0, False))
-        self.assertEqual(core.log_path, os.path.expanduser("~/Library/Logs/model-gateway.log"))
+        self.assertEqual(core.log_path, "/jail/Library/Logs/model-gateway.log")
         self.assertEqual(core.db_path, "/jail/.local/state/model-gateway/gateway.db")
 
     def test_the_database_resolves_against_the_mappings_home_never_the_process_home(self):
         with patch.dict(os.environ, {"HOME": "/process-home"}):
             self.assertEqual([env.CoreEnv.parse(m).db_path for m in (
-                {"HOME": "/jail"}, {"HOME": "/jail", "MODEL_GATEWAY_DB": "~/x/gw.db"}, {"MODEL_GATEWAY_DB": "/abs/gw.db"})],
+                {"HOME": "/jail"}, {"HOME": "/jail", "MODEL_GATEWAY_DB": "~/x/gw.db"},
+                {"MODEL_GATEWAY_DB": "/abs/gw.db", "MODEL_GATEWAY_LOG": "/abs/gw.log"})],
                 ["/jail/.local/state/model-gateway/gateway.db", "/jail/x/gw.db", "/abs/gw.db"])
             for mapping, named in (({}, "env HOME"), ({"HOME": "relative"}, "env HOME"),
                                    ({"HOME": "/jail", "MODEL_GATEWAY_DB": "gw.db"}, "env MODEL_GATEWAY_DB")):
                 with self.subTest(mapping=mapping), self.assertRaises(env.EnvError) as cm:
                     env.CoreEnv.parse(mapping)
                 self.assertIn(named, str(cm.exception))
+
+    def test_the_log_resolves_against_the_mappings_home_never_the_process_home(self):
+        with patch.dict(os.environ, {"HOME": "/process-home"}):
+            self.assertEqual([env.CoreEnv.parse(m).log_path for m in (
+                {"HOME": "/jail", "MODEL_GATEWAY_LOG": "~/x/gw.log"},
+                {"MODEL_GATEWAY_LOG": "/abs/gw.log", "MODEL_GATEWAY_DB": "/abs/gw.db"})],
+                ["/jail/x/gw.log", "/abs/gw.log"])  # the default under HOME: test_defaults
+            with self.assertRaisesRegex(env.EnvError, "env HOME: an absolute path is required for the log"):
+                env.CoreEnv.parse({"MODEL_GATEWAY_DB": "/abs/gw.db"})
+            for raw in ("gw.log", "~", "~other/gw.log"):  # never the working directory, never left literal
+                with self.assertRaisesRegex(env.EnvError, "env MODEL_GATEWAY_LOG: must be an absolute path"):
+                    env.CoreEnv.parse({"HOME": "/jail", "MODEL_GATEWAY_LOG": raw})
 
     def test_every_knob_is_read_under_its_prefix(self):
         core = env.CoreEnv.parse({"MODEL_GATEWAY_PORT": "1234", "MODEL_GATEWAY_UPSTREAM": "http://127.0.0.1:9",
@@ -79,7 +92,7 @@ class CoreEnvTest(unittest.TestCase):
                           ("MODEL_GATEWAY_UPSTREAM", "ftp://x"), ("MODEL_GATEWAY_UPSTREAM", "http://h:port"),
                           ("MODEL_GATEWAY_DRAIN_SECONDS", "-1"), ("MODEL_GATEWAY_DRAIN_SECONDS", "soon")):
             with self.assertRaises(env.EnvError) as cm:
-                env.CoreEnv.parse({name: raw})
+                env.CoreEnv.parse({"HOME": "/jail", name: raw})
             self.assertIn("env " + name, str(cm.exception))
 
     def test_the_chatgpt_transport_is_websocket_unless_set_to_http(self):

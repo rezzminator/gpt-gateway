@@ -143,7 +143,7 @@ class Translator:
             self.error = decision
             self._pending.clear()
             return b""
-        self.error = replace(decision, retry=False, refresh=False, drop_reasoning=False)
+        self.error = replace(decision, retry=False, refresh=False, drop_reasoning=False, drop_retention=False)
         out = b"".join(self._close(key) for key in list(self._blocks))
         return out + errors.classify(None, payload, "after-output")
 

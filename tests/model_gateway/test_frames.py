@@ -94,6 +94,11 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(ws.sock.gettimeout(), 5)
         peer.sendall(server_frame(frames.TEXT, b"{}"))
         self.assertFalse(ws.alive())
+        self.assertFalse(ws.alive(), "a socket found dead read as live once its stray frame was consumed")
+        ws, peer = self.pair()
+        peer.sendall(server_frame(frames.CLOSE, b"\x03\xe8"))  # the server ended it, its TCP still open
+        self.assertFalse(ws.alive())
+        self.assertFalse(ws.alive())
         ws, peer = self.pair()
         peer.close()
         self.assertFalse(ws.alive())

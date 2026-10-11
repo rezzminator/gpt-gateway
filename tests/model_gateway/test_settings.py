@@ -74,15 +74,16 @@ class CoreSettingsTest(SettingsCase):
                          (None, self.mdir, (), "missing"))
         self.assertEqual(dict(snap.sources), {"capture_dir": "default", "middleware_dir": "default",
                                               "middleware": "default", "chatgpt": "default",
-                                              "db_retention_days": "default"})
-        self.assertEqual(snap.db_retention_days, 30)
+                                              "db_retention_days": "default", "chatgpt_cache_retention": "default"})
+        self.assertEqual((snap.db_retention_days, snap.chatgpt_cache_retention), (30, "off"))
 
     def test_reads_the_file(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw", "middleware": []})
         snap = self.loaded().current()
         self.assertEqual((snap.capture_dir, snap.middleware_dir, snap.state), ("/cap", "/mw", "ok"))
         self.assertEqual(dict(snap.sources), {"capture_dir": "file", "middleware_dir": "file", "middleware": "file",
-                                              "chatgpt": "default", "db_retention_days": "default"})
+                                              "chatgpt": "default", "db_retention_days": "default",
+                                              "chatgpt_cache_retention": "default"})
 
     def test_env_wins_over_the_file_which_wins_over_the_default(self):
         self.write({"capture_dir": "/cap", "middleware_dir": "/mw"})
@@ -122,6 +123,22 @@ class CoreSettingsTest(SettingsCase):
             with self.assertRaisesRegex(SettingsError, "db_retention_days must be a whole number of days >= 1, got"):
                 self.loaded()
 
+    def test_chatgpt_cache_retention_is_off_or_24h_and_applies_without_a_restart(self):
+        s = self.loaded()
+        self.assertEqual((s.current().chatgpt_cache_retention, s.current().sources["chatgpt_cache_retention"]),
+                         ("off", "default"))
+        self.write({"chatgpt_cache_retention": "24h"}, bump=1)
+        self.assertEqual((s.current().chatgpt_cache_retention, s.current().sources["chatgpt_cache_retention"]),
+                         ("24h", "file"))
+        self.assertEqual(self.events[-1][1]["chatgpt_cache_retention"], "24h")
+        self.assertEqual(self.events[-1][0], "settings_reload")
+        self.write({"chatgpt_cache_retention": "off"}, bump=2)
+        self.assertEqual(s.current().chatgpt_cache_retention, "off")
+        for bad in ("1h", "24H", "on", 24, True, None):
+            self.write({"chatgpt_cache_retention": bad})
+            with self.assertRaisesRegex(SettingsError, "chatgpt_cache_retention must be off or 24h, got"):
+                self.loaded()
+
     def test_a_bad_env_value_is_refused_not_defaulted(self):
         for env in ({"MODEL_GATEWAY_CAPTURE_DIR": "relative"}, {"MODEL_GATEWAY_MIDDLEWARE_DIR": "rel/mw"}):
             with self.assertRaises(SettingsError) as cm:
@@ -135,7 +152,7 @@ class CoreSettingsTest(SettingsCase):
         self.assertEqual((s.current().capture_dir, s.current().state), ("/b", "ok"))
         self.assertEqual(self.lines, [])  # a reload goes to the database alone
         self.assertEqual(self.events[-1], ("settings_reload", {
-            "path": self.path, "state": "ok", "db_retention_days": 30,
+            "path": self.path, "state": "ok", "db_retention_days": 30, "chatgpt_cache_retention": "off",
             "settings": "capture_dir=/b(file) middleware_dir=%s(default) middleware=[](default)" % self.mdir}))
         os.remove(self.path)
         snap = s.current()

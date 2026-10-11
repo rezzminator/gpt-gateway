@@ -37,6 +37,17 @@ class RequestTest(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             translated.lite = True
 
+    def test_cache_retention_rides_right_after_the_cache_key_and_changes_nothing_else(self):
+        body = json.loads((FIXTURES / 'request_all_blocks.json').read_text())
+        plain = request.translate(body, self.model, 'lane-example')
+        self.assertEqual(request.translate(body, self.model, 'lane-example', retention=None).body_bytes, plain.body_bytes)
+        kept = json.loads(request.translate(body, self.model, 'lane-example', retention='24h').body_bytes)
+        names = list(kept)
+        self.assertEqual(names[names.index('prompt_cache_key') + 1], 'prompt_cache_retention')
+        self.assertEqual(kept['prompt_cache_retention'], '24h')
+        del kept['prompt_cache_retention']
+        self.assertEqual(kept, json.loads(plain.body_bytes))  # the cache key included
+
     def test_lite_golden_and_empty_tools(self):
         body = json.loads((FIXTURES / 'request_lite.json').read_text())
         value, translated = self.result(body, slug='gpt-6-sol', responses_lite=True)

@@ -179,7 +179,7 @@ class RouteTest(unittest.TestCase):
         self.assertTrue(2000 <= json.loads(data)["input_tokens"] < 2500, "a PDF is one flat attachment, never its payload: %s" % data)
         self.assertEqual(self.fake.seen, [])
         line = fakes.request(port, "GET", "/__gateway/health")[1]
-        self.assertIn(b" chatgpt=on catalog=1 models middleware=", line)
+        self.assertIn(b" chatgpt=on catalog=1 models cache_retention=off middleware=", line)
 
     def test_nonstream_and_login_failure(self):
         rt, port = self.gateway()

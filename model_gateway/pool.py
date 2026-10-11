@@ -112,6 +112,13 @@ class Pool:
                 return True
             return False
 
+    def disown(self, conn):
+        """Make the calling thread no longer `conn`'s last holder, so its own cleanup of that connection (`revoke` with
+        `idle`) leaves it in the pool for any thread to take."""
+        with self.lock:
+            if conn.owner is threading.current_thread():
+                conn.owner = None
+
     def clear(self):
         with self.lock:
             idle, self.idle = self.idle, []

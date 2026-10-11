@@ -14,7 +14,7 @@ import unittest
 
 from unittest import mock
 
-from model_gateway import db, handles, proxy
+from model_gateway import clock, db, handles, proxy
 from model_gateway.server import Drain, Server
 from tests import fakes, jail
 
@@ -248,6 +248,42 @@ class AcceptFailureTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn("Software caused connection abort", found[0]["fields"]["error"])
         self.assertEqual(fakes.events(rt, "fd_exhausted"), [])
+
+
+class AcceptBackoffTest(unittest.TestCase):
+    """Repeated accept failures of any kind wait longer each time, up to a bound, and a success starts over."""
+
+    def setUp(self):
+        handles.THROTTLE.clear()
+
+    def accepts(self, outcomes, failures=0):
+        """The waits and the events of a listener whose accepts end as `outcomes`, after `failures` in a row: an error is
+        raised, a string returns."""
+        server = Server.__new__(Server)
+        server.runtime = mock.Mock()
+        server.accept_failures = failures
+        waits, seen = [], []
+        for outcome in outcomes:
+            with mock.patch.object(clock, "sleep", waits.append), \
+                    mock.patch("http.server.HTTPServer.get_request",
+                               side_effect=[outcome] if isinstance(outcome, OSError) else None,
+                               return_value=outcome):
+                try:
+                    seen.append(server.get_request())
+                except OSError:
+                    seen.append(None)
+        return waits, seen, server.runtime.db.event.call_args_list
+
+    def test_waits_double_up_to_a_bound_for_any_failure_and_start_over_after_a_success(self):
+        other = OSError(errno.ECONNABORTED, "Software caused connection abort")
+        short = OSError(errno.EMFILE, "Too many open files")
+        waits, seen, events = self.accepts([other, short, other, other, other, other, other, "client", other, short])
+        self.assertEqual(waits, [0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0, 0.1, 0.2])
+        self.assertEqual(seen.count("client"), 1)
+        self.assertEqual([c[0][0] for c in events], ["accept_failed", "fd_exhausted"])
+        self.assertEqual([c[1]["suppressed"] for c in events], [0, 0])
+        # a listener failing for good, past the 1024 doublings a float holds, still waits the bound and goes on
+        self.assertEqual(self.accepts([other], failures=5000)[:2], ([2.0], [None]))
 
 
 if __name__ == "__main__":

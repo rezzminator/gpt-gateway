@@ -58,16 +58,49 @@ class Reader:
         self.client.drop()
         self.thread.join(2.0)
 
+    def complete(self):
+        """Whether the upstream's response was read to its end and its connection can serve another: the terminal event
+        arrived without an error, and the reader thread drained the body. A terminal event the reader thread queued but
+        the relay never asked for counts: the client that left is the only one missing it."""
+        self._absorb()
+        if not self.translator.terminal or self.translator.error is not None:
+            return False
+        self.thread.join(2.0)
+        return self.drained and not self.thread.is_alive() and not self.upstream.will_close
+
+    def abandon(self):
+        """The client left. Nothing more is read from the upstream, but what it already reported and the reader queued
+        still reaches the translator, so a finished response keeps its usage; any other stays unreported, never zero."""
+        if self.finished:
+            return
+        self.finished = True
+        self.stop.set()
+        self.thread.join(2.0)
+        self._absorb()
+        if self.translator.terminal:
+            self.ended_at = clock.monotonic()
+            self.terminal_at = self.terminal_at or self.ended_at
+            if self.on_end:
+                self.on_end()
+
+    def _absorb(self):
+        """Feed the translator what the reader thread already queued, up to the terminal event, never waiting on the
+        upstream; only for a relay that broke, so the translation goes nowhere."""
+        while not self.translator.terminal:
+            try:
+                chunk = self.queue.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(chunk, bytes):
+                self.translator.feed(chunk)
+
     def next(self):
         """Empty means the true terminal; empty translation chunks stay inside this loop."""
         while not self.finished:
             if self.translator.terminal:
                 self.finished = True
                 self.ended_at = clock.monotonic()
-                if self.translator.error is None:
-                    self.thread.join(2.0)
-                if (self.translator.error is None and self.drained and not self.thread.is_alive()
-                        and not self.upstream.will_close):
+                if self.complete():
                     self.stop.set()
                 else:
                     self.close()

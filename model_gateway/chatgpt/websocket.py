@@ -8,7 +8,8 @@ holds only what that socket sent. Claude Code's activity-summary fork runs while
 the agent's next request can arrive while the fork runs, so a request whose lane's socket is busy waits for it, a
 fork the longest, and opens another only once that wait runs out; every socket coming back goes to the pool as its lane's one idle socket,
 and a spare the lane already holds there closes. A socket answering anything but a completed response is closed.
-A socket keeps its last completed response for the next request to continue (continuation.py).
+A socket keeps its last completed response for the next request to continue (continuation.py), and while it idles in
+the pool the keeper (keeper.py) answers and pings it.
 """
 import collections
 import hashlib
@@ -19,7 +20,7 @@ import threading
 from .. import clock
 from ..frames import WebSocket
 from ..upstream import Upgrade, header
-from . import turn
+from . import keeper, turn
 
 PATH = "/backend-api/codex/responses"
 BETA = "responses_websockets=2026-02-06"  # codex-rs/core/src/client.rs:175
@@ -87,6 +88,8 @@ class Kept:
     def __init__(self, ws, pool_key, headers):
         self.ws, self.key, self.headers = ws, pool_key, headers
         self.opened = clock.monotonic()
+        self.touched = self.opened  # the last time the pool put it back, or the keeper pinged it
+        self.guard = threading.Lock()  # held by whoever is reading the idle socket: the keeper or a checkout
         self.exchanges = 0
         self.out = False  # checked out: one exchange owns it
         self.baseline = None  # the last exchange's completed response, which the next request may continue
@@ -103,6 +106,19 @@ class Sockets:
         self.busy = collections.Counter()  # pool key -> sockets checked out
         self.failures = 0
         self.paused_until = float("-inf")
+        self.keeper = keeper.Keeper(self)
+
+    @property
+    def max_age(self):
+        return MAX_AGE
+
+    def stop(self):
+        """End the keeper and close every idle socket; the sockets checked out go back to a pool nobody tends."""
+        self.keeper.stop()
+        with self.lock:
+            idle, self.idle = list(self.idle), collections.OrderedDict()
+        for kept in idle:
+            self.close(kept, "stopped", abort=True)
 
     def usable(self):
         with self.lock:
@@ -153,9 +169,10 @@ class Sockets:
                 if timed_out:
                     self.event("lane_wait", lane=pool_key[0], wait_s=wait)
                 return None
-            old = clock.monotonic() - kept.opened >= MAX_AGE
-            if not old and kept.ws.alive():
-                return kept
+            with kept.guard:  # the keeper may be reading it
+                old = clock.monotonic() - kept.opened >= MAX_AGE
+                if not old and kept.ws.alive():
+                    return kept
             self.close(kept, "age" if old else "closed-while-idle")
 
     def checkin(self, kept):
@@ -167,6 +184,8 @@ class Sockets:
             for spare in spares:
                 del self.idle[spare]
             self.idle[kept] = None
+            kept.touched = clock.monotonic()
+            self.keeper.ensure()
             over = [self.idle.popitem(last=False)[0] for _ in range(len(self.idle) - MAX_KEPT)]
         for spare in spares:
             self.close(spare, "lane-spare")
@@ -210,7 +229,8 @@ class Sockets:
     def close(self, kept, reason, abort=False):
         with self.lock:
             self._returned(kept)
-        (kept.ws.abort if abort else kept.ws.close)()
+        with kept.guard:  # the keeper may be reading it; never a caller already holding the guard
+            (kept.ws.abort if abort else kept.ws.close)()
         self.event("websocket_close", lane=kept.key[0], reason=reason, age_s=int(clock.monotonic() - kept.opened),
                    exchanges=kept.exchanges)
 

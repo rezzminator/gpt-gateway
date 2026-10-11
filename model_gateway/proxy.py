@@ -223,7 +223,8 @@ class Handler(BaseHTTPRequestHandler):
                               note, body, cap, started, None, row)
         if selected[0] == "chatgpt":
             resp = selected[2] or rt.chatgpt.exchange(req.body if sent is not raw else body,
-                                                     selected[1], self.headers, self.path, cap, started, row)
+                                                     selected[1], self.headers, self.path, cap, started, row,
+                                                     snap)
             return self.relay(rt, ctx, resp, note, body, cap, started, rt.chatgpt.client, row)
         headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # a repeated header goes as sent
         headers.append(("accept-encoding", "identity"))
@@ -242,6 +243,14 @@ class Handler(BaseHTTPRequestHandler):
                                                   clock.monotonic() - started, note))
             return
         self.relay(rt, ctx, resp, note, body, cap, started, rt.upstream, row, sent_at)
+
+    def spend(self, upstream, resp):
+        """The relay broke: a response read to its end leaves its connection in the pool, any other spends it, and the
+        reader of a streamed ChatGPT body records what the upstream had reported. `upstream`: None for a hook's answer."""
+        if upstream is not None:
+            (upstream.release if resp.complete() else upstream.drop)()
+        if hasattr(resp, "abandon"):
+            resp.abandon()
 
     def relay(self, rt, ctx, resp, note, body, cap, started, upstream, row, sent_at=None):
         """Relay `resp` to the client and record its row; `upstream` is the connection a broken relay spends,
@@ -286,13 +295,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             completed = True
         except (BrokenPipeError, ConnectionResetError):
-            if upstream is not None:
-                upstream.drop()  # the client left mid-stream; this upstream connection is spent
+            self.spend(upstream, resp)  # the client left mid-stream
             disconnected = True
             self.close_connection = True
         except Exception as e:
-            if upstream is not None:
-                upstream.drop()
+            self.spend(upstream, resp)
             failure = repr(e)
             self.close_connection = True
         if sink is not None:

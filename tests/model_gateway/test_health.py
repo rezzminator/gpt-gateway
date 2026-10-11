@@ -33,10 +33,12 @@ class HealthTest(unittest.TestCase):
         from model_gateway.health import health_line
         rt, _ = fakes.start_gateway(self)
         rt.chatgpt = route = Mock()
-        for count, expected in [(None, "none"), (0, "0 models"), (2, "2 models")]:
+        for count, expected, state in [(None, "none", "off"), (0, "0 models", "24h"), (2, "2 models", "24h(rejected)")]:
             route.catalog.count.return_value = count
+            route.retention_state.return_value = state
             line = health_line(rt.settings.snapshot, rt)
-            self.assertIn(" chatgpt=on catalog=" + expected + " middleware=", line)
+            self.assertIn(" chatgpt=on catalog=%s cache_retention=%s middleware=" % (expected, state), line)
+            route.retention_state.assert_called_with(rt.settings.snapshot)
         route.catalog.models.assert_not_called()
 
     def test_no_settings_no_middleware(self):

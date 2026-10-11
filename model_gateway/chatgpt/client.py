@@ -112,6 +112,15 @@ class Client:
         finally:
             self.drop()
 
+    def release(self):
+        """Let go of a response read to its end: its reader stops without a cancel, so the socket or connection it rode
+        settles back in its pool; `drop` is for a response cut short."""
+        reader = getattr(self.local, "reader", None)
+        self.local.reader = self.local.answer = None
+        if reader is not None:
+            reader.stop.set()
+        self.upstream.release()
+
     def watch(self, reader):
         self.local.reader = reader
 
@@ -126,3 +135,9 @@ class Client:
             answer.abort()
         # The serving thread owns the connection; the response reader may be blocked on it.
         self.upstream.abort()
+
+    def close(self):
+        """End the keeper, close the idle sockets and this client's idle connections."""
+        if self.sockets is not None:
+            self.sockets.stop()
+        self.upstream.close()

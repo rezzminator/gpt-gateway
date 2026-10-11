@@ -24,6 +24,17 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(json.loads(up.send("POST", "/x", b"{}", HEADERS).read()), {"n": 2})
         self.assertIsNot(up.local.conn, first)
 
+    def test_a_released_connection_stays_pooled_where_a_dropped_one_is_closed(self):
+        up = Upstream(fakes.start_upstream(self))
+        for release in (True, False):
+            up.send("POST", "/v1/json", b"{}", HEADERS).read()
+            conn = up.local.conn
+            if release:
+                up.release()
+            up.drop()
+            self.assertEqual((up.pool.idle == [conn], conn.sock is not None), (release, release))
+            up.pool.clear()
+
     def test_reuse_reports_a_kept_alive_connection_and_the_stale_retry(self):
         ClosingUpstream.count[0] = 0
         up = Upstream(fakes.start_upstream(self, ClosingUpstream))
