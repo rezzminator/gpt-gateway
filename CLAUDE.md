@@ -39,7 +39,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 
 ## Code
 
-- One façade per mechanism: environment reads only in `model_gateway/env.py`, time only in `model_gateway/clock.py`, the log only through `model_gateway/log.py`, the settings file name only in `model_gateway/settings.py`, HTTP connections only in `model_gateway/upstream.py`, capture file names only in `model_gateway/capture.py`, the database only through `model_gateway/db.py`.
+- One façade per mechanism: environment reads only in `model_gateway/env.py`, time only in `model_gateway/clock.py`, the log only through `model_gateway/log.py`, the settings file name only in `model_gateway/settings.py`, HTTP connections only in `model_gateway/upstream.py` and its pool `model_gateway/pool.py`, capture file names only in `model_gateway/capture.py`, the database only through `model_gateway/db.py`, the open-file limit and the open-handle count only in `model_gateway/handles.py`.
 - The contract moves as one: a change to a hook, a `Context` field or a `Result` field lands in `model_gateway/hooks.py`, `model_gateway/harness.py`, `README.md` § Middleware and the example in the same change.
 - A hook failure never cuts a stream or forwards a half-edited body: the core catches it, records it once as a `middleware_failed` event, counts it, and goes on as if that hook were absent.
 
