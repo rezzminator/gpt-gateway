@@ -6,7 +6,9 @@ and answers it with a label built from the sub-agent's last tool call, as an Ant
 request asks for one), on either route. Any other request passes untouched: a Claude Code release that rewords the
 prompt only turns the answer off. The answer's row says `answered_by` `status-label`.
 
-Shipped with gpt-gateway; a fresh install lists it in settings.json as `{"module": "status_label"}`.
+Shipped with gpt-gateway; a fresh install lists it in settings.json as `{"module": "status_label"}`. Its setting
+`answer` is `always` (every fork is answered, the default) or `marked` (only a fork whose request carries the header
+`x-cache-live-control-summaries: block`, which the cache-live-control plugin's `/cache summaries off` sets).
 """
 import json
 import posixpath
@@ -24,6 +26,11 @@ EXAMPLES = ('Good: "Reading runAgent.ts"\nGood: "Fixing null check in validate.t
             'Bad (too vague): "Investigating the issue"\n'
             'Bad (too long): "Reviewing full branch diff and AgentTool.tsx integration"\n'
             'Bad (branch name): "Analyzed adam/background-summary branch diff"\n')
+# Claude Code 2.1.296 ends the prompt at the last example's closing quote, earlier releases with a newline after it.
+EXAMPLES_BARE = EXAMPLES.rstrip("\n")
+MARK_HEADER = "x-cache-live-control-summaries"
+MARK_BLOCK = "block"
+ANSWERS = ("always", "marked")
 PREVIOUS = re.compile('Previous: "[^\n]*" — say something NEW\\.\n\n')
 
 MAX_WORDS = 5
@@ -49,12 +56,14 @@ FALLBACK_WORDS = re.compile(r"&&|\|\||[;|&<>()]|[^\s;|&<>()]+")
 
 def is_label_ask(text):
     """True when `text` is Claude Code's prompt, with or without its `Previous: "…" — say something NEW.` paragraph."""
-    if not isinstance(text, str) or len(text) < len(ASK) + len(EXAMPLES):
+    if not isinstance(text, str) or not text.startswith(ASK):
         return False
-    if not text.startswith(ASK) or not text.endswith(EXAMPLES):
-        return False
-    middle = text[len(ASK):len(text) - len(EXAMPLES)]
-    return middle == "" or PREVIOUS.fullmatch(middle) is not None
+    for examples in (EXAMPLES, EXAMPLES_BARE):
+        if len(text) >= len(ASK) + len(examples) and text.endswith(examples):
+            middle = text[len(ASK):len(text) - len(examples)]
+            if middle == "" or PREVIOUS.fullmatch(middle) is not None:
+                return True
+    return False
 
 
 def fork_message(ctx, req):
@@ -211,9 +220,23 @@ def answer_body(label_text, model, request_id, stream):
     return "text/event-stream", data.encode("utf-8")
 
 
+def answer_value(value):
+    if value in ANSWERS:
+        return value
+    raise ValueError("answer must be one of %s, got %s" % (", ".join(ANSWERS), json.dumps(value)))
+
+
+SETTINGS = {"answer": ("always", answer_value, "GPT_GATEWAY_STATUS_LABEL_ANSWER")}
+
+
+def marked(ctx):
+    """True when the request carries the plugin's header with the word `block`."""
+    return str(ctx.headers.get(MARK_HEADER) or "").strip().lower() == MARK_BLOCK
+
+
 def on_request(ctx, req):
     fork = fork_message(ctx, req)
-    if fork is None:
+    if fork is None or (ctx.settings["answer"] == "marked" and not marked(ctx)):
         return None
     content_type, data = answer_body(label(req.body["messages"], fork), ctx.model, ctx.request_id,
                                      req.body.get("stream") is True)

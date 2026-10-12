@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 
-from gpt_gateway.harness import run
+from gpt_gateway.harness import SettingsError, load, run
 from tests import jail
 
 MODULE = os.path.join(jail.ROOT, "middleware", "status_label.py")
@@ -111,7 +111,20 @@ class LabelTest(unittest.TestCase):
                 self.assertEqual(answered_label(run(MODULE, body=body, headers=SUB, response=RECORDED)), expected)
 
 
+MARKED = {"x-claude-code-agent-id": "agent-invented", "x-cache-live-control-summaries": "block"}
+
+
 class DetectionTest(unittest.TestCase):
+    def test_the_prompt_without_its_final_newline_is_answered(self):
+        # Claude Code 2.1.296 ends its prompt at the last example's closing quote.
+        bare = ask()[:-1]
+        self.assertTrue(bare.endswith('branch diff"'))
+        for why, text in (("first label", bare), ("previous label", ask('Reading "a.py" now')[:-1])):
+            with self.subTest(why):
+                out = run(MODULE, body=fork(call("Read", {"file_path": "a.py"}), text), headers=SUB, response=RECORDED)
+                self.assertEqual(answered_label(out), "Reading a.py")
+                self.assertIsNone(out.forwarded)
+
     def test_the_fork_is_answered_with_or_without_previous_and_past_trailing_notices(self):
         notices = ({"role": "system", "content": "A background task finished."},
                    {"role": "system", "content": [], "output_config": {"effort": "high"}})
@@ -140,6 +153,10 @@ class DetectionTest(unittest.TestCase):
                 ("ask with text after it", fork(read, ask() + "\nAlso say why."), SUB, "POST", "/v1/messages"),
                 ("previous without its dash", fork(read, ASK + 'Previous: "x" - say something NEW.\n\n' + EXAMPLES),
                  SUB, "POST", "/v1/messages"),
+                ("previous without its dash, no final newline",
+                 fork(read, ASK + 'Previous: "x" - say something NEW.\n\n' + EXAMPLES[:-1]), SUB, "POST", "/v1/messages"),
+                ("text between ask and examples, no final newline", fork(read, ASK + "Also say why.\n" + EXAMPLES[:-1]),
+                 SUB, "POST", "/v1/messages"),
                 ("ask inside a tool result", in_result, SUB, "POST", "/v1/messages"),
                 ("ask in an earlier turn", answered, SUB, "POST", "/v1/messages"),
                 ("no JSON body", b"not json", SUB, "POST", "/v1/messages")):
@@ -150,6 +167,45 @@ class DetectionTest(unittest.TestCase):
                 self.assertIsNone(out.answer)
                 self.assertEqual(out.events, run(MODULE, body=b"", response=RECORDED).events)
                 self.assertEqual(out.errors, ())
+
+
+class MarkedTest(unittest.TestCase):
+    """Setting `answer`: `always` answers every fork; `marked` only a fork whose request carries the plugin's header."""
+
+    def test_marked_answers_only_a_fork_marked_block(self):
+        body = fork(call("Read", {"file_path": "a.py"}))
+        raw = json.dumps(body).encode()
+        for why, headers, answered in (
+                ("marked block", MARKED, True),
+                ("marked block in capitals", {**SUB, "X-Cache-Live-Control-Summaries": " BLOCK "}, True),
+                ("no mark", SUB, False),
+                ("marked allow", {**SUB, "x-cache-live-control-summaries": "allow"}, False),
+                ("marked with another word", {**SUB, "x-cache-live-control-summaries": "yes"}, False)):
+            with self.subTest(why):
+                out = run(MODULE, body=raw, headers=headers, response=RECORDED, settings={"answer": "marked"})
+                self.assertEqual(out.answer is not None, answered)
+                if answered:
+                    self.assertEqual(answered_label(out), "Reading a.py")
+                else:
+                    self.assertIs(out.forwarded, raw)
+
+    def test_always_is_the_default_and_a_mark_changes_nothing(self):
+        raw = json.dumps(fork(call("Read", {"file_path": "a.py"}))).encode()
+        for settings in (None, {"answer": "always"}):
+            for headers in (SUB, MARKED):
+                with self.subTest(settings=settings, marked=headers is MARKED):
+                    out = run(MODULE, body=raw, headers=headers, response=RECORDED, settings=settings)
+                    self.assertEqual(answered_label(out), "Reading a.py")
+
+    def test_a_mark_on_a_main_session_request_answers_nothing(self):
+        raw = json.dumps(fork(call("Read", {"file_path": "a.py"}))).encode()
+        out = run(MODULE, body=raw, headers={"x-cache-live-control-summaries": "block"}, response=RECORDED,
+                  settings={"answer": "marked"})
+        self.assertIs(out.forwarded, raw)
+
+    def test_an_unknown_answer_value_fails_the_settings(self):
+        with self.assertRaises(SettingsError):
+            load(MODULE, settings={"answer": "sometimes"})
 
 
 class AnswerTest(unittest.TestCase):
