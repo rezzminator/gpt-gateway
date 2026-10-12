@@ -54,7 +54,7 @@ The environment alone sets the rest (the launchd agent sets them in its plist):
 
 ## Middleware
 
-A middleware is one Python file, `{middleware_dir}/{module}.py`, listed in `settings.json`. It never imports the gateway. Its code loads once, at start; `ctl.sh restart` reloads it. The gateway ships one, `status_label` (§ Shipped middleware). The smallest one, `examples/middleware/model_note.py`, adds ` model-note=<model>` to each request's note:
+A middleware is one Python file, `{middleware_dir}/{module}.py`, listed in `settings.json`. It never imports the gateway. Its code loads once, at start; `ctl.sh restart` reloads it. The gateway ships two, `status_label` and `advisor_cache` (§ Shipped middleware). The smallest one, `examples/middleware/model_note.py`, adds ` model-note=<model>` to each request's note:
 
 ```python
 NAME = "model-note"
@@ -122,11 +122,112 @@ out.forwarded, out.changed, out.note, out.log, out.errors, out.events, out.resul
 code, stdout, stderr = run_cli("my_mw.py", ["stats"], log_path="gw.log", db_path="gateway.db")
 ```
 
-`out.log` holds the lines the module wrote through `ctx.log`, `out.errors` each hook failure as its `middleware_failed` event's fields, and `out.row` the request's row as the database records it, its times and process left out. `run_cli` records the cli's `ctx.log` lines and a failure in the database at `db_path`, as `gateway.py mw` does; without it they are dropped. When a hook answers, `out.answer` holds its answer, `out.forwarded` is `None`, and `out.events` and `out.result` are the answer's, relayed in place of `response`, as the gateway relays it. `load()` raises `SettingsError` or `MiddlewareError` where a start would fail. `tests/examples/middleware/test_model_note.py` tests the example this way, and `tests/middleware/test_status_label.py` the shipped `status_label`.
+`out.log` holds the lines the module wrote through `ctx.log`, `out.errors` each hook failure as its `middleware_failed` event's fields, and `out.row` the request's row as the database records it, its times and process left out. `run_cli` records the cli's `ctx.log` lines and a failure in the database at `db_path`, as `gateway.py mw` does; without it they are dropped. When a hook answers, `out.answer` holds its answer, `out.forwarded` is `None`, and `out.events` and `out.result` are the answer's, relayed in place of `response`, as the gateway relays it. `load()` raises `SettingsError` or `MiddlewareError` where a start would fail. `tests/examples/middleware/test_model_note.py` tests the example this way, and `tests/middleware/test_status_label.py` and `tests/middleware/test_advisor_cache.py` the shipped `status_label` and `advisor_cache`.
 
 ### Shipped middleware
 
+An install copies every `middleware/*.py` into its `middleware/` directory, each file replacing only its own copy. A fresh install lists `status_label` in `settings.json` and nothing else; `advisor_cache` ships with it and stays off until listed.
+
+#### status_label
+
 `middleware/status_label.py` (`NAME` `status-label`) answers Claude Code's activity-summary fork in the gateway. While a sub-agent runs, Claude Code now and then sends the sub-agent's whole conversation to the sub-agent's own model again, to get a 3-5 word status label for its UI: a full context of input tokens per label, and on the ChatGPT route a turn on the lane's socket. The module recognises that request exactly, a `sub` POST to `/v1/messages` whose last turn message (`req.last_turn_message()`) is the user's and holds Claude Code's prompt as a text block, with or without its `Previous: "…" — say something NEW.` paragraph, and answers it from the last tool call of the message before: `Reading {file}`, `Editing {file}`, `Writing {file}`, `Searching for {pattern}`, `Listing {pattern}`, `Running {command}`, `Fetching {host}`, `Searching the web`, `Delegating to {agent}`, `Updating the task list`, `Loading tool definitions`, `Loading {skill} skill`, `Messaging {recipient}`, `Calling {MCP tool}`, else `Using {tool}`; `Planning the next step` after a turn without a tool call and `Starting the task` before any. A label has at most five words, a path shows as its file name, and a value is cut to 40 characters. The answer is an Anthropic message, a stream when the request asks for one, with zero input usage. Any other request passes untouched, so a Claude Code release that rewords the prompt only turns the answer off. A first install lists it; to turn it off, remove `{"module": "status_label"}` from `middleware` and `ctl.sh restart`.
+
+#### advisor_cache
+
+`middleware/advisor_cache.py` (`NAME` `advisor-cache`) gives Claude Code's advisor its prompt cache, can cap the advisor's output, and can take the advisor away from the models and sub-agents that should not carry it. It is off until `settings.json` lists it; every setting has a default, so the smallest entry is `{"module": "advisor_cache"}`:
+
+```json
+{"capture_dir": null, "middleware": [{"module": "status_label"},
+  {"module": "advisor_cache", "settings": {"ttl": "5m", "subagent_ttl": "5m", "max_tokens": 2048}}]}
+```
+
+Then `ctl.sh restart` (a changed `middleware` list applies at a restart; an edit to its `settings` applies from the next request). To turn it off, remove the entry and restart.
+
+The advisor is still Claude Code's own: Anthropic runs it on its servers. It reads what the main model's context holds, which includes the main model's thinking from the current turn but not from earlier turns. The module changes the advisor tool in the request and nothing else.
+
+**How it works.** The Anthropic API's advisor tool (`advisor_20260301`) accepts `caching: {"type": "ephemeral", "ttl": "5m" | "1h"}`, which is off by default. Claude Code 2.1.293 builds the advisor tool as `{type, name, model}` and never adds `caching`; no setting changes that, and a plugin cannot touch server tools. So on every `POST /v1/messages` whose body is a JSON object, the module works in this order, and every other request goes upstream byte for byte:
+
+1. **Scope.** A request whose `model` is outside `advisor_models`, or a `sub` request whose system text names no entry of `advisor_agents`, loses every trace of the advisor: the tool, its instruction section (in a system-role message, or a user system-reminder of its own, from its `# Advisor Tool` heading to the next heading, the reminder's close or the block's end) and its deferred-tool announcement. The model scope decides first. The strip is a pure function of the request, so a conversation's requests strip alike and the main model's prompt cache keeps matching. A conversation whose history already holds an advisor call is left whole (noted `advisor-filter-skipped: advisor in history`).
+2. **Caching.** An advisor tool without `caching` gets `{"type": "ephemeral", "ttl": TTL}`, where TTL is `ttl` for a main session (no `x-claude-code-agent-id` header) and `subagent_ttl` for a sub-agent; `off` leaves that kind's tool as sent. A conversation keeps one TTL, because a 1h request does not read an entry written at 5m (measured).
+3. **Output cap.** With `max_tokens` set, an advisor tool without its own `max_tokens` gets it.
+
+A field the request already carries is kept: if Claude Code sets `caching` or `max_tokens` itself, the module steps aside for that field (the feature request is anthropics/claude-code#91110). On the ChatGPT route the same body edit runs before the route translates the request.
+
+**Settings**, every key optional:
+
+| Key | Accepted values | Default | Env variable | What it does |
+| --- | --- | --- | --- | --- |
+| `ttl` | `"1h"`, `"5m"`, `"off"` | `"5m"` | `GPT_GATEWAY_ADVISOR_CACHE_TTL` | the cache lifetime a main session's advisor gets; a read refreshes it |
+| `subagent_ttl` | `"1h"`, `"5m"`, `"off"` | `"5m"` | `GPT_GATEWAY_ADVISOR_CACHE_TTL_SUBAGENT` | the same for sub-agents |
+| `max_tokens` | an integer of at least 1024, or `null` | `null` (no cap) | `GPT_GATEWAY_ADVISOR_MAX_TOKENS` (digits) | caps the advisor's output per call, thinking plus text |
+| `advisor_models` | a list of non-empty model IDs or ID prefixes, or `null` | `null` (every model keeps it) | `GPT_GATEWAY_ADVISOR_MODELS` (comma-separated) | the models that keep the advisor: the request's model equals an entry or starts with it, so an ID covers its dated snapshots; `[]` keeps it for none |
+| `advisor_agents` | a list of non-empty system-text fragments, or `null` | `null` (every sub-agent keeps it) | `GPT_GATEWAY_ADVISOR_AGENTS` (comma-separated) | the sub-agents that keep the advisor: their system text contains an entry verbatim; `[]` keeps it for none; main sessions are never scoped by it |
+| `agent_dirs` | a list of absolute directories (`~` expands), or `null` | `null` (`~/.claude/agents`) | `GPT_GATEWAY_ADVISOR_AGENT_DIRS` (colon-separated) | where `check` looks for the `advisor_agents` entries |
+| `debug` | `true` or `false` (env: `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`) | `false` | `GPT_GATEWAY_ADVISOR_CACHE_DEBUG` | logs each advisor request's `context_management` and `thinking` as a `middleware_log` event |
+
+Anthropic's advisor documentation reports that a `max_tokens` of `2048` cut advisor output about 7x with no detectable loss of quality; it is off by default because it changes the advice itself and not only its price. The API accepts `max_tokens` on the advisor through the subscription login (HTTP 200).
+
+`check` runs at start and at every settings reload: each `advisor_agents` entry must appear verbatim in at least one `*.md` file under the agent directories (subdirectories and symlinks followed, symlink cycles ended). A typo is then a refused start, or a refused edit that keeps the last good settings, naming the entry and every directory searched (a missing one as `(missing)`), and never a sub-agent silently losing its advisor.
+
+**What it records.** The request's note (the `note` column of `requests`) carries `model=…` and then, as they apply: `advisor-caching=5m` (added) or `advisor-caching-kept=1h` (the request's own), `advisor-max_tokens=2048`, `advisor-tool=none` (the tools hold no advisor), `advisor-agent=kept`, `advisor-filtered model=… stripped=tool,tool_reference,section` or `advisor-filtered agent stripped=…`, and `warnings=…` when the strip met something unexpected: `section-not-found` (a compacted session drops the instruction section), `section-end-unexpected` (Claude Code reworded it; the strip still ends where the next heading or the block does), `cache_control-dropped` and `message-emptied`. A warning also writes an `advisor-filter-warning` `middleware_log` event naming the request's capture folder. Each advisor call of a response is one `middleware_log` event of its request:
+
+```text
+advisor claude-opus-5-5 kind=main ttl=5m in=11 cache_read=0 cache_write=9000 out=300
+```
+
+`ttl` is the TTL the request ran at (its own caching's, else the one added; `-` when none). Read the rows with `sqlite3`:
+
+```sh
+sqlite3 ~/.local/state/gpt-gateway/gateway.db "select datetime(at, 'unixepoch', 'localtime'), request_id, json_extract(fields, '$.line') from events where kind = 'middleware_log' and json_extract(fields, '$.line') like 'advisor %' order by at desc limit 20"
+```
+
+The health line shows `advisor-cache ttl=5m subagent_ttl=5m max_tokens=- advisor_models=null advisor_agents=null`, the agent scope as its entry count.
+
+**Cost.** Caching changes only the price of the advisor's input; its output costs the same either way. Relative to reading a token uncached:
+
+- **Cache write:** 1.25x at 5m and 2x at 1h, paid on the part of the input not yet in the cache: everything on a first call or after a miss, only the new tokens on a hit.
+- **Cache read:** 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1, and 0.1x on other models. The Claude Code advisor is Opus 5.5, the 0.05x case. Prices from platform.claude.com, 2026-10-08.
+- **TTL:** a read refreshes it.
+
+Each call stores a snapshot of the advisor's input from the first token up to that call. A later call reads a snapshot only if it is an exact prefix of the later call's input; partial matches don't count. At a turn boundary that follows thinking, the earlier snapshot stops matching, because Claude Code sends that thinking back emptied (see the measurements below). So count advisor calls per turn. Take a turn with `k` advisor calls, a transcript of `T` tokens at the first call, and `δ` new tokens between calls, with Opus 5.5 as the advisor:
+
+| Calls in the turn | Uncached | 5m | 1h |
+| --- | --- | --- | --- |
+| 1 | T | 1.25T | 2T |
+| 2 | 2T + δ | 1.30T + 1.25δ | 2.05T + 2δ |
+| 3 | 3T + 3δ | 1.35T + 2.55δ | 2.1T + 4.05δ |
+
+Example: `T` = 150k and `δ` = 100k. Opus 5.5 prices per million tokens: input $4, 5m write $5, 1h write $8, cache read $0.20.
+
+| | Call 1 | Call 2 | Two calls |
+| --- | --- | --- | --- |
+| uncached | $0.60 | $1.00 | $1.60 |
+| 5m | $0.75 | $0.53 | $1.28 |
+| 1h | $1.20 | $0.83 | $2.03 |
+| 1h, with a thinking turn between the calls | $1.20 | $2.00 (miss: all 250k written) | $3.20 |
+
+- **5m** costs 25% more on a turn with one call, and wins on a turn with two or more calls less than 5 minutes apart, unless `δ` is above `2.8T`. When a gap passes 5 minutes, that call costs 1.25x instead of 1x, so the loss is bounded at 25%.
+- **1h** costs double on a turn with one call, still loses with two, and wins only from three calls in one turn, while `δ` stays below about `0.86T`. It beats 5m only when calls in one turn sit more than 5 minutes apart, or when the turns between calls have no thinking.
+
+Hence both kinds default to 5m. Price your real calls from the rows above (`in` uncached, `cache_write` at its TTL's rate, `cache_read` at the model's rate), split by `kind`; if a kind shows a loss after a few days, switch it with `ttl` or `subagent_ttl` (`off` stops caching for that kind).
+
+**Measured on 2026-10-08**, Claude Code 2.1.293, Haiku 5.5 as the main model, Opus 5.5 as the advisor:
+
+| Run | advisor call 1 | advisor call 2 |
+| --- | --- | --- |
+| without the module | 99,097 tokens read at full price | 99,413 tokens read at full price |
+| with the module, 1h | 96,642 written to the cache | 96,642 read from the cache, 200 written |
+
+- **Within a turn, the cache always holds.** Later advisor calls in the same turn read everything the earlier ones wrote, in main sessions and in sub-agents (73,107 tokens read on a sub-agent's second call at 5m).
+- **Across turns, it holds only when the earlier turn had no thinking.** The turn-1 advisor call reads the main model's thinking live. In turn 2, Claude Code sends that thinking back as an empty block with only its signature, and the API leaves earlier-turn thinking out of the context. So the advisor's cached prefix no longer matches, and its first call in the new turn re-writes everything: with no thinking in turn 1, turn 2 read all 98,518 tokens; with thinking, it read 0. This happens on the API side, and the main model's own cache misses at the same point; no gateway can change it.
+- **The advisor reads current-turn thinking only.** Adding 2,470 tokens of thinking before an advisor call added exactly 2,470 tokens to the advisor's input. Over 1,000 tokens of thinking in an earlier turn added nothing; the main model's own billed input didn't grow from it either, although Claude Code sends `clear_thinking` with `keep: "all"`.
+- **A conversation can't change TTL and keep its cache.** A 1h call after a 5m call read 0 tokens and re-wrote 99,844.
+
+**Known behaviour.**
+
+- **Parallel advisor calls don't share the cache.** When the main model puts two advisor calls in one message, both read the same prefix at the same moment, so both write it and neither reads (measured: two writes of 96,285 tokens). Only a call made after an earlier one has answered reads from the cache.
+- **Two advisor calls cached at 1h without the module adding it** (one long main session): the request that ran the advisor showed no rewrite, and the API reported the write as `ephemeral_1h_input_tokens`. Unexplained; the `advisor-caching` markers in the note tell the next one apart.
+- **With the gateway on, Claude Code doesn't see a first-party API.** `isFirstPartyAnthropicBaseUrl()` is true only for the host `api.anthropic.com`, so it is false at `http://127.0.0.1:18787`. Which features that flag gates in 2.1.294 was not traced. The advisor and its cache work through the gateway (see the measurements above).
 
 ## Health
 

@@ -7,7 +7,8 @@ import unittest
 from tests import jail
 
 # Spelled apart, so this file never matches the census it tests.
-PREDECESSOR = "adv" + "isor"
+PREDECESSOR = "adv" + "isor-gateway"
+SUBJECT = "adv" + "isor"  # the shipped middleware's subject, free to write
 OLD_NAME = "cache" + "-gateway"
 PRODUCT_VARIANT = "GPT" + " Gateway"
 FORMER_NAME = "model" + "-gateway"
@@ -136,8 +137,11 @@ VIOLATIONS = (
      "gpt_gateway/cli.py (new 1)"),
     ("facade-capture", lambda t: t.append("gpt_gateway/proxy.py", 'X = "5-response.body"\n'),
      "gpt_gateway/proxy.py (new 1)"),
-    ("spelling-predecessor", lambda t: t.append("README.md", PREDECESSOR.upper() + "\n"), "README.md (new 1)"),
+    ("spelling-predecessor", lambda t: t.append("README.md", PREDECESSOR.upper().replace("-", "_") + "_LABEL\n"),
+     "README.md (new 1)"),
     ("spelling-predecessor", lambda t: t.append("tests/fakes.py", "# " + PREDECESSOR + "\n"), "tests/fakes.py (new 1)"),
+    ("spelling-predecessor", lambda t: t.append("README.md", SUBJECT.capitalize() + " cache " + "gateway\n"),
+     "README.md (new 1)"),
     ("spelling-old-name", lambda t: t.append("README.md", OLD_NAME + "\n"), "README.md (new 1)"),
     ("spelling-product", lambda t: t.append("README.md", PRODUCT_VARIANT + "\n"), "README.md (new 1)"),
     ("spelling-product", lambda t: t.append("README.md", FORMER_NAME + "\n"), "README.md (new 1)"),
@@ -189,6 +193,13 @@ class ChecksTest(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertEqual(lines[check][0], "FAIL", out)
                 self.assertIn(fragment, lines[check][1])
+
+    def test_the_word_the_shipped_middleware_is_about_is_no_predecessor_hit(self):
+        tree = Tree(self)
+        tree.append("README.md", "The %s tool, %s-cache and %s_models.\n" % (SUBJECT, SUBJECT, SUBJECT))
+        code, lines, out = run(tree)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(lines["spelling-predecessor"][0], "PASS", out)
 
     def test_an_enumerator_that_cannot_run_is_an_error(self):
         broken = []

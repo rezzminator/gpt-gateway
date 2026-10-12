@@ -40,6 +40,23 @@ class InstallTest(unittest.TestCase):
                            capture_output=True, text=True, env={"HOME": h.home, "PATH": "/usr/bin:/bin"})
         self.assertEqual(p.stdout, "ok: %s\n" % os.path.join(h.dest, "settings.json"))
 
+    def test_the_advisor_middleware_ships_with_every_install_but_a_fresh_one_does_not_list_it(self):
+        h = Host(self)
+        code, out = h.install()
+        self.assertEqual(code, 0, out)
+        installed = os.path.join(h.dest, "middleware", "advisor_cache.py")
+        self.assertTrue(os.path.isfile(installed), installed)
+        self.assertEqual(self.shipped(h, "advisor_cache.py"), self.source("advisor_cache.py"))
+        with open(os.path.join(h.dest, "settings.json")) as f:
+            self.assertEqual([entry["module"] for entry in json.load(f)["middleware"]], ["status_label"])
+        listed = {"capture_dir": None, "middleware": [{"module": "status_label"},
+                                                      {"module": "advisor_cache", "settings": {"ttl": "1h"}}]}
+        with open(os.path.join(h.dest, "settings.json"), "w") as f:
+            json.dump(listed, f)
+        p = subprocess.run(["/usr/bin/python3", "-I", "-B", os.path.join(h.dest, "gateway.py"), "check"],
+                           capture_output=True, text=True, env={"HOME": h.home, "PATH": "/usr/bin:/bin"})
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "ok: %s\n" % os.path.join(h.dest, "settings.json"), ""))
+
     def test_jail_stages_the_package_tree_and_notices(self):
         dest = jail.stage_install(os.path.join(jail.scratch(self), "app"))
         for name in ("gpt_gateway/chatgpt/__init__.py", "gpt_gateway/chatgpt/stream.py",

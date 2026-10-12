@@ -78,7 +78,7 @@ facade upstream gpt_gateway/upstream.py '\bHTTPS?Connection\(|create_default_con
 facade capture gpt_gateway/capture.py '[1-5]-(request|response)(\.sent)?\.(json|body)'
 facade db gpt_gateway/db.py '^[[:space:]]*(import|from) sqlite3\b|\bsqlite3\.'
 
-census spelling-predecessor all -noiE 'adv[i]sor'
+census spelling-predecessor all -noiE 'adv[i]sor[-_ ]?(cache[-_ ]?)?gateway'
 census spelling-old-name all -noiE 'cache[-_ ]?gateway'
 # The former name survives on one line per file: the install migration's LEGACY_NAME and its test's.
 # shellcheck disable=SC2329 # called indirectly, as the lister gin names

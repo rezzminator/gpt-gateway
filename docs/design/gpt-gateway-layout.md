@@ -125,6 +125,7 @@ gpt_gateway/chatgpt/route.py            decision, retries, Lane: estimator and t
 gpt_gateway/chatgpt/response.py         Reader: the reader thread behind a translated SSE body
 examples/middleware/model_note.py         NAME "model-note", SETTINGS enabled, on_request
 middleware/status_label.py                NAME "status-label", on_request: answers the activity-summary fork
+middleware/advisor_cache.py               NAME "advisor-cache", SETTINGS ttl … debug, check, on_request, on_event, on_response_end, health: the advisor tool's caching, output cap and scoping; shipped, listed by no fresh install
 launchd/install.sh                        copies the SHIP list to ~/.local/share/gpt-gateway/, writes the plist, migrates the former install once
 launchd/uninstall.sh                      stops the agent, unlinks, removes the plist and the install dir
 launchd/run.sh                            the agent's program: supervises gateway.py, sets env.ANTHROPIC_BASE_URL and env.ENABLE_TOOL_SEARCH only while healthy
@@ -150,6 +151,7 @@ tests/examples/middleware/__init__.py
 tests/examples/middleware/test_model_note.py
 tests/middleware/__init__.py
 tests/middleware/test_status_label.py
+tests/middleware/test_advisor_cache.py
 tests/launchd/__init__.py
 tests/launchd/stub.py                     a scratch HOME, a source tree with a one-test suite, a stub launchctl first on PATH
 tests/launchd/test_{install,uninstall,run,ctl}.py
@@ -157,7 +159,7 @@ tests/scripts/__init__.py
 tests/scripts/test_{checks,gate}.py
 ```
 
-Top-level install items are flat: `install.sh` copies `gateway.py`, `gpt_gateway/`, `launchd/run.sh`, `launchd/ctl.sh`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, and creates `middleware/` there, copying each shipped `middleware/*.py` into it as its own file (a user's module beside it stays); a first install writes `settings.json` there, listing `status_label`. The package copy includes every `*.py` recursively, preserving subdirectories through the `.new` swap. `tests/jail.py` mirrors that layout with `os.walk`. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
+Top-level install items are flat: `install.sh` copies `gateway.py`, `gpt_gateway/`, `launchd/run.sh`, `launchd/ctl.sh`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, and creates `middleware/` there, copying each shipped `middleware/*.py` into it as its own file (a user's module beside it stays); a first install writes `settings.json` there, listing `status_label` (every shipped module is copied; only that one is listed). The package copy includes every `*.py` recursively, preserving subdirectories through the `.new` swap. `tests/jail.py` mirrors that layout with `os.walk`. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
 
 Anatomy: every source module opens with a purpose docstring and has a test home at `tests/{dir}/test_{stem}.py`, preserving package subdirectories; `__init__.py` files are package markers and exempt.
 
@@ -168,7 +170,8 @@ Anatomy: every source module opens with a purpose docstring and has a test home 
 | the product | `gpt-gateway` | any other spelling of the two words: joined, camel-cased, spaced, capitalized; the former product name in any spelling | README, LICENSE holder, `server_version`, error prefix `gpt-gateway:`, launchd label `local.gpt-gateway`, install dir, log file names; census `spelling-product` |
 | its Python package | `gpt_gateway` | the same set; the hyphen is impossible in a Python identifier | package directory, `gpt_gateway_mw_{module}` loader names; census `spelling-product` |
 | the env prefix | `GPT_GATEWAY_` | any other prefix on a knob read by the gateway or its scripts | `gpt_gateway/env.py`, `launchd/*.sh`, the plist; census `spelling-env-prefix` |
-| the predecessor's names | none survive | the predecessor's name family, matched by `scripts/checks.sh` | census `spelling-predecessor`, `spelling-old-name` |
+| the predecessor's names | none survive | the predecessor's product-name family, matched by `scripts/checks.sh`; the word its feature is about (the advisor tool) is free, since `middleware/advisor_cache.py` is about it | census `spelling-predecessor`, `spelling-old-name` |
+| Claude Code's second-opinion server tool | advisor (`advisor_20260301`, `NAME` `advisor-cache` for its middleware) | — | `middleware/advisor_cache.py`, README § Shipped middleware |
 | a middleware file | module (`module` key, file stem) | plugin, extension, filter | `settings.json` `middleware[].module`, `middleware.Module`, `load_modules` |
 | a middleware's label | `NAME` | id, title | health line, hook failure lines, `gateway.py mw NAME` |
 | a hook | `on_request`, `on_event`, `on_response_end`, `health`, `cli`, `check` | callbacks, handlers | `hooks.Chain`, the example, README § Middleware |
@@ -211,7 +214,7 @@ The ChatGPT route introduces no new primitive façade: it uses `gpt_gateway/upst
 | --- | --- | --- | --- |
 | `gateway.py` usage text | `gpt_gateway/cli.py` `COMMANDS` | built at run time from the table | built |
 | the installed file set | `launchd/install.sh` `SHIP=` line | read by `install.sh` and by `tests/launchd` staging | tracked, one line |
-| the shipped middleware | `middleware/*.py` | copied by `install.sh`, one file each; a fresh `settings.json` lists `status_label` | tracked |
+| the shipped middleware | `middleware/*.py` | copied by `install.sh`, one file each; a fresh `settings.json` lists `status_label` only | tracked |
 | the middleware list | `settings.json` `middleware` | none: the path `{middleware_dir}/{module}.py` is the registry | the adopter's file |
 | health and log middleware labels | each module's `NAME` | none | — |
 
@@ -235,7 +238,7 @@ There is no hand-kept list of modules, commands or knobs beside the one that def
 | facade-upstream | Façade | no HTTP connection or TLS context outside `gpt_gateway/upstream.py` | `FAIL path (new N)` | `facade-upstream.txt` |
 | facade-capture | Façade | capture file names only in `gpt_gateway/capture.py` | `FAIL path (new N)` | `facade-capture.txt` |
 | facade-db | Façade | no `sqlite3` import or call outside `gpt_gateway/db.py` | `FAIL path (new N)` | `facade-db.txt` |
-| spelling-predecessor | Spelling census | zero hits of the predecessor's name family, any case, every file | `FAIL path (new N)` | `spelling-predecessor.txt` |
+| spelling-predecessor | Spelling census | zero hits of the predecessor's product name, any case, with or without its cache word, joined by a hyphen, an underscore, a space or nothing, every file; its feature's subject word alone is no hit | `FAIL path (new N)` | `spelling-predecessor.txt` |
 | spelling-old-name | Spelling census | zero hits of the predecessor's dashed, underscored and env-prefix spellings | `FAIL path (new N)` | `spelling-old-name.txt` |
 | spelling-product | Spelling census | the two words appear only as `gpt-gateway`, `gpt_gateway`, `GPT_GATEWAY`; the former product name only as the `LEGACY_NAME` line of `launchd/install.sh` and its test | `FAIL path (new N)` | `spelling-product.txt` |
 | spelling-env-prefix | Spelling census | every knob a shell script defaults (`${NAME:-…}`) and every name `env.py` reads starts with `GPT_GATEWAY_` (`HOME` and `CODEX_HOME` excepted: read, never defined) | `FAIL new: NAME` | `spelling-env-prefix.txt` |
@@ -279,14 +282,14 @@ Named gaps: no transcripts exist for this tree; every count above other than the
 
 ## 8. Migration
 
-Not applicable: greenfield. The predecessor stays where it is, untouched; nothing moves out of it. Reuse manifest (predecessor → here):
+Not applicable: greenfield. Reuse manifest (predecessor → here):
 
-- `gateway.py` → split into `gpt_gateway/*.py` · rewritten (the passthrough, relay, retry, chunked read, capture, settings reload, health, drain kept; every caching and output-cap rewrite, filter, usage row and stats function dropped)
+- `gateway.py` → split into `gpt_gateway/*.py` · rewritten (the passthrough, relay, retry, chunked read, capture, settings reload, health, drain kept; the caching and output-cap rewrite, the scoping filter and the usage rows re-homed in `middleware/advisor_cache.py`; the stats function dropped, since the rows are in the database)
 - `run.sh`, `ctl.sh`, `install.sh`, `uninstall.sh` → `launchd/` · rewritten for the K3 names
-- `tests/test_gateway.py` → `tests/gpt_gateway/test_*.py` · the passthrough, relay, chunked, retry, capture, settings, health, drain and client-reset tests ported; the rest dropped with their code
+- `tests/test_gateway.py` → `tests/gpt_gateway/test_*.py` · the passthrough, relay, chunked, retry, capture, settings, health, drain and client-reset tests ported; the rewrite cases re-homed in `tests/middleware/test_advisor_cache.py`; the rest dropped with their code
 - `tests/test_run.py` → `tests/launchd/test_run.py` · ported
 - `tests/fixtures/` · dropped
-- `README.md` → `README.md` · rewritten
+- `README.md` → `README.md` · rewritten; its cost reasoning and measurements moved to § Shipped middleware
 
 ## 9. Brief template and work tree
 
