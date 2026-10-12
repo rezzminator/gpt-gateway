@@ -14,7 +14,7 @@ class UninstallTest(unittest.TestCase):
         with open(os.path.join(h.dest, "middleware", "mine.py"), "w") as f:
             f.write('NAME = "mine"\n')
         logs = os.path.join(h.home, "Library", "Logs")
-        for name in ("model-gateway.log", "model-gateway.log.1", "model-gateway.stderr.log"):
+        for name in ("gpt-gateway.log", "gpt-gateway.log.1", "gpt-gateway.stderr.log"):
             open(os.path.join(logs, name), "w").close()
         h.write_claude({"env": {"KEEP": "1", "ENABLE_TOOL_SEARCH": "true", "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % h.port}})
         return h, logs
@@ -23,18 +23,18 @@ class UninstallTest(unittest.TestCase):
         h, logs = self.installed()
         code, out = h.run("uninstall.sh")
         self.assertEqual(code, 0, out)
-        self.assertIn("model-gateway removed", out)
+        self.assertIn("gpt-gateway removed", out)
         self.assertFalse(os.path.exists(h.dest))
         self.assertFalse(os.path.exists(h.plist))
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
-        backups = os.path.join(h.home, ".local", "state", "model-gateway", "backups")
+        backups = os.path.join(h.home, ".local", "state", "gpt-gateway", "backups")
         (kept,) = [d for d in os.listdir(backups) if d.startswith("uninstall-")]
         for name in ("mine.py", "status_label.py"):
             self.assertTrue(os.path.isfile(os.path.join(backups, kept, "middleware", name)), name)
         with open(os.path.join(backups, kept, "settings.json")) as f:
             self.assertEqual(json.load(f), {"capture_dir": None, "middleware": [{"module": "status_label"}]})
         self.assertTrue(any(d.startswith("settings.json.pre-uninstall-") for d in os.listdir(backups)))
-        self.assertTrue(os.path.exists(os.path.join(logs, "model-gateway.log")))
+        self.assertTrue(os.path.exists(os.path.join(logs, "gpt-gateway.log")))
 
     def test_a_tool_search_value_the_user_chose_stays(self):
         h, _ = self.installed()
@@ -55,7 +55,7 @@ class UninstallTest(unittest.TestCase):
 
     def test_purge_deletes_the_logs_and_the_database(self):
         h, logs = self.installed()
-        state = os.path.join(h.home, ".local", "state", "model-gateway")
+        state = os.path.join(h.home, ".local", "state", "gpt-gateway")
         os.makedirs(state, exist_ok=True)
         for name in ("gateway.db", "gateway.db-wal", "gateway.db-shm", "chatgpt-models.json"):
             open(os.path.join(state, name), "w").close()

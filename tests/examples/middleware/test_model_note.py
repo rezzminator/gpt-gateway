@@ -2,8 +2,8 @@
 import os
 import unittest
 
-from model_gateway.harness import load, run
-from model_gateway.settings import SettingsError
+from gpt_gateway.harness import load, run
+from gpt_gateway.settings import SettingsError
 from tests import jail
 from tests.fakes import SSE_BODY
 
@@ -23,12 +23,12 @@ class ModelNoteTest(unittest.TestCase):
         self.assertEqual(run(NOTE, body=BODY, settings={"enabled": False}).note, " kind=main")
         for raw, note in (("0", " kind=main"), ("off", " kind=main"), ("yes", " kind=main model-note=claude-x")):
             self.assertEqual(run(NOTE, body=BODY, settings={"enabled": False},
-                                 env={"MODEL_GATEWAY_MODEL_NOTE": raw}).note, note, raw)
+                                 env={"GPT_GATEWAY_MODEL_NOTE": raw}).note, note, raw)
 
     def test_a_bad_value_is_refused_naming_its_source(self):
         with self.assertRaises(SettingsError) as cm:
-            load(NOTE, env={"MODEL_GATEWAY_MODEL_NOTE": "maybe"})
-        self.assertIn("middleware model_note: enabled from env MODEL_GATEWAY_MODEL_NOTE: enabled must be true or false",
+            load(NOTE, env={"GPT_GATEWAY_MODEL_NOTE": "maybe"})
+        self.assertIn("middleware model_note: enabled from env GPT_GATEWAY_MODEL_NOTE: enabled must be true or false",
                       str(cm.exception))
         with self.assertRaises(SettingsError) as cm:
             load(NOTE, settings={"enabled": 3})

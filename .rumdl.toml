@@ -1,4 +1,4 @@
-# model-gateway markdown policy, read by rumdl.
+# gpt-gateway markdown policy, read by rumdl.
 [global]
 respect-gitignore = true
 # MD040 appends `text` to bare fences: token cost, no reader value.

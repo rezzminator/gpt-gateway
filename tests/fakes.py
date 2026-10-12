@@ -11,9 +11,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from model_gateway import db, frames
-from model_gateway.runtime import Runtime
-from model_gateway.server import Server
+from gpt_gateway import db, frames
+from gpt_gateway.runtime import Runtime
+from gpt_gateway.server import Server
 from tests import jail
 
 SSE_EVENTS = [
@@ -203,7 +203,7 @@ def on_response_end(ctx, result):
 
 def calls(module):
     """The CALLS list of the loaded recording middleware `module`."""
-    return sys.modules["model_gateway_mw_" + module].CALLS
+    return sys.modules["gpt_gateway_mw_" + module].CALLS
 
 
 class QuietServer(ThreadingHTTPServer):
@@ -233,10 +233,10 @@ def start_gateway(test, upstream=None, env=None, settings=None, middleware=None)
         jail.write_json(path, settings)
     for module, source in (middleware or {}).items():
         jail.write_middleware(os.path.join(d, "middleware"), module, source)
-    base = {"MODEL_GATEWAY_LOG": os.path.join(d, "gw.log"), "MODEL_GATEWAY_DB": os.path.join(d, "gateway.db"),
-            "MODEL_GATEWAY_UPSTREAM": upstream or "http://127.0.0.1:%d" % jail.free_port()}
+    base = {"GPT_GATEWAY_LOG": os.path.join(d, "gw.log"), "GPT_GATEWAY_DB": os.path.join(d, "gateway.db"),
+            "GPT_GATEWAY_UPSTREAM": upstream or "http://127.0.0.1:%d" % jail.free_port()}
     run = dict(base, **(env or {}))
-    run["MODEL_GATEWAY_DB"] = base["MODEL_GATEWAY_DB"]  # each gateway its own database, a jail env's shared one aside
+    run["GPT_GATEWAY_DB"] = base["GPT_GATEWAY_DB"]  # each gateway its own database, a jail env's shared one aside
     rt = Runtime(run, path)
     rt.load()
     test.addCleanup(rt.db.close)

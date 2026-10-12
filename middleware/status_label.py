@@ -6,7 +6,7 @@ and answers it with a label built from the sub-agent's last tool call, as an Ant
 request asks for one), on either route. Any other request passes untouched: a Claude Code release that rewords the
 prompt only turns the answer off. The answer's row says `answered_by` `status-label`.
 
-Shipped with model-gateway; a fresh install lists it in settings.json as `{"module": "status_label"}`.
+Shipped with gpt-gateway; a fresh install lists it in settings.json as `{"module": "status_label"}`.
 """
 import json
 import posixpath

@@ -8,6 +8,8 @@ from tests import jail
 from tests.launchd.stub import Host
 
 FIRST_SETTINGS = {"capture_dir": None, "middleware": [{"module": "status_label"}]}
+# The former product name, which the install migrates from.
+LEGACY_NAME = "model-gateway"
 
 
 class InstallTest(unittest.TestCase):
@@ -16,23 +18,23 @@ class InstallTest(unittest.TestCase):
         code, out = h.install()
         self.assertEqual(code, 0, out)
         self.assertIn("installed; the gateway is off", out)
-        for name in ("gateway.py", "run.sh", "ctl.sh", "README.md", "LICENSE", "model_gateway/proxy.py",
-                     "model_gateway/harness.py", "model_gateway/chatgpt/stream.py", "THIRD_PARTY_NOTICES.md"):
+        for name in ("gateway.py", "run.sh", "ctl.sh", "README.md", "LICENSE", "gpt_gateway/proxy.py",
+                     "gpt_gateway/harness.py", "gpt_gateway/chatgpt/stream.py", "THIRD_PARTY_NOTICES.md"):
             with self.subTest(name=name):
                 self.assertTrue(os.path.isfile(os.path.join(h.dest, name)), name)
-        self.assertFalse(os.path.exists(os.path.join(h.dest, "model_gateway", "__pycache__")))
+        self.assertFalse(os.path.exists(os.path.join(h.dest, "gpt_gateway", "__pycache__")))
         self.assertTrue(os.access(os.path.join(h.dest, "run.sh"), os.X_OK))
         self.assertTrue(os.path.isdir(os.path.join(h.dest, "middleware")))
         with open(os.path.join(h.dest, "settings.json")) as f:
             self.assertEqual(json.load(f), FIRST_SETTINGS)
         self.assertEqual(self.shipped(h), self.source("status_label.py"))
-        self.assertEqual(h.plist_value("Label"), "local.model-gateway")
-        self.assertEqual(h.plist_value("EnvironmentVariables.MODEL_GATEWAY_PORT"), str(h.port))
-        self.assertEqual(h.plist_value("EnvironmentVariables.MODEL_GATEWAY_LOG"),
-                         os.path.join(h.home, "Library", "Logs", "model-gateway.log"))
-        self.assertEqual(h.plist_value("EnvironmentVariables.MODEL_GATEWAY_CLAUDE_SETTINGS"), os.path.realpath(h.claude))
+        self.assertEqual(h.plist_value("Label"), "local.gpt-gateway")
+        self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_PORT"), str(h.port))
+        self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_LOG"),
+                         os.path.join(h.home, "Library", "Logs", "gpt-gateway.log"))
+        self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_CLAUDE_SETTINGS"), os.path.realpath(h.claude))
         self.assertEqual(h.plist_value("StandardErrorPath"),
-                         os.path.join(h.home, "Library", "Logs", "model-gateway.stderr.log"))
+                         os.path.join(h.home, "Library", "Logs", "gpt-gateway.stderr.log"))
         self.assertFalse([c for c in h.launchctl_calls() if c.startswith(("bootstrap", "kill", "bootout"))])
         p = subprocess.run(["/usr/bin/python3", "-I", "-B", os.path.join(h.dest, "gateway.py"), "check"],
                            capture_output=True, text=True, env={"HOME": h.home, "PATH": "/usr/bin:/bin"})
@@ -40,7 +42,7 @@ class InstallTest(unittest.TestCase):
 
     def test_jail_stages_the_package_tree_and_notices(self):
         dest = jail.stage_install(os.path.join(jail.scratch(self), "app"))
-        for name in ("model_gateway/chatgpt/__init__.py", "model_gateway/chatgpt/stream.py",
+        for name in ("gpt_gateway/chatgpt/__init__.py", "gpt_gateway/chatgpt/stream.py",
                      "THIRD_PARTY_NOTICES.md"):
             with self.subTest(name=name):
                 installed = os.path.join(dest, name)
@@ -88,7 +90,7 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("install.sh: tests fail", out)
         self.assertIn("FAIL: test_bad", out)
-        log = os.path.join(h.home, "Library", "Logs", "model-gateway-install-tests.log")
+        log = os.path.join(h.home, "Library", "Logs", "gpt-gateway-install-tests.log")
         self.assertIn(log, out)
         with open(log) as f:
             self.assertIn("AssertionError: no", f.read())
@@ -96,12 +98,12 @@ class InstallTest(unittest.TestCase):
 
     def test_a_hung_test_run_is_a_failure_that_names_the_test_and_keeps_the_stacks(self):
         h = Host(self, hangs=True)
-        h.env = {"MODEL_GATEWAY_TEST_SECONDS": "3"}
+        h.env = {"GPT_GATEWAY_TEST_SECONDS": "3"}
         code, out = h.install()
         self.assertEqual(code, 1)
         self.assertIn("install.sh: tests hung past 3s", out)
         self.assertIn("test_stuck", out)
-        log = os.path.join(h.home, "Library", "Logs", "model-gateway-install-tests.log")
+        log = os.path.join(h.home, "Library", "Logs", "gpt-gateway-install-tests.log")
         with open(log) as f:
             self.assertIn("most recent call first", f.read())
         self.assertFalse(os.path.exists(h.dest))
@@ -112,7 +114,7 @@ class InstallTest(unittest.TestCase):
         code, out = h.install()
         self.assertEqual(code, 0, out)
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
-        backups = os.path.join(h.home, ".local", "state", "model-gateway", "backups")
+        backups = os.path.join(h.home, ".local", "state", "gpt-gateway", "backups")
         (backup,) = os.listdir(backups)
         self.assertTrue(backup.startswith("settings.json.pre-install-"))
         chosen = Host(self)
@@ -120,6 +122,67 @@ class InstallTest(unittest.TestCase):
         code, out = chosen.install()
         self.assertEqual(code, 0, out)
         self.assertEqual(chosen.read_claude()["env"], {"ENABLE_TOOL_SEARCH": "auto:5"})
+
+    def former(self, h):
+        """Plants a former install in h's HOME: its agent, its copy with the user's settings and module, its state."""
+        share = os.path.join(h.home, ".local", "share", LEGACY_NAME)
+        state = os.path.join(h.home, ".local", "state", LEGACY_NAME)
+        plist = os.path.join(h.home, "Library", "LaunchAgents", "local.%s.plist" % LEGACY_NAME)
+        os.makedirs(os.path.join(share, "middleware"))
+        os.makedirs(state)
+        os.makedirs(os.path.dirname(plist))
+        with open(os.path.join(share, "settings.json"), "w") as f:
+            json.dump({"capture_dir": None, "middleware": [{"module": "mine"}]}, f)
+        with open(os.path.join(share, "middleware", "mine.py"), "w") as f:
+            f.write('NAME = "mine"\n')
+        with open(os.path.join(state, "gateway.db"), "w") as f:
+            f.write("former")
+        with open(plist, "w") as f:
+            f.write("<plist/>\n")
+        return share, state, plist
+
+    def test_an_install_migrates_the_former_install(self):
+        h = Host(self)
+        share, state, plist = self.former(h)
+        code, out = h.install()
+        self.assertEqual(code, 0, out)
+        self.assertIn("bootout gui/%d/local.%s" % (os.getuid(), LEGACY_NAME), h.launchctl_calls())
+        for gone in (share, state, plist):
+            with self.subTest(gone=gone):
+                self.assertFalse(os.path.exists(gone), gone)
+        with open(os.path.join(h.home, ".local", "state", "gpt-gateway", "gateway.db")) as f:
+            self.assertEqual(f.read(), "former")
+        with open(os.path.join(h.dest, "settings.json")) as f:
+            self.assertEqual(json.load(f), {"capture_dir": None, "middleware": [{"module": "mine"}]})
+        self.assertEqual(self.shipped(h, "mine.py"), b'NAME = "mine"\n')
+        self.assertEqual(self.shipped(h), self.source("status_label.py"))
+        self.assertEqual(h.plist_value("Label"), "local.gpt-gateway")
+
+    def test_a_migration_keeps_an_existing_state_and_settings(self):
+        h = Host(self)
+        _, state, _ = self.former(h)
+        self.assertEqual(h.install()[0], 0)
+        os.makedirs(state)
+        with open(os.path.join(state, "gateway.db"), "w") as f:
+            f.write("former")
+        with open(os.path.join(h.dest, "settings.json"), "w") as f:
+            json.dump(FIRST_SETTINGS, f)
+        self.former_settings_only(h)
+        code, out = h.install()
+        self.assertEqual(code, 0, out)
+        with open(os.path.join(h.home, ".local", "state", "gpt-gateway", "gateway.db")) as f:
+            self.assertEqual(f.read(), "former", "the first migration's state is kept")
+        self.assertTrue(os.path.isfile(os.path.join(state, "gateway.db")),
+                        "a former state is left in place when the new one exists")
+        with open(os.path.join(h.dest, "settings.json")) as f:
+            self.assertEqual(json.load(f), FIRST_SETTINGS)
+        self.assertFalse(os.path.exists(os.path.join(h.home, ".local", "share", LEGACY_NAME)))
+
+    def former_settings_only(self, h):
+        share = os.path.join(h.home, ".local", "share", LEGACY_NAME)
+        os.makedirs(share)
+        with open(os.path.join(share, "settings.json"), "w") as f:
+            json.dump({"capture_dir": None, "middleware": [{"module": "ghost"}]}, f)
 
     def test_bad_options_are_refused(self):
         h = Host(self)

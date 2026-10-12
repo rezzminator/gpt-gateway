@@ -1,4 +1,4 @@
-# model-gateway
+# gpt-gateway
 
 A local passthrough between Claude Code and the Anthropic API, with a middleware hook API.
 
@@ -12,13 +12,13 @@ macOS, Python 3.9+ standard library only (`/usr/bin/python3`), `jq` for the sett
 
 ```sh
 launchd/install.sh            # install or update; --port N (default 18787)
-~/.local/share/model-gateway/ctl.sh status
+~/.local/share/gpt-gateway/ctl.sh status
 launchd/uninstall.sh          # --purge also deletes the logs and the database
 ```
 
-`install.sh` runs the unit tests first and refuses to install when one fails: it keeps the whole run in `~/Library/Logs/model-gateway-install-tests.log` (`uninstall.sh --purge` deletes it), prints that path and the names of the failing tests, and stops a run still going after `MODEL_GATEWAY_TEST_SECONDS` (default 1800) with every thread's stack at the end of the log. It copies `gateway.py`, the `model_gateway/` package (all Python sources, preserving subdirectories), `run.sh`, `ctl.sh`, this README, the LICENSE and `THIRD_PARTY_NOTICES.md` to `~/.local/share/model-gateway/`, creates a `middleware` directory there and copies the shipped middleware into it (each file replaces only its own copy, so your own modules stay), writes `settings.json` on a first install, listing `status_label` (§ Shipped middleware), and writes the launchd agent `local.model-gateway`. A first install turns the gateway on. An update keeps the on/off state: when on, the new code takes over through a graceful restart and no stream is cut. An existing `settings.json` is validated and kept, so a module an update ships newly is copied but not listed: add it to `middleware`, then `ctl.sh restart`.
+`install.sh` runs the unit tests first and refuses to install when one fails: it keeps the whole run in `~/Library/Logs/gpt-gateway-install-tests.log` (`uninstall.sh --purge` deletes it), prints that path and the names of the failing tests, and stops a run still going after `GPT_GATEWAY_TEST_SECONDS` (default 1800) with every thread's stack at the end of the log. It copies `gateway.py`, the `gpt_gateway/` package (all Python sources, preserving subdirectories), `run.sh`, `ctl.sh`, this README, the LICENSE and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, creates a `middleware` directory there and copies the shipped middleware into it (each file replaces only its own copy, so your own modules stay), writes `settings.json` on a first install, listing `status_label` (§ Shipped middleware), and writes the launchd agent `local.gpt-gateway`. A first install turns the gateway on. An update keeps the on/off state: when on, the new code takes over through a graceful restart and no stream is cut. An existing `settings.json` is validated and kept, so a module an update ships newly is copied but not listed: add it to `middleware`, then `ctl.sh restart`. An install that finds the gateway's install under its former name migrates it once: that copy's `settings.json` and `middleware` modules seed a first install, its agent stops (in-flight streams finish first) and its plist goes, its state directory moves to `~/.local/state/gpt-gateway/` unless that already exists, and its installed copy is deleted. A ChatGPT login kept in the Keychain under the former name is not moved: run `gateway.py chatgpt-login` again, or let the gateway use Codex's login.
 
-`uninstall.sh` stops the agent (in-flight streams finish first), points Claude Code back at the API, deletes the agent and the installed copy, and keeps `settings.json` and the `middleware` directory under `~/.local/state/model-gateway/backups/`.
+`uninstall.sh` stops the agent (in-flight streams finish first), points Claude Code back at the API, deletes the agent and the installed copy, and keeps `settings.json` and the `middleware` directory under `~/.local/state/gpt-gateway/backups/`.
 
 ## Settings
 
@@ -30,12 +30,12 @@ launchd/uninstall.sh          # --purge also deletes the logs and the database
 
 | Key | Value | Default | Env override |
 | --- | --- | --- | --- |
-| `capture_dir` | an absolute directory (`~` allowed), or null for off | null | `MODEL_GATEWAY_CAPTURE_DIR` (`off` turns it off) |
-| `chatgpt` | a JSON boolean, or null for the default | false | `MODEL_GATEWAY_CHATGPT` (`1`, `true`, `on` or `0`, `false`, `off`) |
+| `capture_dir` | an absolute directory (`~` allowed), or null for off | null | `GPT_GATEWAY_CAPTURE_DIR` (`off` turns it off) |
+| `chatgpt` | a JSON boolean, or null for the default | false | `GPT_GATEWAY_CHATGPT` (`1`, `true`, `on` or `0`, `false`, `off`) |
 | `chatgpt_cache_retention` | `off` or `24h`: with `24h`, every ChatGPT Responses request also asks for 24-hour prompt-cache retention (`prompt_cache_retention`; see [Cache retention](#cache-retention)) | `off` | none |
 | `db_retention_days` | how many days of rows the [database](#database) keeps, a whole number of at least 1 | 30 | none |
 | `middleware` | the ordered list of middleware, each `{"module": NAME, "settings": {...}}`; `module` matches `^[a-z][a-z0-9_]*$` and appears once | `[]` | none |
-| `middleware_dir` | an absolute directory, or null | a `middleware` directory beside `settings.json` | `MODEL_GATEWAY_MIDDLEWARE_DIR` |
+| `middleware_dir` | an absolute directory, or null | a `middleware` directory beside `settings.json` | `GPT_GATEWAY_MIDDLEWARE_DIR` |
 
 An environment variable that is set and not empty wins over the file, which wins over the default. An edit applies from the next request: the file is re-read whenever its modification time, size or inode changes. A file that fails validation stops the gateway at start (and `run.sh` fails open); at a reload it is logged once (the text log and a `settings_error` event) and the last good settings stay, and the health line says `settings=error(...)`. Changes to the middleware list (added, removed or reordered), `middleware_dir` or `chatgpt` need a restart (`ctl.sh restart`); until then the reload reports "restart to apply" and the running settings stay.
 
@@ -45,12 +45,12 @@ The environment alone sets the rest (the launchd agent sets them in its plist):
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `MODEL_GATEWAY_PORT` | listen port on 127.0.0.1 | 18787 |
-| `MODEL_GATEWAY_UPSTREAM` | upstream origin | `https://api.anthropic.com` |
-| `MODEL_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error and database-failure lines only; an absolute path or `~/` under `HOME` | `~/Library/Logs/model-gateway.log` |
-| `MODEL_GATEWAY_DB` | the [database](#database), an absolute path or `~/` under `HOME` | `~/.local/state/model-gateway/gateway.db` |
-| `MODEL_GATEWAY_DRAIN_SECONDS` | on SIGTERM, how long in-flight requests may finish | 600 |
-| `MODEL_GATEWAY_DEBUG` | set to record each messages request's non-secret headers and metadata as a `debug` event | off |
+| `GPT_GATEWAY_PORT` | listen port on 127.0.0.1 | 18787 |
+| `GPT_GATEWAY_UPSTREAM` | upstream origin | `https://api.anthropic.com` |
+| `GPT_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error and database-failure lines only; an absolute path or `~/` under `HOME` | `~/Library/Logs/gpt-gateway.log` |
+| `GPT_GATEWAY_DB` | the [database](#database), an absolute path or `~/` under `HOME` | `~/.local/state/gpt-gateway/gateway.db` |
+| `GPT_GATEWAY_DRAIN_SECONDS` | on SIGTERM, how long in-flight requests may finish | 600 |
+| `GPT_GATEWAY_DEBUG` | set to record each messages request's non-secret headers and metadata as a `debug` event | off |
 
 ## Middleware
 
@@ -61,7 +61,7 @@ NAME = "model-note"
 
 def enabled_value(value): ...   # bool from the file, 1/0, true/false, yes/no, on/off from the env
 
-SETTINGS = {"enabled": (True, enabled_value, "MODEL_GATEWAY_MODEL_NOTE")}
+SETTINGS = {"enabled": (True, enabled_value, "GPT_GATEWAY_MODEL_NOTE")}
 
 def on_request(ctx, req):
     if ctx.settings["enabled"]:
@@ -69,7 +69,7 @@ def on_request(ctx, req):
     return None
 ```
 
-Install it with `cp examples/middleware/model_note.py ~/.local/share/model-gateway/middleware/`, list it as `{"module": "model_note"}`, then `ctl.sh restart`.
+Install it with `cp examples/middleware/model_note.py ~/.local/share/gpt-gateway/middleware/`, list it as `{"module": "model_note"}`, then `ctl.sh restart`.
 
 ### Module attributes
 
@@ -108,12 +108,12 @@ Hooks run in list order: `on_request` first to last, then `on_event` and `on_res
 
 ### Testing a middleware
 
-`model_gateway/harness.py` runs one middleware file in process, with no network, through the gateway's own settings resolution, hook chain, SSE splitting and request row:
+`gpt_gateway/harness.py` runs one middleware file in process, with no network, through the gateway's own settings resolution, hook chain, SSE splitting and request row:
 
 ```python
 import sys
-sys.path.insert(0, "path/to/model-gateway")
-from model_gateway.harness import run, run_cli, load
+sys.path.insert(0, "path/to/gpt-gateway")
+from gpt_gateway.harness import run, run_cli, load
 
 out = run("my_mw.py", body={"model": "m", "messages": []}, headers={"x-claude-code-agent-id": "a1"},
           response=b'event: message_stop\ndata: {"type":"message_stop"}\n\n', chunk_size=7,
@@ -133,7 +133,7 @@ code, stdout, stderr = run_cli("my_mw.py", ["stats"], log_path="gw.log", db_path
 `GET http://127.0.0.1:18787/__gateway/health` answers one line:
 
 ```
-ok pid=4242 fds=212/10240 capture=off settings=ok db=~/.local/state/model-gateway/gateway.db db_rows=1830 db_drops=0 db_errors=0 middleware=[model-note errors=0]
+ok pid=4242 fds=212/10240 capture=off settings=ok db=~/.local/state/gpt-gateway/gateway.db db_rows=1830 db_drops=0 db_errors=0 middleware=[model-note errors=0]
 ```
 
 `fds` is the process's open file handles over its soft limit (see [File handles](#file-handles)). `settings` is `ok`, `missing` (no file; defaults apply) or `error(...)` (the last edit was refused; the last good settings serve). `db` is the database's path (expanded on the real line), `db_rows` the rows this process wrote, `db_drops` the rows it dropped on a full queue and `db_errors` the rows lost to a database failure. Each middleware shows its `NAME`, its `health()` text when it has one (`health-error` when that raises), and its error count. With `chatgpt` enabled, `chatgpt=on catalog=N models` (or `catalog=none`) and `cache_retention=off|24h|24h(rejected)` appear before `middleware=`; with it disabled the line stays as shown.
@@ -143,7 +143,7 @@ ok pid=4242 fds=212/10240 capture=off settings=ok db=~/.local/state/model-gatewa
 Every client connection and every upstream connection is a file handle, and a process short of them fails in ways that read as other faults: macOS answers a name lookup with `EAI_NONAME` when the resolver cannot open its socket, so the gateway once answered a storm with 502s blaming DNS while the open count sat at its limit of 256.
 
 - **The limit.** `serve` raises the soft `RLIMIT_NOFILE` to 10240, or to the hard limit when that is lower, before it opens a socket; a soft limit already at or above that is left alone. A refusal is an `fd_limit` event and a start-up line in the text log, and the gateway starts anyway. The health line's `fds=` shows the open count over the soft limit.
-- **Idle clients.** A client connection that sends nothing for `CLIENT_IDLE_SECONDS` (600, twice the five-minute prompt-cache TTL; `model_gateway/proxy.py`) is closed by the gateway. A request being read, forwarded or streamed is never idle, however long it runs. The gateway sends no `Keep-Alive: timeout=` header: a client that learns the limit would close first, but the header is one the upstream did not send, and the Anthropic route relays the response's headers as received. A request that crosses the close fails as a dropped connection, which Claude Code's SDK retries on its own.
+- **Idle clients.** A client connection that sends nothing for `CLIENT_IDLE_SECONDS` (600, twice the five-minute prompt-cache TTL; `gpt_gateway/proxy.py`) is closed by the gateway. A request being read, forwarded or streamed is never idle, however long it runs. The gateway sends no `Keep-Alive: timeout=` header: a client that learns the limit would close first, but the header is one the upstream did not send, and the Anthropic route relays the response's headers as received. A request that crosses the close fails as a dropped connection, which Claude Code's SDK retries on its own.
 - **Upstream connections.** They are pooled across clients, not held one per client: a request takes an idle connection or opens one, and gives it back the moment its response body is complete; a response cut short, by an error or by the client leaving before the body was read to its end, closes its connection, while a body read completely goes back to the pool even when the client has already gone. At most 16 stay idle (`MAX_IDLE`), and a reaper closes those idle for more than 90 s (`IDLE_SECONDS`), so open handles follow the requests in flight plus that reserve, never the number of connected chats. The ChatGPT WebSocket pool keeps its own caps.
 - **Backlog.** The listen backlog is 256 (`REQUEST_QUEUE_SIZE`), so a burst of simultaneous connects is queued, not reset.
 - **Running out.** A failure that is the process out of handles (`EMFILE`, `ENFILE`, or a name lookup that fails within 16 handles of the limit) is answered with `out of file handles: N open of L allowed`, not as an unreachable upstream, and recorded as an `fd_exhausted` event with `where` (`upstream`, `websocket` or `accept`), `error`, `open`, `limit` and `suppressed`, at most one per 30 s per kind, `suppressed` counting those held back. An accept that fails for any other reason is an `accept_failed` event, on the same limit. Accept failures in a row wait 0.1 s, doubling to 2 s (`ACCEPT_BACKOFF`, `ACCEPT_BACKOFF_MAX`), and the first success resets the wait, so a listener that cannot accept never spins. Capture running out of handles is an `fd_exhausted` event with `where` `capture` on the same limit, never an error past capture's boundary.
@@ -154,7 +154,7 @@ Every client connection and every upstream connection is a file handle, and a pr
 
 ## Capture
 
-Off by default. With `capture_dir` (or `MODEL_GATEWAY_CAPTURE_DIR`) naming a folder, each exchange lands in `{capture_dir}/{date}/{HHMMSS.mmm}-{seq}-{kind}-{METHOD}-{path}/`:
+Off by default. With `capture_dir` (or `GPT_GATEWAY_CAPTURE_DIR`) naming a folder, each exchange lands in `{capture_dir}/{date}/{HHMMSS.mmm}-{seq}-{kind}-{METHOD}-{path}/`:
 
 - `1-request.json`: method, path and headers, secrets redacted
 - `2-request.body`: the body as the client sent it
@@ -168,19 +168,19 @@ Capture never breaks a request: a write that fails is a `capture_error` event an
 
 The optional ChatGPT route runs GPT models as Claude Code sub-agents over your ChatGPT subscription. It translates Claude Code's Anthropic requests into Codex backend Responses requests and translates the results back, including tools, reasoning signatures and usage. Text, base64 images and base64 PDFs reach the model, in a message or a tool result; a `tool_reference` becomes the line `Tool loaded: {name}`; any other content block becomes an `[unsupported {type}]` placeholder. With Claude Code's tool search on, a model served as Responses lite (sol, terra, luna and astra, unless the catalog says otherwise) gets a `defer_loading` tool only once a tool result names it, as one `additional_tools` item right after that result, so the list ahead of it, and the prompt cache, never change; any other model gets every `defer_loading` tool in its `tools` list. A tool Claude Code connects mid-conversation, a role-system `tool_addition` block, reaches a Responses-lite model the same way, as one `additional_tools` item where the block sits, and any other model in its `tools` list. Claude Code keeps running the tools and owning compaction. The main session remains on Claude.
 
-Enable it with `"chatgpt": true` in `settings.json`, or `MODEL_GATEWAY_CHATGPT=true` in the gateway's environment, then restart. The setting defaults to false; env overrides file, then default. Invalid env values are rejected with the variable's name. With the setting false, every model follows the existing Anthropic path and the ChatGPT modules are not loaded; ChatGPT-specific knobs are validated at gateway start only when it is enabled.
+Enable it with `"chatgpt": true` in `settings.json`, or `GPT_GATEWAY_CHATGPT=true` in the gateway's environment, then restart. The setting defaults to false; env overrides file, then default. Invalid env values are rejected with the variable's name. With the setting false, every model follows the existing Anthropic path and the ChatGPT modules are not loaded; ChatGPT-specific knobs are validated at gateway start only when it is enabled.
 
 Codex's login is used in place first, from `$CODEX_HOME/auth.json` when set, otherwise `~/.codex/auth.json`. Use `gateway.py chatgpt-login` only without a Codex ChatGPT login, through the installed entry point:
 
 ```sh
-/usr/bin/python3 -I ~/.local/share/model-gateway/gateway.py chatgpt-login
-/usr/bin/python3 -I ~/.local/share/model-gateway/gateway.py chatgpt-login --device
-/usr/bin/python3 -I ~/.local/share/model-gateway/gateway.py chatgpt-status
+/usr/bin/python3 -I ~/.local/share/gpt-gateway/gateway.py chatgpt-login
+/usr/bin/python3 -I ~/.local/share/gpt-gateway/gateway.py chatgpt-login --device
+/usr/bin/python3 -I ~/.local/share/gpt-gateway/gateway.py chatgpt-status
 ```
 
 The gateway re-reads Codex's login before every refresh, refreshes on Codex's schedule (within five minutes of access expiry, or after eight days when only `last_refresh` is available), and reuses tokens that Codex has already rotated. It writes rotated tokens back in Codex's format, preserves other fields and symlinks, and never marks, blanks or deletes Codex's login on failure.
 
-`gateway.py chatgpt-login` uses browser login; `--device` uses device-code login. The gateway's own tokens live in `~/.local/state/model-gateway/chatgpt-auth.json`, mode 0600; the macOS Keychain service `model-gateway.chatgpt` is used only when explicitly selected. `gateway.py chatgpt-status` reports the active login source. A later `codex login` or `codex logout` takes effect without restarting the gateway.
+`gateway.py chatgpt-login` uses browser login; `--device` uses device-code login. The gateway's own tokens live in `~/.local/state/gpt-gateway/chatgpt-auth.json`, mode 0600; the macOS Keychain service `gpt-gateway.chatgpt` is used only when explicitly selected. `gateway.py chatgpt-status` reports the active login source. A later `codex login` or `codex logout` takes effect without restarting the gateway.
 
 For a Claude Code session connected to the enabled gateway, an agent definition at `.claude/agents/gpt-worker.md` can contain:
 
@@ -218,14 +218,14 @@ The gateway identifies itself to ChatGPT and OAuth as the Codex CLI: `originator
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `MODEL_GATEWAY_CHATGPT_ORIGIN` | ChatGPT backend origin | `https://chatgpt.com` |
-| `MODEL_GATEWAY_CHATGPT_AUTH_ORIGIN` | OAuth origin | `https://auth.openai.com` |
-| `MODEL_GATEWAY_CHATGPT_AUTH_STORE` | `auto` uses the 0600 file store on every platform; `file` selects it explicitly; `keychain` fails if unavailable | `auto` |
-| `MODEL_GATEWAY_CHATGPT_CODEX_AUTH` | Codex login file, absolute with `~` allowed, or `off` | `$CODEX_HOME/auth.json`, else `~/.codex/auth.json` |
-| `MODEL_GATEWAY_CHATGPT_AUTH_PATH` | token file path, absolute with `~` allowed | `~/.local/state/model-gateway/chatgpt-auth.json` |
-| `MODEL_GATEWAY_CHATGPT_MODELS_PATH` | catalog cache path, absolute with `~` allowed; mode 0600 | `~/.local/state/model-gateway/chatgpt-models.json` |
-| `MODEL_GATEWAY_CHATGPT_TRANSPORT` | `websocket` keeps a Responses WebSocket per lane, as Codex does; `http` sends every request as an HTTP POST with an SSE answer | `websocket` |
-| `MODEL_GATEWAY_CHATGPT_AGENT_CONTRACT` | `on` appends Claude Code's sub-agent delivery contract to the developer message carrying its system text, as a second part: the final message is the return, and SendMessage is for what the instructions require or only the recipient can settle, never progress; GPT models do not infer it from Claude Code's prompt and message the agent that spawned them instead. `off` sends the system text alone | `on` |
+| `GPT_GATEWAY_CHATGPT_ORIGIN` | ChatGPT backend origin | `https://chatgpt.com` |
+| `GPT_GATEWAY_CHATGPT_AUTH_ORIGIN` | OAuth origin | `https://auth.openai.com` |
+| `GPT_GATEWAY_CHATGPT_AUTH_STORE` | `auto` uses the 0600 file store on every platform; `file` selects it explicitly; `keychain` fails if unavailable | `auto` |
+| `GPT_GATEWAY_CHATGPT_CODEX_AUTH` | Codex login file, absolute with `~` allowed, or `off` | `$CODEX_HOME/auth.json`, else `~/.codex/auth.json` |
+| `GPT_GATEWAY_CHATGPT_AUTH_PATH` | token file path, absolute with `~` allowed | `~/.local/state/gpt-gateway/chatgpt-auth.json` |
+| `GPT_GATEWAY_CHATGPT_MODELS_PATH` | catalog cache path, absolute with `~` allowed; mode 0600 | `~/.local/state/gpt-gateway/chatgpt-models.json` |
+| `GPT_GATEWAY_CHATGPT_TRANSPORT` | `websocket` keeps a Responses WebSocket per lane, as Codex does; `http` sends every request as an HTTP POST with an SSE answer | `websocket` |
+| `GPT_GATEWAY_CHATGPT_AGENT_CONTRACT` | `on` appends Claude Code's sub-agent delivery contract to the developer message carrying its system text, as a second part: the final message is the return, and SendMessage is for what the instructions require or only the recipient can settle, never progress; GPT models do not infer it from Claude Code's prompt and message the agent that spawned them instead. `off` sends the system text alone | `on` |
 
 ### Transport
 
@@ -243,7 +243,7 @@ websocket_skipped  bytes: a message that is no JSON event
 
 ### Keeper
 
-Nothing reads a pooled socket between two exchanges, and measured on the live route the backend closed idle sockets (every one at 101 s or more idle) whose conversation the next request then re-sent whole on a new socket, losing the prompt cache the old socket held. A keeper thread (`model_gateway/chatgpt/keeper.py`) runs while any socket idles: every `TICK_SECONDS` (5) it answers what the backend sent (a ping with a pong, a close), sends a ping of its own to a socket that has gone `PING_SECONDS` (20) without a frame from the gateway, and takes a socket it finds dead out of the pool as a `websocket_close` of reason `keeper-closed` (`keeper-age` at the 55-minute limit), so the next request opens a fresh socket at once instead of finding the dead one at checkout. It works on a socket only while it is in the pool and holds the socket's guard, which a checkout waits on, so it never touches a socket that is checked out and never reads one with a request. A failure of its own is a `keeper_failed` event (rate-limited), never a failed request. The 20-second ping is a fifth of the shortest observed death, and well under the 30 s idle gap (p99) the backend let pass unserviced; whether the backend ends sockets for missed pongs or on a timer of its own is unknown, so the keeper does both: it answers, and it pings.
+Nothing reads a pooled socket between two exchanges, and measured on the live route the backend closed idle sockets (every one at 101 s or more idle) whose conversation the next request then re-sent whole on a new socket, losing the prompt cache the old socket held. A keeper thread (`gpt_gateway/chatgpt/keeper.py`) runs while any socket idles: every `TICK_SECONDS` (5) it answers what the backend sent (a ping with a pong, a close), sends a ping of its own to a socket that has gone `PING_SECONDS` (20) without a frame from the gateway, and takes a socket it finds dead out of the pool as a `websocket_close` of reason `keeper-closed` (`keeper-age` at the 55-minute limit), so the next request opens a fresh socket at once instead of finding the dead one at checkout. It works on a socket only while it is in the pool and holds the socket's guard, which a checkout waits on, so it never touches a socket that is checked out and never reads one with a request. A failure of its own is a `keeper_failed` event (rate-limited), never a failed request. The 20-second ping is a fifth of the shortest observed death, and well under the 30 s idle gap (p99) the backend let pass unserviced; whether the backend ends sockets for missed pongs or on a timer of its own is unknown, so the keeper does both: it answers, and it pings.
 
 ### Cache retention
 
@@ -261,7 +261,7 @@ When capture is enabled, the folder kind is `gpt`, while `ctx.kind` stays `sub`.
 
 ## Database
 
-The gateway records what it observes in one SQLite file, `MODEL_GATEWAY_DB` (default `~/.local/state/model-gateway/gateway.db`, mode 0600, WAL), written by one thread off a queue of 10,000 rows, so no request waits on it. A full queue drops the row; a database failure loses the rows of that write; both are counted on the health line and noted once in the text log, and the gateway goes on. Rows older than `db_retention_days` (default 30) are deleted at start and hourly. No request or response body enters it.
+The gateway records what it observes in one SQLite file, `GPT_GATEWAY_DB` (default `~/.local/state/gpt-gateway/gateway.db`, mode 0600, WAL), written by one thread off a queue of 10,000 rows, so no request waits on it. A full queue drops the row; a database failure loses the rows of that write; both are counted on the health line and noted once in the text log, and the gateway goes on. Rows older than `db_retention_days` (default 30) are deleted at start and hourly. No request or response body enters it.
 
 - `requests`: one row per client request on both routes: `started` and `ended` (epoch seconds), `pid`, `request_id` (counted per process), `route`, `kind`, `method`, `path`, `model`, `slug`, `session_id` (from the body's `metadata.user_id`), `agent_id`, `lane`, `status`, `answered_by`, `stream`, `input_tokens` (every input token: uncached, cache read and cache write), `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `reasoning_tokens`, `hit` (cache read over input), `delta`, `attempts`, `ttfb_ms`, `upstream_ms`, `total_ms`, `reused`, `stale`, `transport`, `turn_state`, `translation_notes`, `empty`, `completed`, `client_disconnected`, `error_code`, `error_head` (at most 600 bytes of an error reply) and `note` (the middleware notes). `error_code` is the error reply's `error.type`, `stream_error` when the relay broke (its `error_head` the exception), or `gateway_error` when the exchange broke before its row (the same). On the Anthropic route `ttfb_ms` runs from the gateway's receipt of the request to the first upstream body byte and `upstream_ms` from the request sent upstream to the upstream's last byte (NULL when the client left first, and on a request that reached no upstream), both read from the clock beside the relay without delaying a chunk. The usage of a `POST /v1/messages` comes from the response's `message_start` and `message_delta` usage, or a JSON reply's `usage`, read beside the relay without delaying a chunk.
 - `events`: everything else, one row each with `at`, `pid`, `kind`, `request_id`, `lane` and its JSON `fields`: `start`, `stop`, `settings_reload`, `settings_error`, `middleware_failed`, `middleware_log`, `event_sink`, `capture_error`, `client_error`, `debug`, `error_detail` (an error reply's request shape and rate-limit headers), `usage_unread` (a messages reply whose usage could not be read), `upstream_socket`, `catalog_refresh_failed`, `retry`, `final_error`, `drop_reasoning`, `websocket_open`, `websocket_close`, `websocket_paused`, `lane_wait`, `websocket_skipped`, `keeper_failed`, `retention_rejected`, `fd_limit` (the open-file limit could not be raised), `fd_exhausted` (a failure that was the process out of file handles) and `accept_failed` (any other failed accept).
@@ -271,12 +271,12 @@ The gateway records what it observes in one SQLite file, `MODEL_GATEWAY_DB` (def
 ## Operating it
 
 ```sh
-~/.local/share/model-gateway/ctl.sh on|off|restart|status
-sqlite3 -readonly ~/.local/state/model-gateway/gateway.db 'SELECT * FROM daily ORDER BY day DESC LIMIT 10'
+~/.local/share/gpt-gateway/ctl.sh on|off|restart|status
+sqlite3 -readonly ~/.local/state/gpt-gateway/gateway.db 'SELECT * FROM daily ORDER BY day DESC LIMIT 10'
 ```
 
-`on` starts it and waits until Claude Code uses it; `off` points Claude Code at the API at once and lets in-flight streams finish; `restart` takes up new code and a changed middleware list without cutting a stream; `status` prints the on/off state, the health line and where Claude Code points. The database holds a row per request and an event for everything else (§ Database); the text log keeps the start, stop, fatal, settings-error and database-failure lines; the supervisor logs to `~/Library/Logs/model-gateway.stderr.log`.
+`on` starts it and waits until Claude Code uses it; `off` points Claude Code at the API at once and lets in-flight streams finish; `restart` takes up new code and a changed middleware list without cutting a stream; `status` prints the on/off state, the health line and where Claude Code points. The database holds a row per request and an event for everything else (§ Database); the text log keeps the start, stop, fatal, settings-error and database-failure lines; the supervisor logs to `~/Library/Logs/gpt-gateway.stderr.log`.
 
 ## Development
 
-`scripts/gate.sh` from the repository root is the only definition of ready: it compiles every source, lints the shell, runs `scripts/checks.sh` and the unit tests. The layout and its gates are in `docs/design/model-gateway-layout.md`.
+`scripts/gate.sh` from the repository root is the only definition of ready: it compiles every source, lints the shell, runs `scripts/checks.sh` and the unit tests. The layout and its gates are in `docs/design/gpt-gateway-layout.md`.

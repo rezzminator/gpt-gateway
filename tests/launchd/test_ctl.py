@@ -10,7 +10,7 @@ from tests.launchd.stub import Host
 class CtlTest(unittest.TestCase):
     def ctl(self, h, *args, disabled=True):
         env = jail.clean_env(h.home, PATH=h.path, LAUNCHCTL_STUB_LOG=h.calls,
-                             LAUNCHCTL_STUB_DISABLED="local.model-gateway" if disabled else "")
+                             LAUNCHCTL_STUB_DISABLED="local.gpt-gateway" if disabled else "")
         p = subprocess.run(["/bin/sh", os.path.join(h.dest, "ctl.sh")] + list(args), env=env,
                            capture_output=True, text=True, timeout=30)
         return p.returncode, p.stdout + p.stderr

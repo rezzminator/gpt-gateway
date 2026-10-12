@@ -17,11 +17,11 @@
 # a settings.json or a middleware it rejects at start fails open.
 set -u
 
-PY=${MODEL_GATEWAY_PYTHON:-/usr/bin/python3}
-JQ=${MODEL_GATEWAY_JQ:-/usr/bin/jq}
-SETTINGS=${MODEL_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
-PORT=${MODEL_GATEWAY_PORT:-18787}
-RETRY=${MODEL_GATEWAY_RETRY_SECONDS:-60}
+PY=${GPT_GATEWAY_PYTHON:-/usr/bin/python3}
+JQ=${GPT_GATEWAY_JQ:-/usr/bin/jq}
+SETTINGS=${GPT_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
+PORT=${GPT_GATEWAY_PORT:-18787}
+RETRY=${GPT_GATEWAY_RETRY_SECONDS:-60}
 URL="http://127.0.0.1:$PORT"
 DIR=$(cd "$(dirname "$0")" && pwd)
 pid=

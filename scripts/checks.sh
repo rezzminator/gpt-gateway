@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Every countable law of docs/design/model-gateway-layout.md § Gates, one CHECK line each, against committed baselines.
+# Every countable law of docs/design/gpt-gateway-layout.md § Gates, one CHECK line each, against committed baselines.
 set -uo pipefail; export LC_ALL=C
 P=$(cd "$(dirname "$0")/.." && pwd) || { echo "CHECK setup ERROR cannot resolve the repository root" >&2; exit 2; }
 BASE=$P/scripts/baselines; MODE=${1:-check}; rc=0
-DESIGN=docs/design/model-gateway-layout.md
+DESIGN=docs/design/gpt-gateway-layout.md
 case $MODE in check|--measure) ;; *) echo "usage: checks.sh [--measure]" >&2; exit 2;; esac
 say() { printf 'CHECK %-22s %-7s %s\n' "$1" "$2" "$3"; case $2 in FAIL) [ $rc -ge 1 ] || rc=1;; ERROR) rc=2;; esac; return 0; }
 cd "$P" || { say setup ERROR "cannot cd $P"; exit 2; }
@@ -70,24 +70,30 @@ if gin "$T/raw" tests_py -nE '\btempfile\b|mkdtemp|mkstemp|TemporaryDirectory|Na
 else say test-jail ERROR "grep could not read tests"; fi
 grep -E '(^|/)(run\.[^/]*|[^/]*\.sh)$' "$T/all" | grep -vE '^(scripts|launchd)/' > "$T/run"; ratchet stray-runners stray-runners "$T/run"
 
-facade env model_gateway/env.py '\bos\.environ\b|\bgetenv\(|from os import .*environ'
-facade clock model_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter)\(|^[[:space:]]*from time import'
-facade log model_gateway/log.py '^[[:space:]]*(import|from) logging\b|\blogging\.|open\([^)]*["'"'"']a[b+]?["'"'"']'
-facade settings model_gateway/settings.py '["'"'"']settings\.json["'"'"']'
-facade upstream model_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\(|\bcreate_connection\('
-facade capture model_gateway/capture.py '[1-5]-(request|response)(\.sent)?\.(json|body)'
-facade db model_gateway/db.py '^[[:space:]]*(import|from) sqlite3\b|\bsqlite3\.'
+facade env gpt_gateway/env.py '\bos\.environ\b|\bgetenv\(|from os import .*environ'
+facade clock gpt_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter)\(|^[[:space:]]*from time import'
+facade log gpt_gateway/log.py '^[[:space:]]*(import|from) logging\b|\blogging\.|open\([^)]*["'"'"']a[b+]?["'"'"']'
+facade settings gpt_gateway/settings.py '["'"'"']settings\.json["'"'"']'
+facade upstream gpt_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\(|\bcreate_connection\('
+facade capture gpt_gateway/capture.py '[1-5]-(request|response)(\.sent)?\.(json|body)'
+facade db gpt_gateway/db.py '^[[:space:]]*(import|from) sqlite3\b|\bsqlite3\.'
 
 census spelling-predecessor all -noiE 'adv[i]sor'
 census spelling-old-name all -noiE 'cache[-_ ]?gateway'
-if gin "$T/raw" not_design -noiE 'model[^a-z0-9]?gateway'; then
-  grep -vE ':(model-gateway|model_gateway|MODEL_GATEWAY)$' "$T/raw" | by_file > "$T/sp"; ratchet_counts spelling-product spelling-product "$T/sp"
+# The former name survives on one line per file: the install migration's LEGACY_NAME and its test's.
+# shellcheck disable=SC2329 # called indirectly, as the lister gin names
+migration() { all | grep -xE 'launchd/install\.sh|tests/launchd/test_install\.py'; }
+if gin "$T/raw" not_design -noiE '(model|gpt)[^a-z0-9]?gateway' \
+  && gin "$T/legacy" migration -nE '^LEGACY_NAME ?= ?"?model[-]gateway"?$'; then
+  grep -vE ':(gpt-gateway|gpt_gateway|GPT_GATEWAY)$' "$T/raw" \
+    | awk -F: 'NR==FNR{keep[$1":"$2]; next} !(($1":"$2) in keep)' "$T/legacy" - | by_file > "$T/sp"
+  ratchet_counts spelling-product spelling-product "$T/sp"
 else say spelling-product ERROR "grep could not read files"; fi
 { shs | while read -r f; do grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' "$f" | sed -E 's/^\$\{//; s/:-$//'; done
-  grep -E '^[A-Z_][A-Z0-9_]* = "[A-Z_][A-Z0-9_]*"$' model_gateway/env.py | sed -E 's/.*= "//; s/"$//'; } | sort -u > "$T/knobs"
-if [ ! -s "$T/knobs" ]; then say spelling-env-prefix ERROR "no knob names parsed from launchd/*.sh or model_gateway/env.py"
+  grep -E '^[A-Z_][A-Z0-9_]* = "[A-Z_][A-Z0-9_]*"$' gpt_gateway/env.py | sed -E 's/.*= "//; s/"$//'; } | sort -u > "$T/knobs"
+if [ ! -s "$T/knobs" ]; then say spelling-env-prefix ERROR "no knob names parsed from launchd/*.sh or gpt_gateway/env.py"
 # HOME and CODEX_HOME: read, never defined.
-else grep -vE '^(MODEL_GATEWAY_[A-Z0-9_]+|HOME|CODEX_HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
+else grep -vE '^(GPT_GATEWAY_[A-Z0-9_]+|HOME|CODEX_HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
 census spelling-kind src -nE 'conv[=]'
 
 if gin "$T/raw" src -nE '^def [A-Za-z_][A-Za-z0-9_]*|^[a-z_][a-z0-9_]*\(\) *\{'; then
@@ -113,7 +119,7 @@ else
   grep -ohE '`[^`]+`' $docs | tr -d '`' | awk '{print $1}' | sort -u > "$T/cited"
   if [ ! -s "$T/cited" ]; then say orientation-truth ERROR "no backticked citation parsed from $(echo "$docs" | tr "\n" " ")"
   else
-    knob='^MODEL_GATEWAY_[A-Z0-9_]+$' path='^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_.-]+)*/?$'
+    knob='^GPT_GATEWAY_[A-Z0-9_]+$' path='^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_.-]+)*/?$'
     while read -r n; do
       if [[ $n =~ $knob ]]; then
         # shellcheck disable=SC2046 # setup refused any path holding a space

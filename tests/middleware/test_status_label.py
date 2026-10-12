@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 
-from model_gateway.harness import run
+from gpt_gateway.harness import run
 from tests import jail
 
 MODULE = os.path.join(jail.ROOT, "middleware", "status_label.py")

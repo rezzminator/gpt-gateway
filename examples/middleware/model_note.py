@@ -1,11 +1,11 @@
-"""model-note: the smallest model-gateway middleware, and the contract's executable documentation.
+"""model-note: the smallest gpt-gateway middleware, and the contract's executable documentation.
 
 Copy it to `{middleware_dir}/model_note.py` and list it in settings.json:
 
     {"middleware": [{"module": "model_note", "settings": {"enabled": true}}]}
 
 Each proxied request's note then ends with ` model-note=<the request's model>`. It edits no
-body, so every request goes upstream byte for byte. `MODEL_GATEWAY_MODEL_NOTE=0` turns it off
+body, so every request goes upstream byte for byte. `GPT_GATEWAY_MODEL_NOTE=0` turns it off
 without touching the file; an env value reaches the validator as a string.
 """
 
@@ -25,7 +25,7 @@ def enabled_value(value):
     raise ValueError("enabled must be true or false (env: 1/0, true/false, yes/no, on/off), got %r" % (value,))
 
 
-SETTINGS = {"enabled": (True, enabled_value, "MODEL_GATEWAY_MODEL_NOTE")}
+SETTINGS = {"enabled": (True, enabled_value, "GPT_GATEWAY_MODEL_NOTE")}
 
 
 def on_request(ctx, req):

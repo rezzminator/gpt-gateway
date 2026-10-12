@@ -1,13 +1,16 @@
 #!/bin/sh
-# Installs or updates model-gateway for the current macOS user. Re-runnable.
+# Installs or updates gpt-gateway for the current macOS user. Re-runnable.
 #
-# Copies the SHIP files to ~/.local/share/model-gateway, creates middleware/ there and
+# Copies the SHIP files to ~/.local/share/gpt-gateway, creates middleware/ there and
 # copies the shipped middleware into it (each file replaces only its own copy), writes
 # settings.json listing status_label on a first install (an update validates the existing
 # one and keeps it), and writes the launchd agent. A first install turns the gateway on.
 # An update keeps the current on/off state:
 #   - on: the change applies through a graceful restart, so no stream is cut;
 #   - off: only the files change, and `ctl.sh on` turns it on.
+#
+# A former install under the old product name is migrated once: its settings and own middleware seed a first
+# install, its agent stops and is removed, its state moves here unless this install has its own, its copy goes.
 #
 # Options: --port N (default 18787).
 set -eu
@@ -23,28 +26,29 @@ case "$PORT" in ''|*[!0-9]*) echo "install.sh: --port must be a number" >&2; exi
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 # What an install copies; top-level items are flat, package subdirectories are preserved.
-SHIP="gateway.py model_gateway launchd/run.sh launchd/ctl.sh README.md LICENSE THIRD_PARTY_NOTICES.md"
-LABEL=${MODEL_GATEWAY_LABEL:-local.model-gateway}
-DEST="$HOME/.local/share/model-gateway"
+SHIP="gateway.py gpt_gateway launchd/run.sh launchd/ctl.sh README.md LICENSE THIRD_PARTY_NOTICES.md"
+LABEL=${GPT_GATEWAY_LABEL:-local.gpt-gateway}
+DEST="$HOME/.local/share/gpt-gateway"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGS="$HOME/Library/Logs"
-BACKUPS="$HOME/.local/state/model-gateway/backups"
-PY=${MODEL_GATEWAY_PYTHON:-/usr/bin/python3}
+STATE="$HOME/.local/state/gpt-gateway"
+BACKUPS="$STATE/backups"
+PY=${GPT_GATEWAY_PYTHON:-/usr/bin/python3}
 URL="http://127.0.0.1:$PORT"
 DOMAIN="gui/$(id -u)"
 # A stop drains in-flight requests for up to DRAIN seconds; launchd must wait longer than that.
 DRAIN=600
 
-JQ=${MODEL_GATEWAY_JQ:-$(command -v jq)} || { echo "install.sh: jq is required" >&2; exit 1; }
+JQ=${GPT_GATEWAY_JQ:-$(command -v jq)} || { echo "install.sh: jq is required" >&2; exit 1; }
 [ -x "$JQ" ] || { echo "install.sh: jq is required" >&2; exit 1; }
 "$PY" -I -c 'import sys; assert sys.version_info >= (3, 9)' || { echo "install.sh: $PY must be Python 3.9+" >&2; exit 1; }
 # run.sh rewrites the file the setting lives in, so it gets the real path, not a symlink to it.
-SETTINGS=$("$PY" -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${MODEL_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}")
+SETTINGS=$("$PY" -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${GPT_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}")
 [ -f "$SETTINGS" ] || { echo "install.sh: no Claude Code settings at $SETTINGS" >&2; exit 1; }
 # The suite's whole output is kept in TEST_LOG. A failure names its tests and the log. A run still going after
 # TEST_SECONDS dumps every thread's stack into the log and exits (faulthandler's own exit, so no crash report).
-TEST_SECONDS=${MODEL_GATEWAY_TEST_SECONDS:-1800}
-TEST_LOG="$LOGS/model-gateway-install-tests.log"
+TEST_SECONDS=${GPT_GATEWAY_TEST_SECONDS:-1800}
+TEST_LOG="$LOGS/gpt-gateway-install-tests.log"
 mkdir -p "$LOGS"
 TEST_RC=0
 "$PY" -I -B -c 'import faulthandler, sys, unittest
@@ -62,10 +66,52 @@ if [ "$TEST_RC" -ne 0 ]; then
   exit 1
 fi
 
+# The former install. Its settings and own middleware seed a first install here, so they are validated below
+# while it still serves.
+LEGACY_NAME=model-gateway
+LEGACY_LABEL="local.$LEGACY_NAME"
+LEGACY_DEST="$HOME/.local/share/$LEGACY_NAME"
+LEGACY_STATE="$HOME/.local/state/$LEGACY_NAME"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+if [ -d "$LEGACY_DEST" ] && [ ! -e "$DEST" ]; then
+  mkdir -p "$DEST/middleware"
+  if [ -f "$LEGACY_DEST/settings.json" ]; then cp -p "$LEGACY_DEST/settings.json" "$DEST/settings.json"; fi
+  for f in "$LEGACY_DEST"/middleware/*.py; do
+    [ -f "$f" ] || continue
+    cp -p "$f" "$DEST/middleware/"
+  done
+  echo "carried the settings and middleware of $LEGACY_DEST into $DEST"
+fi
+
 # settings.json: an existing file is kept once it validates against the middleware installed beside it.
 if [ -f "$DEST/settings.json" ]; then
   "$PY" -I "$SRC/gateway.py" check "$DEST/settings.json" >/dev/null \
     || { echo "install.sh: $DEST/settings.json is invalid (above); fix or delete it, then run again" >&2; exit 1; }
+fi
+
+# The former agent stops before this one starts: it holds the port, the database, and unlinks Claude Code as it goes.
+if [ -f "$LEGACY_PLIST" ] || launchctl print "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1; then
+  echo "stopping the former agent $LEGACY_LABEL (it drains in the background)"
+  launchctl bootout "$DOMAIN/$LEGACY_LABEL" 2>/dev/null &
+  i=0
+  while launchctl print "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ $i -ge $((DRAIN * 4 + 120)) ]; then
+      echo "install.sh: the former agent $LEGACY_LABEL did not stop; its state and copy are left as they were" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  rm -f "$LEGACY_PLIST"
+fi
+if [ -d "$LEGACY_STATE" ] && [ ! -e "$STATE" ]; then
+  mkdir -p "$(dirname "$STATE")"
+  mv "$LEGACY_STATE" "$STATE"
+  echo "moved $LEGACY_STATE to $STATE"
+fi
+if [ -d "$LEGACY_DEST" ]; then
+  rm -rf "$LEGACY_DEST"
+  echo "removed the former copy $LEGACY_DEST"
 fi
 
 CUR=$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS")
@@ -141,19 +187,19 @@ cat > "$PLIST.new" <<EOF
   <array><string>/bin/sh</string><string>$DEST/run.sh</string><string>serve</string></array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>MODEL_GATEWAY_PORT</key><string>$PORT</string>
-    <key>MODEL_GATEWAY_LOG</key><string>$LOGS/model-gateway.log</string>
-    <key>MODEL_GATEWAY_DRAIN_SECONDS</key><string>$DRAIN</string>
-    <key>MODEL_GATEWAY_PYTHON</key><string>$PY</string>
-    <key>MODEL_GATEWAY_JQ</key><string>$JQ</string>
-    <key>MODEL_GATEWAY_CLAUDE_SETTINGS</key><string>$SETTINGS</string>
+    <key>GPT_GATEWAY_PORT</key><string>$PORT</string>
+    <key>GPT_GATEWAY_LOG</key><string>$LOGS/gpt-gateway.log</string>
+    <key>GPT_GATEWAY_DRAIN_SECONDS</key><string>$DRAIN</string>
+    <key>GPT_GATEWAY_PYTHON</key><string>$PY</string>
+    <key>GPT_GATEWAY_JQ</key><string>$JQ</string>
+    <key>GPT_GATEWAY_CLAUDE_SETTINGS</key><string>$SETTINGS</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>2</integer>
   <key>ExitTimeOut</key><integer>$((DRAIN + 30))</integer>
   <key>ProcessType</key><string>Interactive</string>
-  <key>StandardErrorPath</key><string>$LOGS/model-gateway.stderr.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/gpt-gateway.stderr.log</string>
 </dict>
 </plist>
 EOF
@@ -176,7 +222,7 @@ if [ "$LOADED" = yes ] && [ "$PLIST_CHANGED" = no ] && [ "$RUN_CHANGED" = no ]; 
     i=$((i + 1))
     if [ $i -ge 80 ]; then
       echo "install.sh: the graceful restart did not take over within 20 seconds; the old gateway keeps serving" >&2
-      tail -5 "$LOGS/model-gateway.stderr.log" >&2 2>/dev/null || true
+      tail -5 "$LOGS/gpt-gateway.stderr.log" >&2 2>/dev/null || true
       exit 1
     fi
     sleep 0.25
@@ -201,7 +247,7 @@ until curl -sf --max-time 1 "$URL/__gateway/health" >/dev/null 2>&1 \
   i=$((i + 1))
   if [ $i -ge 80 ]; then
     echo "install.sh: the gateway did not come up within 20 seconds; Claude Code still talks to the API directly" >&2
-    tail -5 "$LOGS/model-gateway.stderr.log" 2>/dev/null >&2 || true
+    tail -5 "$LOGS/gpt-gateway.stderr.log" 2>/dev/null >&2 || true
     exit 1
   fi
   sleep 0.25

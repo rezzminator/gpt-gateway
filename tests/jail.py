@@ -1,7 +1,7 @@
 """The test jail: every scratch directory, port and environment a test uses comes from here.
 
 Scratch directories share one prefix and go when the test ends. `clean_env` gives a subprocess a
-scratch HOME and drops CODEX_HOME and every MODEL_GATEWAY_* variable the shell may carry, so no test reads or writes
+scratch HOME and drops CODEX_HOME and every GPT_GATEWAY_* variable the shell may carry, so no test reads or writes
 the real home or a live gateway's settings.
 """
 import json
@@ -15,7 +15,7 @@ import textwrap
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PREFIX = "model-gateway-test-"
+PREFIX = "gpt-gateway-test-"
 
 
 def scratch(test):
@@ -34,10 +34,10 @@ def free_port():
 
 
 def clean_env(home, **overrides):
-    """Drop CODEX_HOME and MODEL_GATEWAY_*; set HOME to `home` and the database inside it, then apply `overrides`."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("MODEL_GATEWAY_") and k != "CODEX_HOME"}
+    """Drop CODEX_HOME and GPT_GATEWAY_*; set HOME to `home` and the database inside it, then apply `overrides`."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GPT_GATEWAY_") and k != "CODEX_HOME"}
     env["HOME"] = home
-    env["MODEL_GATEWAY_DB"] = os.path.join(home, "state", "gateway.db")
+    env["GPT_GATEWAY_DB"] = os.path.join(home, "state", "gateway.db")
     env.update(overrides)
     return env
 

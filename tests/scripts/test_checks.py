@@ -9,7 +9,8 @@ from tests import jail
 # Spelled apart, so this file never matches the census it tests.
 PREDECESSOR = "adv" + "isor"
 OLD_NAME = "cache" + "-gateway"
-PRODUCT_VARIANT = "Model" + " Gateway"
+PRODUCT_VARIANT = "GPT" + " Gateway"
+FORMER_NAME = "model" + "-gateway"
 IDS = ("size-src", "size-test", "negation-dirs", "module-purpose", "test-mirror", "test-jail", "stray-runners",
        "facade-env", "facade-clock", "facade-log", "facade-settings", "facade-upstream", "facade-capture", "facade-db",
        "spelling-predecessor", "spelling-old-name", "spelling-product", "spelling-env-prefix", "spelling-kind",
@@ -106,48 +107,51 @@ def ignore_sources(t):
 
 
 def unreadable(t):
-    os.chmod(t.path("model_gateway/clock.py"), 0)
+    os.chmod(t.path("gpt_gateway/clock.py"), 0)
 
 
 # (check id, plant one violation, a fragment its FAIL line names)
 VIOLATIONS = (
-    ("size-src", lambda t: t.lines_of("model_gateway/clock.py", 401), "model_gateway/clock.py (new 401)"),
+    ("size-src", lambda t: t.lines_of("gpt_gateway/clock.py", 401), "gpt_gateway/clock.py (new 401)"),
     ("size-test", lambda t: t.lines_of("tests/jail.py", 601), "tests/jail.py (new 601)"),
     ("negation-dirs", lambda t: t.write("docs/misc/note.md", "x\n"), "new: docs/misc"),
-    ("module-purpose", lambda t: t.write("model_gateway/stray.py", "x = 1\n"), "new: model_gateway/stray.py"),
+    ("module-purpose", lambda t: t.write("gpt_gateway/stray.py", "x = 1\n"), "new: gpt_gateway/stray.py"),
     ("module-purpose", plant_sh_without_purpose, "new: launchd/bare.sh"),
-    ("test-mirror", lambda t: t.write("model_gateway/stray.py", '"""A stray."""\n'), "new: model_gateway/stray.py"),
+    ("test-mirror", lambda t: t.write("gpt_gateway/stray.py", '"""A stray."""\n'), "new: gpt_gateway/stray.py"),
     ("test-mirror", lambda t: t.remove("tests/test_gateway.py"), "new: gateway.py"),
     ("test-jail", lambda t: t.append("tests/fakes.py", "import " + "temp" + "file\n"), "tests/fakes.py (new 1)"),
     ("stray-runners", lambda t: t.write("tools/run.sh", "#!/bin/sh\n# runs\n"), "new: tools/run.sh"),
-    ("facade-env", lambda t: t.append("model_gateway/proxy.py", "X = os.environ\n"), "model_gateway/proxy.py (new 1)"),
-    ("facade-clock", lambda t: t.append("model_gateway/proxy.py", "X = time.time()\n"),
-     "model_gateway/proxy.py (new 1)"),
-    ("facade-log", lambda t: t.append("model_gateway/proxy.py", "import logging\n"), "model_gateway/proxy.py (new 1)"),
-    ("facade-log", lambda t: t.append("model_gateway/capture.py", "X = open('x', 'a')\n"),
-     "model_gateway/capture.py (new 1)"),
-    ("facade-settings", lambda t: t.append("model_gateway/cli.py", 'X = "settings.json"\n'),
-     "model_gateway/cli.py (new 1)"),
-    ("facade-upstream", lambda t: t.append("model_gateway/proxy.py", "X = http.client.HTTPConnection('h')\n"),
-     "model_gateway/proxy.py (new 1)"),
-    ("facade-db", lambda t: t.append("model_gateway/proxy.py", "import sqlite3\n"), "model_gateway/proxy.py (new 1)"),
-    ("facade-db", lambda t: t.append("model_gateway/cli.py", "X = sqlite3.connect(':memory:')\n"),
-     "model_gateway/cli.py (new 1)"),
-    ("facade-capture", lambda t: t.append("model_gateway/proxy.py", 'X = "5-response.body"\n'),
-     "model_gateway/proxy.py (new 1)"),
+    ("facade-env", lambda t: t.append("gpt_gateway/proxy.py", "X = os.environ\n"), "gpt_gateway/proxy.py (new 1)"),
+    ("facade-clock", lambda t: t.append("gpt_gateway/proxy.py", "X = time.time()\n"),
+     "gpt_gateway/proxy.py (new 1)"),
+    ("facade-log", lambda t: t.append("gpt_gateway/proxy.py", "import logging\n"), "gpt_gateway/proxy.py (new 1)"),
+    ("facade-log", lambda t: t.append("gpt_gateway/capture.py", "X = open('x', 'a')\n"),
+     "gpt_gateway/capture.py (new 1)"),
+    ("facade-settings", lambda t: t.append("gpt_gateway/cli.py", 'X = "settings.json"\n'),
+     "gpt_gateway/cli.py (new 1)"),
+    ("facade-upstream", lambda t: t.append("gpt_gateway/proxy.py", "X = http.client.HTTPConnection('h')\n"),
+     "gpt_gateway/proxy.py (new 1)"),
+    ("facade-db", lambda t: t.append("gpt_gateway/proxy.py", "import sqlite3\n"), "gpt_gateway/proxy.py (new 1)"),
+    ("facade-db", lambda t: t.append("gpt_gateway/cli.py", "X = sqlite3.connect(':memory:')\n"),
+     "gpt_gateway/cli.py (new 1)"),
+    ("facade-capture", lambda t: t.append("gpt_gateway/proxy.py", 'X = "5-response.body"\n'),
+     "gpt_gateway/proxy.py (new 1)"),
     ("spelling-predecessor", lambda t: t.append("README.md", PREDECESSOR.upper() + "\n"), "README.md (new 1)"),
     ("spelling-predecessor", lambda t: t.append("tests/fakes.py", "# " + PREDECESSOR + "\n"), "tests/fakes.py (new 1)"),
     ("spelling-old-name", lambda t: t.append("README.md", OLD_NAME + "\n"), "README.md (new 1)"),
     ("spelling-product", lambda t: t.append("README.md", PRODUCT_VARIANT + "\n"), "README.md (new 1)"),
+    ("spelling-product", lambda t: t.append("README.md", FORMER_NAME + "\n"), "README.md (new 1)"),
+    ("spelling-product", lambda t: t.append("launchd/ctl.sh", "LEGACY_NAME=" + FORMER_NAME + "\n"), "launchd/ctl.sh (new 1)"),
+    ("spelling-product", lambda t: t.append("launchd/install.sh", "# " + FORMER_NAME + "\n"), "launchd/install.sh (new 1)"),
     ("spelling-env-prefix", lambda t: t.append("launchd/ctl.sh", "X=${OTHER_KNOB:-1}\n"), "new: OTHER_KNOB"),
-    ("spelling-env-prefix", lambda t: t.append("model_gateway/env.py", 'STRAY = "STRAY_KNOB"\n'), "new: STRAY_KNOB"),
-    ("spelling-kind", lambda t: t.append("model_gateway/proxy.py", 'X = " conv=main"\n'),
-     "model_gateway/proxy.py (new 1)"),
-    ("dup-functions", lambda t: t.append("model_gateway/hooks.py", "def request_row():\n    pass\n"),
-     "new: request_row: model_gateway/hooks.py model_gateway/proxy.py"),
+    ("spelling-env-prefix", lambda t: t.append("gpt_gateway/env.py", 'STRAY = "STRAY_KNOB"\n'), "new: STRAY_KNOB"),
+    ("spelling-kind", lambda t: t.append("gpt_gateway/proxy.py", 'X = " conv=main"\n'),
+     "gpt_gateway/proxy.py (new 1)"),
+    ("dup-functions", lambda t: t.append("gpt_gateway/hooks.py", "def request_row():\n    pass\n"),
+     "new: request_row: gpt_gateway/hooks.py gpt_gateway/proxy.py"),
     ("registry-parity", add_ctl_arm, "new: ctl.sh:sideways"),
     ("orientation-truth", lambda t: t.append("README.md", "`docs/gone.md`\n"), "new: docs/gone.md"),
-    ("orientation-truth", lambda t: t.append("README.md", "`MODEL_GATEWAY_NOWHERE`\n"), "new: MODEL_GATEWAY_NOWHERE"),
+    ("orientation-truth", lambda t: t.append("README.md", "`GPT_GATEWAY_NOWHERE`\n"), "new: GPT_GATEWAY_NOWHERE"),
     ("orientation-truth", lambda t: t.write("docs/CLAUDE.md", "`gone.sh`\n"), "new: gone.sh"),
 )
 
@@ -159,9 +163,9 @@ ERRORS = (
     ("orientation-truth", lambda t: (t.write("README.md", "no citations\n"), t.write("CLAUDE.md", "no citations\n")), "no backticked citation parsed"),
     ("registry-parity", lambda t: t.remove("launchd"), "no dispatched case arm parsed"),
     ("registry-parity", strip_usage, "no usage line parsed"),
-    ("spelling-env-prefix", lambda t: (t.remove("launchd"), t.remove("model_gateway/env.py")), "no knob names parsed"),
+    ("spelling-env-prefix", lambda t: (t.remove("launchd"), t.remove("gpt_gateway/env.py")), "no knob names parsed"),
     ("setup", ignore_sources, "no sources listed"),
-    ("setup", unreadable, "unreadable: model_gateway/clock.py"),
+    ("setup", unreadable, "unreadable: gpt_gateway/clock.py"),
     ("setup", lambda t: t.write("docs/a b.md", "x\n"), "a path holds a space: docs/a b.md"),
 )
 
@@ -201,7 +205,7 @@ class ChecksTest(unittest.TestCase):
 
     def test_measure_adds_no_entry_to_an_existing_baseline(self):
         tree = Tree(self)
-        tree.append("model_gateway/proxy.py", "X = os.environ\n")
+        tree.append("gpt_gateway/proxy.py", "X = os.environ\n")
         code, lines, out = run(tree, "--measure")
         self.assertEqual((code, lines["facade-env"]), (0, ("MEASURE", "0 in 0 keys")), out)
         self.assertEqual(tree.read("scripts/baselines/facade-env.txt"), "")
@@ -209,15 +213,15 @@ class ChecksTest(unittest.TestCase):
 
     def test_a_count_baseline_holds_then_shrinks_on_measure(self):
         tree = Tree(self)
-        original = tree.read("model_gateway/proxy.py")
+        original = tree.read("gpt_gateway/proxy.py")
         tree.remove("scripts/baselines/facade-env.txt")
-        tree.append("model_gateway/proxy.py", "X = os.environ\n")
+        tree.append("gpt_gateway/proxy.py", "X = os.environ\n")
         self.assertEqual(run(tree, "--measure")[1]["facade-env"], ("MEASURE", "1 in 1 keys"))
-        self.assertEqual(tree.read("scripts/baselines/facade-env.txt"), "model_gateway/proxy.py 1\n")
+        self.assertEqual(tree.read("scripts/baselines/facade-env.txt"), "gpt_gateway/proxy.py 1\n")
         self.assertEqual(run(tree)[1]["facade-env"], ("PASS", "1 in 1 keys, none above baseline"))
-        tree.append("model_gateway/proxy.py", "Y = os.environ\n")
-        self.assertEqual(run(tree)[1]["facade-env"], ("FAIL", "model_gateway/proxy.py (1->2)"))
-        tree.write("model_gateway/proxy.py", original)
+        tree.append("gpt_gateway/proxy.py", "Y = os.environ\n")
+        self.assertEqual(run(tree)[1]["facade-env"], ("FAIL", "gpt_gateway/proxy.py (1->2)"))
+        tree.write("gpt_gateway/proxy.py", original)
         self.assertEqual(run(tree)[1]["facade-env"], ("PASS", "0 in 0 keys, none above baseline"))
         run(tree, "--measure")
         self.assertEqual(tree.read("scripts/baselines/facade-env.txt"), "")
@@ -225,11 +229,11 @@ class ChecksTest(unittest.TestCase):
     def test_a_list_baseline_names_the_fixed_entries_until_measure_locks_them(self):
         tree = Tree(self)
         tree.remove("scripts/baselines/untested-sources.txt")
-        tree.write("model_gateway/stray.py", '"""A stray."""\n')
+        tree.write("gpt_gateway/stray.py", '"""A stray."""\n')
         run(tree, "--measure")
-        self.assertEqual(tree.read("scripts/baselines/untested-sources.txt"), "model_gateway/stray.py\n")
+        self.assertEqual(tree.read("scripts/baselines/untested-sources.txt"), "gpt_gateway/stray.py\n")
         self.assertEqual(run(tree)[1]["test-mirror"], ("PASS", "1 baselined, 0 new"))
-        tree.remove("model_gateway/stray.py")
+        tree.remove("gpt_gateway/stray.py")
         self.assertEqual(run(tree)[1]["test-mirror"],
                          ("PASS", "0 baselined, 0 new; 1 fixed — run --measure to lock the shrink"))
         run(tree, "--measure")
@@ -237,11 +241,11 @@ class ChecksTest(unittest.TestCase):
 
     def test_the_size_slack_absorbs_five_lines_over_a_baselined_count(self):
         tree = Tree(self)
-        tree.write("scripts/baselines/ceiling-src.txt", "model_gateway/clock.py 401\n")
-        tree.lines_of("model_gateway/clock.py", 406)
+        tree.write("scripts/baselines/ceiling-src.txt", "gpt_gateway/clock.py 401\n")
+        tree.lines_of("gpt_gateway/clock.py", 406)
         self.assertEqual(run(tree)[1]["size-src"][0], "PASS")
-        tree.lines_of("model_gateway/clock.py", 407)
-        self.assertEqual(run(tree)[1]["size-src"], ("FAIL", "model_gateway/clock.py (401->407)"))
+        tree.lines_of("gpt_gateway/clock.py", 407)
+        self.assertEqual(run(tree)[1]["size-src"], ("FAIL", "gpt_gateway/clock.py (401->407)"))
 
     def test_an_unknown_mode_is_refused(self):
         code, _, out = run(Tree(self), "--bogus")

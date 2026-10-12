@@ -1,6 +1,6 @@
 # Third-party notices
 
-The ChatGPT route includes work distilled from the sources below. Their licence texts are reproduced from the pinned source copies. Files derived from openai/codex were changed for model-gateway.
+The ChatGPT route includes work distilled from the sources below. Their licence texts are reproduced from the pinned source copies. Files derived from openai/codex were changed for gpt-gateway.
 
 ## claude-code-proxy
 

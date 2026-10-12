@@ -15,7 +15,7 @@ if __name__ == "__main__":
     limit = int(sys.argv[1])
     resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
     sys.path.insert(0, ROOT)
-    from model_gateway import cli, pool, proxy
+    from gpt_gateway import cli, pool, proxy
     proxy.CLIENT_IDLE_SECONDS = float(sys.argv[2])
     pool.MAX_IDLE = int(sys.argv[3])
     sys.exit(cli.main(["serve"], ROOT))

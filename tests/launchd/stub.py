@@ -33,8 +33,8 @@ class Host:
         self.home = os.path.join(self.root, "home")
         self.src = os.path.join(self.root, "src")
         self.claude = os.path.join(self.home, ".claude", "settings.json")
-        self.dest = os.path.join(self.home, ".local", "share", "model-gateway")
-        self.plist = os.path.join(self.home, "Library", "LaunchAgents", "local.model-gateway.plist")
+        self.dest = os.path.join(self.home, ".local", "share", "gpt-gateway")
+        self.plist = os.path.join(self.home, "Library", "LaunchAgents", "local.gpt-gateway.plist")
         self.calls = os.path.join(self.root, "launchctl.calls")
         self.port = jail.free_port()
         self.env = {}
@@ -71,7 +71,7 @@ class Host:
 
     def run(self, script, *args, disabled=True):
         env = jail.clean_env(self.home, PATH=self.path, LAUNCHCTL_STUB_LOG=self.calls,
-                             LAUNCHCTL_STUB_DISABLED="local.model-gateway" if disabled else "", **self.env)
+                             LAUNCHCTL_STUB_DISABLED="local.gpt-gateway" if disabled else "", **self.env)
         p = subprocess.run(["/bin/sh", os.path.join(self.src, "launchd", script)] + list(args), env=env,
                            capture_output=True, text=True, timeout=120)
         return p.returncode, p.stdout + p.stderr

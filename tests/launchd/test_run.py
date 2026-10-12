@@ -54,10 +54,10 @@ class RunTest(unittest.TestCase):
             return json.load(f)
 
     def start(self, python="/usr/bin/python3", upstream=None):
-        env = jail.clean_env(self.dir, MODEL_GATEWAY_PYTHON=python, MODEL_GATEWAY_JQ=JQ,
-                             MODEL_GATEWAY_RETRY_SECONDS="0", MODEL_GATEWAY_CLAUDE_SETTINGS=self.settings,
-                             MODEL_GATEWAY_PORT=str(self.port), MODEL_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
-                             MODEL_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
+        env = jail.clean_env(self.dir, GPT_GATEWAY_PYTHON=python, GPT_GATEWAY_JQ=JQ,
+                             GPT_GATEWAY_RETRY_SECONDS="0", GPT_GATEWAY_CLAUDE_SETTINGS=self.settings,
+                             GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
+                             GPT_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
         # A file, not a pipe: a read to the end of a pipe waits for every gateway still draining to let go of it.
         self.errors = open(os.path.join(self.dir, "run.err"), "wb")
         self.proc = subprocess.Popen(["/bin/sh", os.path.join(self.app, "run.sh"), "serve"], env=env,

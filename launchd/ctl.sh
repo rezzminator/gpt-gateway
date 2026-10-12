@@ -1,5 +1,5 @@
 #!/bin/sh
-# Turns model-gateway on or off by hand. The state holds across logins
+# Turns gpt-gateway on or off by hand. The state holds across logins
 # until changed here; nothing else turns it on or off.
 #
 #   ctl.sh on        start it; Claude Code uses it once it answers
@@ -11,13 +11,13 @@
 #   ctl.sh status    on or off, its health, and where Claude Code points
 set -eu
 
-LABEL=${MODEL_GATEWAY_LABEL:-local.model-gateway}
+LABEL=${GPT_GATEWAY_LABEL:-local.gpt-gateway}
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 [ -f "$PLIST" ] || { echo "ctl.sh: not installed ($PLIST missing); run launchd/install.sh" >&2; exit 1; }
-PORT=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_PORT raw "$PLIST")
-SETTINGS=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_CLAUDE_SETTINGS raw "$PLIST")
-JQ=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_JQ raw "$PLIST")
+PORT=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_PORT raw "$PLIST")
+SETTINGS=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_CLAUDE_SETTINGS raw "$PLIST")
+JQ=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_JQ raw "$PLIST")
 URL="http://127.0.0.1:$PORT"
 
 health() { curl -sf --max-time 1 "$URL/__gateway/health" 2>/dev/null; }
@@ -31,7 +31,7 @@ case "${1:-}" in
     i=0
     until health >/dev/null && linked; do
       i=$((i + 1))
-      [ $i -ge 80 ] && { echo "ctl.sh: the gateway did not come up within 20 seconds; see ~/Library/Logs/model-gateway.stderr.log" >&2; exit 1; }
+      [ $i -ge 80 ] && { echo "ctl.sh: the gateway did not come up within 20 seconds; see ~/Library/Logs/gpt-gateway.stderr.log" >&2; exit 1; }
       sleep 0.25
     done
     echo "on: $(health)"

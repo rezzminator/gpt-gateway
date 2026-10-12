@@ -1,9 +1,9 @@
 #!/bin/sh
-# Removes model-gateway. Stopping the agent makes run.sh point Claude Code back
+# Removes gpt-gateway. Stopping the agent makes run.sh point Claude Code back
 # at the API at once and lets in-flight streams finish; if the setting is still
 # there afterwards (run.sh was not running), this script removes it itself.
 # Then it deletes the launchd agent and the installed copy, keeping settings.json
-# and middleware/ in ~/.local/state/model-gateway/backups/ first.
+# and middleware/ in ~/.local/state/gpt-gateway/backups/ first.
 # --purge also deletes the logs and the database.
 set -eu
 
@@ -14,21 +14,21 @@ case "${1:-}" in
   *) echo "usage: uninstall.sh [--purge]" >&2; exit 2 ;;
 esac
 
-LABEL=${MODEL_GATEWAY_LABEL:-local.model-gateway}
-DEST="$HOME/.local/share/model-gateway"
+LABEL=${GPT_GATEWAY_LABEL:-local.gpt-gateway}
+DEST="$HOME/.local/share/gpt-gateway"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGS="$HOME/Library/Logs"
-BACKUPS="$HOME/.local/state/model-gateway/backups"
-DB="$HOME/.local/state/model-gateway/gateway.db"
+BACKUPS="$HOME/.local/state/gpt-gateway/backups"
+DB="$HOME/.local/state/gpt-gateway/gateway.db"
 DOMAIN="gui/$(id -u)"
 
 PORT=18787
-SETTINGS=${MODEL_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
-JQ=${MODEL_GATEWAY_JQ:-jq}
+SETTINGS=${GPT_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
+JQ=${GPT_GATEWAY_JQ:-jq}
 if [ -f "$PLIST" ]; then
-  PORT=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_PORT raw "$PLIST" 2>/dev/null || echo "$PORT")
-  SETTINGS=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_CLAUDE_SETTINGS raw "$PLIST" 2>/dev/null || echo "$SETTINGS")
-  JQ=$(plutil -extract EnvironmentVariables.MODEL_GATEWAY_JQ raw "$PLIST" 2>/dev/null || echo "$JQ")
+  PORT=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_PORT raw "$PLIST" 2>/dev/null || echo "$PORT")
+  SETTINGS=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_CLAUDE_SETTINGS raw "$PLIST" 2>/dev/null || echo "$SETTINGS")
+  JQ=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_JQ raw "$PLIST" 2>/dev/null || echo "$JQ")
 fi
 URL="http://127.0.0.1:$PORT"
 
@@ -62,8 +62,8 @@ fi
 rm -f "$PLIST"
 rm -rf "$DEST"
 if [ "$PURGE" = yes ]; then
-  rm -f "$LOGS/model-gateway.log" "$LOGS/model-gateway.log.1" "$LOGS/model-gateway.stderr.log" "$LOGS/model-gateway-install-tests.log"
+  rm -f "$LOGS/gpt-gateway.log" "$LOGS/gpt-gateway.log.1" "$LOGS/gpt-gateway.stderr.log" "$LOGS/gpt-gateway-install-tests.log"
   rm -f "$DB" "$DB-wal" "$DB-shm"
   echo "logs and database deleted"
 fi
-echo "model-gateway removed"
+echo "gpt-gateway removed"
