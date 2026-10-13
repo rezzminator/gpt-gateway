@@ -3,7 +3,10 @@
 The response streams back as it arrives: each upstream chunk is written and flushed before the next
 is read, and the event hooks and the usage meter see it only after the client has. A request a hook
 answered goes to no upstream: its answer takes the same relay. Every request but the health check
-becomes one `requests` row in the database, its usage read off the relay; on_response_end runs after it.
+becomes one `requests` row in the database, its usage read off the relay; on_response_end runs after it. An Anthropic
+row carries its transport (reused, stale, attempts) and a failure's class; a failed read of the upstream's body is the
+upstream's failure, a failed write to the client the client leaving. Every request, the health check included, first
+looks for a host pause (`gpt_gateway/reach.py`): one closes the idle upstream connections, which did not survive it.
 """
 import json
 import copy
@@ -14,6 +17,7 @@ from .capture import Capture
 from .headers import HOP, Headers, debug_headers
 from .health import HEALTH_PATH, health_line
 from .hooks import Context, Request, Result, parse_object
+from .reach import error_class
 from .response import Response
 from .upstream import UpstreamError
 from .usage import Meter
@@ -86,8 +90,12 @@ def metered(method, path, status):
 
 
 def error_detail(body, headers):
-    """An error reply's context, never its body: the request's shape and the rate-limit headers."""
+    """An error reply's context, never its body: the request's shape, the upstream's request id and the rate-limit
+    headers; empty when there is none of them."""
     detail = {}
+    request_id = next((v for k, v in headers if k.lower() == "request-id"), None)
+    if request_id:
+        detail["upstream_request_id"] = request_id
     if body is not None:
         msgs, tools = body.get("messages") or [], body.get("tools") or []
         detail.update(max_tokens=body.get("max_tokens"), messages=len(msgs) if isinstance(msgs, list) else -1,
@@ -157,6 +165,8 @@ class Handler(BaseHTTPRequestHandler):
         rt = self.server.runtime
         self.connection.settimeout(None)  # the request is in; the idle limit does not cut its body, hooks or stream
         snap = rt.settings.current()  # one settings snapshot per request
+        if rt.pause.check():
+            rt.upstream.pool.clear()  # idle connections from before the pause are dead, or die on their next use
         if self.path == HEALTH_PATH:
             return self.reply(200, "text/plain", health_line(snap, rt).encode())
         rt.drain.begin(self.connection)
@@ -184,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, "application/json", data)
             return self.record(rt, dict(row, route="anthropic"), started, status=400, completed=True,
                                error_code="invalid_request_error", error_head=data)
+        row["request_bytes"] = len(raw)
         body = parse_object(raw)
         selected = ("anthropic", None, None)
         if rt.chatgpt is not None:
@@ -232,16 +243,19 @@ class Handler(BaseHTTPRequestHandler):
             headers.append(("content-length", str(len(sent))))
         sent_at = clock.monotonic()
         try:
-            resp = rt.upstream.send(self.command, self.path, sent or None, headers)
+            resp = rt.upstream.send(self.command, self.path, sent or None, headers, request_id=seq)
         except UpstreamError as e:
+            row.update(zip(("reused", "stale"), rt.upstream.reuse()), attempts=rt.upstream.attempts())
             cap.gateway_error(502, e.message)
             data = json.dumps({"type": "error", "error": {"type": "api_error",
                                                           "message": "gpt-gateway: " + e.message}}).encode()
             self.reply(502, "application/json", data)
-            self.record(rt, row, started, status=502, completed=True, error_code="api_error", error_head=data)
+            self.record(rt, row, started, status=502, completed=True, error_code="api_error", error_head=data,
+                        error_class=e.error_class)
             rt.chain.run_response_end(ctx, Result(502, "Bad Gateway", (), data[:ERROR_HEAD], True, False,
                                                   clock.monotonic() - started, note))
             return
+        row.update(zip(("reused", "stale"), rt.upstream.reuse()), attempts=rt.upstream.attempts())
         self.relay(rt, ctx, resp, note, body, cap, started, rt.upstream, row, sent_at)
 
     def spend(self, upstream, resp):
@@ -259,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
         resp_headers = tuple(resp.getheaders())
         cap.response(resp.status, resp.reason, resp_headers)
         no_body = self.command == "HEAD" or resp.status in (204, 304) or 100 <= resp.status < 200
-        error_head, completed, disconnected, sink, failure = b"", False, False, None, None
+        error_head, completed, disconnected, sink, failure, reading = b"", False, False, None, None, False
         meter = Meter(resp.getheader("content-type") if metered(self.command, self.path, resp.status) else None)
         try:  # the client may be gone before the headers reach it, so they are inside the try too
             self.send_response(resp.status)
@@ -269,14 +283,18 @@ class Handler(BaseHTTPRequestHandler):
             if no_body:
                 self.send_header("content-length", "0")
                 self.end_headers()
+                reading = True
                 resp.read()
+                reading = False
                 first = last = clock.monotonic()
             else:
                 self.send_header("transfer-encoding", "chunked")
                 self.end_headers()
                 sink = rt.chain.event_sink(ctx, resp.getheader("content-type"))
                 while True:
+                    reading = True
                     chunk = resp.read1(CHUNK)
+                    reading = False
                     if not chunk:
                         last = clock.monotonic()
                         first = last if first is None else first
@@ -294,14 +312,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             completed = True
-        except (BrokenPipeError, ConnectionResetError):
-            self.spend(upstream, resp)  # the client left mid-stream
-            disconnected = True
-            self.close_connection = True
         except Exception as e:
             self.spend(upstream, resp)
-            failure = repr(e)
             self.close_connection = True
+            if not reading and isinstance(e, (BrokenPipeError, ConnectionResetError)):
+                disconnected = True  # the client left mid-stream
+            else:
+                failure = repr(e)
+                if reading:  # the upstream's body broke off
+                    row["error_class"] = getattr(e, "error_class", None) or error_class(e)
         if sink is not None:
             sink.close(completed)
         meter.finish()
@@ -318,8 +337,9 @@ class Handler(BaseHTTPRequestHandler):
     def finish_row(self, rt, row, resp, completed, disconnected, failure, error_head, meter, body, resp_headers):
         """The relay's share of the row; an error reply's context and an unreadable usage as events."""
         relay_row(row, resp.status, completed, disconnected, failure, error_head, meter)
-        if resp.status >= 400:
-            rt.db.event("error_detail", request_id=row["request_id"], **error_detail(body, resp_headers))
+        detail = error_detail(body, resp_headers) if resp.status >= 400 else None
+        if detail:
+            rt.db.event("error_detail", request_id=row["request_id"], **detail)
         if (completed and resp.status == 200 and meter.unread and row["route"] == "anthropic" and self.command == "POST"
                 and self.path.split("?", 1)[0] == MESSAGES_PATH):
             rt.db.event("usage_unread", request_id=row["request_id"], reason=meter.unread)

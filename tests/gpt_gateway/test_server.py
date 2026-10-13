@@ -14,7 +14,7 @@ import unittest
 
 from unittest import mock
 
-from gpt_gateway import clock, db, handles, proxy
+from gpt_gateway import cli, clock, db, handles, proxy
 from gpt_gateway.server import Drain, Server
 from tests import fakes, jail
 
@@ -87,8 +87,10 @@ class DrainTest(unittest.TestCase):
         self.assertIn("stop: drained, exiting", self.logged())
         self.assertEqual([(r["pid"], json.loads(r["fields"])["left"]) for r in self.recorded(
             "SELECT pid, fields FROM events WHERE kind = 'stop'")], [(old.pid, 0)])
-        self.assertEqual(sorted(r["pid"] for r in self.recorded("SELECT pid FROM events WHERE kind = 'start'")),
-                         sorted([old.pid, new.pid]))
+        build = cli.build(os.path.join(self.app, "gpt_gateway"))
+        self.assertEqual(sorted((r["pid"], json.loads(r["fields"]).get("build")) for r in self.recorded(
+            "SELECT pid, fields FROM events WHERE kind = 'start'")), sorted([(old.pid, build), (new.pid, build)]))
+        self.assertRegex(str(build), "^[0-9a-f]{12}$")  # each start names the code it runs
         self.assertIn({"pid": old.pid, "completed": 1}, self.recorded("SELECT pid, completed FROM requests"))
 
     def test_drain_gives_up_at_its_limit(self):

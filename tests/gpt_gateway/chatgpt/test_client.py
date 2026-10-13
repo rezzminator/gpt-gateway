@@ -2,11 +2,12 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from gpt_gateway.chatgpt.auth import Credentials
 from gpt_gateway.chatgpt.client import Client
 from gpt_gateway.chatgpt.request import Translation
+from gpt_gateway.upstream import UpstreamError
 from tests import fakes
 
 
@@ -27,6 +28,26 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(headers.get("x-openai-internal-codex-responses-lite"), "true" if lite else None)
         self.assertEqual(client.models(creds), fakes.CHATGPT_MODELS)
         self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
+
+    def test_responses_name_the_request_to_the_upstream_for_its_retry_event(self):
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
+        client.upstream = Mock()
+        client.responses(Translation(b"{}", False, {}, (), 2), "invented-lane",
+                         Credentials("invented-bearer", "invented-account"), request_id=7)
+        self.assertEqual(client.upstream.send.call_args.kwargs.get("request_id"), 7)
+
+    def test_a_websocket_that_fails_to_start_carries_its_cause_class(self):
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
+        client.sockets = Mock()
+        client.sockets.checkout.return_value = SimpleNamespace(exchanges=0, baseline=None)  # a fresh socket
+        for cause, expected in ((ConnectionResetError(104, "Connection reset by peer"), "reset"),
+                                (UpstreamError("upstream unreachable: timeout('timed out')", "timeout"), "timeout")):
+            with self.subTest(cause=repr(cause)), patch("gpt_gateway.chatgpt.websocket.Answer") as answer:
+                answer.return_value.start.side_effect = cause
+                with self.assertRaises(UpstreamError) as caught:
+                    client._over_websocket(Translation(b"{}", False, {}, (), 2), "invented-lane",
+                                           Credentials("invented-bearer", "invented-account"), None, None)
+                self.assertEqual(caught.exception.error_class, expected)
 
     def test_drop_cancels_the_reader_before_closing_connection(self):
         client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)

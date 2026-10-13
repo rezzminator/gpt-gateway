@@ -351,15 +351,14 @@ class RouteRetryTest(unittest.TestCase):
         attempts = []
         def transient(*args):
             attempts.append(1)
-            if len(attempts) == 1:
-                raise UpstreamError("invented transport")
+            if len(attempts) != 2:  # the first request's first attempt, then every attempt of the second request
+                raise UpstreamError("invented transport", "dns")
             return original(*args)
-        with patch.object(rt.chatgpt.client, "responses", side_effect=transient), \
-                patch("gpt_gateway.chatgpt.errors.backoff", return_value=0):
+        with patch.object(rt.chatgpt.client, "responses", side_effect=transient), patch("gpt_gateway.chatgpt.errors.backoff", return_value=0):
             self.assertEqual(self.send(port)[0].status, 200)
-        self.assertEqual(len(attempts), 2)
-        self.assertEqual([(e["fields"]["status"], e["fields"]["attempt"]) for e in fakes.events(rt, "retry")],
-                         [("transport", 1)])
+            self.assertEqual((len(attempts), [(e["fields"]["status"], e["fields"]["attempt"], e["fields"].get("error_class")) for e in fakes.events(rt, "retry")]), (2, [("transport", 1, "dns")]))
+            self.send(port)  # every attempt fails: the final row and its final_error event carry the failure's class
+        self.assertEqual(([r["error_class"] for r in fakes.recorded(rt) if r["route"] == "chatgpt"], fakes.events(rt, "final_error")[-1]["fields"].get("error_class")), ([None, "dns"], "dns"))
         with patch.object(rt.chatgpt.store, "credentials", side_effect=AuthError("invented transient")):
             resp, data = self.send(port)
         self.assertEqual(resp.status, 503)
@@ -544,9 +543,9 @@ class CodexRouteTest(unittest.TestCase):
                 with patch("gpt_gateway.chatgpt.errors.backoff", return_value=0) as backoff:
                     self.assertEqual({status for status, _ in self.keepalive(port, turns)}, {200})
                 backoff.assert_called_once_with(1)
-                self.assertEqual([{k: e["fields"][k] for k in ("status", "attempt", "action", "error_head")}
-                                  for e in fakes.events(rt, "retry")], [{"status": "transport", "attempt": 1,
-                                  "action": "retry", "error_head": "IncompleteRead(0 bytes read)"}])
+                self.assertEqual([{k: e["fields"].get(k) for k in ("status", "attempt", "action", "error_head", "error_class")}
+                                  for e in fakes.events(rt, "retry")], [{"status": "transport", "attempt": 1, "action":
+                                  "retry", "error_head": "IncompleteRead(0 bytes read)", "error_class": "reset"}])
                 self.assertEqual(fakes.events(rt, "final_error"), [])
                 row = fakes.gpt_rows(rt)[-1]
                 self.assertEqual((row["attempts"], row["reused"], row["stale"], row["transport"]), (2, 0, stale, "http"))

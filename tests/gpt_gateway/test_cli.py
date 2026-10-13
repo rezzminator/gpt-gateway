@@ -5,6 +5,7 @@ Each runs gateway.py as a process from a staged install, as run.sh does.
 import io
 import json
 import os
+import sqlite3
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 import subprocess
@@ -91,6 +92,37 @@ class ChatGPTStatsTest(unittest.TestCase):
             "no gpt responses in " + only,
             "anthropic model=claude-x timed=1 ttfb_ms p50=100 p95=100 upstream_ms p50=300 p95=300 total_ms p50=310 p95=310"],
             ""))
+
+    def test_the_claude_route_transport_line_counts_reuse_retries_and_failures_by_class(self):
+        d = jail.scratch(self)
+        path = os.path.join(d, "gateway.db")
+        claude = {"route": "anthropic", "kind": "main", "slug": None, "model": "claude-x"}
+        self.seed(path, dict(claude, reused=0, stale=0, attempts=1), dict(claude, reused=1, stale=0, attempts=1),
+                  dict(claude, reused=0, stale=1, attempts=2),
+                  dict(claude, reused=0, stale=1, attempts=2, status=502, error_class="tls"),
+                  dict(claude, reused=1, stale=0, attempts=1, status=200, error_class="reset"),
+                  dict(claude, path="/__unsent"),  # answered by a hook: it never went upstream
+                  dict(claude, reused=1, stale=0, attempts=1, error_class="tls", started=clock.now() - 7200))
+        lines = self.stats(d, path, "--since", "1h")[1]
+        self.assertEqual(lines[-1], "anthropic transport sent=5 reused=2 retried=2 failed=2 classes=reset:1,tls:1")
+        before = self.stats(d, path)[1]
+        self.assertEqual(before[-1], "anthropic transport sent=6 reused=3 retried=2 failed=3 classes=reset:1,tls:2")
+        conn = sqlite3.connect(path)  # the file as an earlier gateway left it, before this one's first write
+        conn.execute("ALTER TABLE requests DROP COLUMN error_class")
+        conn.close()
+        self.assertEqual(self.stats(d, path), (0, before[:-1] + [
+            "anthropic transport unread: %s: no such column: error_class" % path], ""))
+
+
+class BuildTest(unittest.TestCase):
+    def test_the_build_names_the_package_sources_byte_for_byte(self):
+        d = jail.scratch(self)
+        a, b = (os.path.join(jail.stage_install(os.path.join(d, name)), "gpt_gateway") for name in "ab")
+        self.assertRegex(str(cli.build(a)), "^[0-9a-f]{12}$")
+        self.assertEqual(cli.build(a), cli.build(b))
+        with open(os.path.join(b, "clock.py"), "a") as f:
+            f.write("\n")
+        self.assertNotEqual(cli.build(a), cli.build(b))
 
 
 MW_CLI = '''

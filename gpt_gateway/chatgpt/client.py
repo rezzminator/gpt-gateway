@@ -8,6 +8,7 @@ permission notice in THIRD_PARTY_NOTICES.md).
 import json
 import threading
 
+from ..reach import error_class
 from ..upstream import Upgrade, Upstream, UpstreamError
 from . import continuation, identity, turn, websocket
 
@@ -24,10 +25,10 @@ class Client:
                     "ChatGPT-Account-ID": credentials.account_id})
 
     # codex-rs/core/src/client.rs:652-660,947-1071; no ingress headers cross this boundary.
-    def responses(self, translation, lane_key, credentials, turn_state=None, observe=None, fork=False):
+    def responses(self, translation, lane_key, credentials, turn_state=None, observe=None, fork=False, request_id=None):
         """The upstream answer: over the lane's kept WebSocket while it serves, else an HTTP POST. `observe` receives a
         turn-state token a WebSocket response issues in a `response.metadata` event; a `fork` waits longest for its
-        lane's busy socket."""
+        lane's busy socket. `request_id`: the gateway's number for the request, named in an `upstream_retry` event."""
         self.local.transport = "http"
         if self.sockets is not None and self.sockets.usable():
             answer = self._over_websocket(translation, lane_key, credentials, turn_state, observe, fork)
@@ -41,7 +42,8 @@ class Client:
             headers["x-openai-internal-codex-responses-lite"] = "true"
         if turn_state:
             headers[turn.HEADER] = turn_state  # codex-rs/core/src/client.rs:2119-2140
-        return self.upstream.send("POST", "/backend-api/codex/responses", translation.body_bytes, headers.items())
+        return self.upstream.send("POST", "/backend-api/codex/responses", translation.body_bytes, headers.items(),
+                                  request_id=request_id)
 
     # codex-rs/core/src/client.rs:2336-2354: the upgrade carries the HTTP request's headers and the beta.
     def _upgrade_headers(self, translation, lane_key, credentials):
@@ -88,7 +90,7 @@ class Client:
                 reason = error.message if isinstance(error, UpstreamError) else "websocket: %r" % (error,)
                 if not isinstance(error, websocket.Reconnect):
                     self.sockets.failed(reason)
-                raise UpstreamError(reason)
+                raise UpstreamError(reason, error_class(error))  # the cause's class, for the row and its events
 
     def reuse(self):
         """(reused, stale, transport, delta) of this thread's last Responses send: `ws` with the WebSocket's

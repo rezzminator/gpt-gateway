@@ -50,12 +50,11 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual(frames.parse_frame(bytearray(frame + b"next")), (True, frames.TEXT, payload, len(frame)))
                 for cut in {1, len(frame) - 1} - {0}:
                     self.assertIsNone(frames.parse_frame(bytearray(frame[:cut])))
-        with self.assertRaisesRegex(UpstreamError, "masked"):
-            frames.parse_frame(bytearray(b"\x81\x81abcdx"))
-        with self.assertRaisesRegex(UpstreamError, "reserved bits"):
-            frames.parse_frame(bytearray(b"\xc1\x00"))
-        with self.assertRaisesRegex(UpstreamError, "exceeds the limit"):
-            frames.parse_frame(bytearray(b"\x81\x7f" + struct.pack("!Q", frames.MESSAGE_LIMIT + 1)))
+        for data, text in ((b"\x81\x81abcdx", "masked"), (b"\xc1\x00", "reserved bits"),
+                           (b"\x81\x7f" + struct.pack("!Q", frames.MESSAGE_LIMIT + 1), "exceeds the limit")):
+            with self.subTest(text=text), self.assertRaisesRegex(UpstreamError, text) as cm:
+                frames.parse_frame(bytearray(data))
+            self.assertEqual(cm.exception.error_class, "protocol")  # the row's class of a frame the protocol forbids
 
     def test_receive_joins_fragments_answers_pings_and_sends_masked_frames(self):
         ws, peer = self.pair()
@@ -72,18 +71,19 @@ class FramesTest(unittest.TestCase):
 
     def test_close_eof_binary_and_out_of_sequence_frames_end_the_receive(self):
         cases = [(server_frame(frames.CLOSE, struct.pack("!H", 1001) + b"going away"), ConnectionResetError,
-                  "closed by the server: 1001 going away"),
-                 (b"", ConnectionResetError, "without a close frame"),
-                 (server_frame(frames.BINARY, b"\x00"), UpstreamError, "binary message"),
-                 (server_frame(frames.CONTINUATION, b"x"), UpstreamError, "out of sequence")]
-        for data, error, text in cases:
+                  "closed by the server: 1001 going away", None),  # a dropped socket, classed by its type: reset
+                 (b"", ConnectionResetError, "without a close frame", None),
+                 (server_frame(frames.BINARY, b"\x00"), UpstreamError, "binary message", "protocol"),
+                 (server_frame(frames.CONTINUATION, b"x"), UpstreamError, "out of sequence", "protocol")]
+        for data, error, text, cls in cases:
             with self.subTest(text=text):
                 ws, peer = self.pair()
                 peer.sendall(data)
                 if not data:
                     peer.shutdown(socket.SHUT_WR)
-                with self.assertRaisesRegex(error, text):
+                with self.assertRaisesRegex(error, text) as cm:
                     ws.receive()
+                self.assertEqual(getattr(cm.exception, "error_class", None), cls)
 
     def test_alive_answers_idle_pings_and_sees_a_close_or_a_stray_message(self):
         ws, peer = self.pair()

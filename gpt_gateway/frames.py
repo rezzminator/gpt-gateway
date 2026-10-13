@@ -29,9 +29,10 @@ def parse_frame(buffer):
         return None
     first, second = buffer[0], buffer[1]
     if first & 0x70:
-        raise UpstreamError("websocket protocol error: reserved bits %#x without a negotiated extension" % first)
+        raise UpstreamError("websocket protocol error: reserved bits %#x without a negotiated extension" % first,
+                            "protocol")
     if second & 0x80:
-        raise UpstreamError("websocket protocol error: the server masked a frame")
+        raise UpstreamError("websocket protocol error: the server masked a frame", "protocol")
     length, start = second & 0x7F, 2
     if length == 126:
         if len(buffer) < 4:
@@ -42,7 +43,7 @@ def parse_frame(buffer):
             return None
         length, start = struct.unpack_from("!Q", buffer, 2)[0], 10
     if length > MESSAGE_LIMIT:
-        raise UpstreamError("websocket protocol error: a %d-byte frame exceeds the limit" % length)
+        raise UpstreamError("websocket protocol error: a %d-byte frame exceeds the limit" % length, "protocol")
     if len(buffer) < start + length:
         return None
     return bool(first & 0x80), first & 0x0F, bytes(buffer[start:start + length]), start + length
@@ -100,11 +101,11 @@ class WebSocket:
             if opcode in (TEXT, BINARY) and kind is None:
                 kind = opcode
             elif opcode != CONTINUATION or kind is None:
-                raise UpstreamError("websocket protocol error: opcode %#x out of sequence" % opcode)
+                raise UpstreamError("websocket protocol error: opcode %#x out of sequence" % opcode, "protocol")
             parts.append(payload)
             if fin:
                 if kind == BINARY:
-                    raise UpstreamError("websocket protocol error: a binary message")
+                    raise UpstreamError("websocket protocol error: a binary message", "protocol")
                 return b"".join(parts)
 
     def alive(self, ping=False):

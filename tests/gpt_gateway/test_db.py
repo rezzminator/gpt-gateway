@@ -4,6 +4,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler
 import json
 import os
+import sqlite3
 import threading
 import time
 import unittest
@@ -152,6 +153,8 @@ class QueueTest(unittest.TestCase):
         self.addCleanup(store.close)
         self.assertTrue(store.flush())
         self.assertEqual((len(lines), store.drops, store.dropping), (1, 1, False))
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(self.path, "SELECT kind, fields FROM events")],
+                         [("a", {}), ("db_lost", {"drops": 1, "errors": 0})])  # the file itself says what it lacks
 
 
 class FailureTest(unittest.TestCase):
@@ -189,9 +192,87 @@ class WriterTest(unittest.TestCase):
             self.assertTrue(store.flush())
         store.event("kept")
         self.assertTrue(store.flush())
-        self.assertEqual([r["kind"] for r in db.query(path, "SELECT kind FROM events")], ["kept"])
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(path, "SELECT kind, fields FROM events")],
+                         [("kept", {}), ("db_lost", {"drops": 0, "errors": 1})])
+        store.event("later")
+        self.assertTrue(store.flush())
+        self.assertEqual(len(db.query(path, "SELECT 1 FROM events WHERE kind = 'db_lost'")), 1)  # one per loss
         self.assertEqual((store.errors, len(lines)), (1, 1))
         self.assertIn("RuntimeError('boom')", lines[0])
+
+    def test_a_db_lost_event_that_cannot_be_written_is_carried_by_the_next(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        store, _ = opened(self, path)
+        write = store._write
+
+        def refusing(conn, rows):
+            if any(table == "events" and value[1] == "db_lost" for table, value in rows):
+                raise RuntimeError("db_lost refused")
+            return write(conn, rows)
+        with mock.patch.object(store, "_write", side_effect=RuntimeError("boom")):
+            store.event("lost")
+            self.assertTrue(store.flush())
+        with mock.patch.object(store, "_write", side_effect=refusing):
+            store.event("kept")
+            self.assertTrue(store.flush())
+        store.event("later")
+        self.assertTrue(store.flush())
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(path, "SELECT kind, fields FROM events")],
+                         [("kept", {}), ("later", {}), ("db_lost", {"drops": 0, "errors": 2})])
+
+
+ADDED = ("error_class", "request_bytes")  # the requests columns a database made before them lacks
+
+
+class MigrationTest(unittest.TestCase):
+    def test_a_database_made_before_new_columns_gains_them_in_place_and_keeps_every_row(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        conn = sqlite3.connect(path)
+        conn.executescript(db.SCHEMA)
+        for name in ADDED:
+            if name in [c[1] for c in conn.execute("PRAGMA table_info(requests)")]:
+                conn.execute("ALTER TABLE requests DROP COLUMN %s" % name)
+        conn.executemany("INSERT INTO requests (started, pid, route, method, path, status) VALUES (?, 1, 'anthropic',"
+                         " 'POST', '/v1/messages', 200)", [(time.time() - n,) for n in range(5000)])  # inside the retention
+        conn.commit()
+        conn.close()
+        store, lines = opened(self, path)
+        store.request({"started": time.time(), "route": "anthropic", "method": "POST", "path": "/v1/messages",
+                       "status": 502, "error_class": "tls", "request_bytes": 12})
+        self.assertTrue(store.flush())
+        names = [c["name"] for c in db.query(path, "PRAGMA table_info(requests)")]
+        self.assertEqual([name for name in ADDED if name in names], list(ADDED))
+        self.assertEqual(names[-len(ADDED):], list(ADDED))  # appended, as a fresh database has them
+        self.assertEqual(db.query(path, "SELECT count(*) AS n, count(error_class) AS typed FROM requests"),
+                         [{"n": 5001, "typed": 1}])
+        self.assertEqual(db.query(path, "SELECT error_class, request_bytes FROM requests WHERE status = 502"),
+                         [{"error_class": "tls", "request_bytes": 12}])
+        self.assertEqual((store.errors, lines), (0, []))
+        store.close()
+        again, _ = opened(self, path)  # a second start finds nothing to add
+        again.event("start")
+        self.assertTrue(again.flush())
+        self.assertEqual(again.errors, 0)
+
+    def test_a_column_another_gateway_added_first_is_no_failure(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        store, _ = opened(self, path)
+        store.event("start")
+        self.assertTrue(store.flush())
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+
+        class Late:
+            """The listing this gateway read before the other one's ALTER TABLE: the new columns still missing."""
+
+            def execute(self, sql, *args):
+                rows = conn.execute(sql, *args)
+                return [r for r in rows if r[1] not in ADDED] if sql.startswith("PRAGMA table_info") else rows
+        try:
+            store._migrate(Late())
+        except sqlite3.OperationalError as error:
+            self.fail("a column the other gateway added first failed this one's start: %r" % error)
+        self.assertEqual([c[1] for c in conn.execute("PRAGMA table_info(requests)")][-len(ADDED):], list(ADDED))
 
 
 class RetentionTest(unittest.TestCase):
@@ -320,8 +401,8 @@ class EndToEndTest(unittest.TestCase):
                  "cache_write_tokens", "output_tokens", "hit", "attempts", "transport", "completed")
         rows = [tuple(r[n] for n in names) for r in fakes.recorded(rt)]
         self.assertEqual(rows, [
-            ("anthropic", 1, 200, "claude-x", None, "s-1", 5110, 5000, 100, 7, 5000 / 5110, None, None, 1),
-            ("anthropic", 0, 200, "claude-x", None, "s-1", 5110, 5000, 100, 2, 5000 / 5110, None, None, 1),
+            ("anthropic", 1, 200, "claude-x", None, "s-1", 5110, 5000, 100, 7, 5000 / 5110, 1, None, 1),
+            ("anthropic", 0, 200, "claude-x", None, "s-1", 5110, 5000, 100, 2, 5000 / 5110, 1, None, 1),
             ("chatgpt", 1, 200, "gpt-test", "gpt-test", None, 100, 60, 0, 8, 0.6, 2, "http", 1),
             ("chatgpt", 0, 200, "gpt-test", "gpt-test", None, 100, 60, 0, 8, 0.6, 1, "http", 1)])
         retries = fakes.events(rt, "retry")

@@ -6,11 +6,15 @@ import json
 import os
 import socket
 import struct
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
+from unittest import mock
 
+from gpt_gateway import clock
 from tests import fakes, jail
-from tests.fakes import ERROR_BODY, JSON_BODY, RECORDER, SSE_BODY, Upstream, calls
+from tests.fakes import ERROR_BODY, JSON_BODY, RECORDER, SSE_BODY, SSE_EVENTS, Upstream, calls
 
 ODD = b'{"model":  "claude-x", "stream": true,\n "messages": [{"role": "user", "content": "hi"}]}'
 EDIT = 'NAME = "edit"\ndef on_request(ctx, req):\n    req.body["added"] = 1\n    req.mark_changed()\n'
@@ -29,6 +33,43 @@ ROW = ("method", "path", "status", "kind", "route", "model", "stream", "complete
 def rows(rt, *names):
     """The request rows, each cut to `names` (default ROW)."""
     return [{k: r[k] for k in names or ROW} for r in fakes.recorded(rt)]
+
+
+class Bare(BaseHTTPRequestHandler):
+    """Answers 404 with no body, no request id and no rate-limit header."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(404)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+
+class Resetting(BaseHTTPRequestHandler):
+    """Streams the first event, then resets the connection (RST, no FIN) once the client has it (`relayed`)."""
+
+    protocol_version = "HTTP/1.1"
+    relayed = threading.Event()
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("transfer-encoding", "chunked")
+        self.end_headers()
+        self.wfile.write(b"%x\r\n%s\r\n" % (len(SSE_EVENTS[0]), SSE_EVENTS[0]))
+        self.wfile.flush()
+        Resetting.relayed.wait(10)  # the gateway read the event and waits on the next
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.connection.close()
+        self.close_connection = True
 
 
 def ended(module, n):
@@ -68,7 +109,63 @@ class PassthroughTest(unittest.TestCase):
             {"method": "GET", "path": "/v1/models", "status": 429, "kind": "main", "error_code": "rate_limit_error",
              "error_head": ERROR_BODY.decode()}])
         self.assertEqual([e["fields"] for e in fakes.events(rt, "error_detail")],
-                         [{"ratelimit": {"retry-after": "3", "requests-remaining": "0"}}])
+                         [{"upstream_request_id": "req_limited",
+                           "ratelimit": {"retry-after": "3", "requests-remaining": "0"}}])
+
+    def test_an_error_reply_with_no_context_records_no_empty_detail(self):
+        rt, port = fakes.start_gateway(self, fakes.start_upstream(self, Bare))
+        self.assertEqual(fakes.request(port, "GET", "/")[0].status, 404)
+        self.assertEqual(rows(rt, "path", "status"), [{"path": "/", "status": 404}])
+        self.assertEqual(fakes.events(rt, "error_detail"), [])
+
+    def kept(self, port):
+        """A client connection Claude Code's way: kept alive, so its upstream connection stays with it."""
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(conn.close)
+        return conn
+
+    def ask(self, conn, method, path, body=None):
+        conn.request(method, path, body=body)
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status
+
+    def test_an_anthropic_row_carries_its_transport(self):
+        rt, port = fakes.start_gateway(self, self.up)
+        client = self.kept(port)
+        for _ in range(2):
+            self.assertEqual(self.ask(client, "POST", "/v1/json", b'{"model":"m"}'), 200)
+        recorded = fakes.recorded(rt)
+        self.assertEqual([(r["reused"], r["stale"], r["attempts"]) for r in recorded], [(0, 0, 1), (1, 0, 1)])
+        self.assertEqual([(r.get("request_bytes"), r.get("error_class")) for r in recorded], [(13, None)] * 2)
+
+    def test_an_upstream_that_resets_mid_stream_is_its_failure_never_the_client_leaving(self):
+        Resetting.relayed.clear()
+        rt, port = fakes.start_gateway(self, fakes.start_upstream(self, Resetting))
+        client = self.kept(port)
+        client.request("POST", "/v1/messages", body=b'{"model":"m","stream":true}')
+        resp, got = client.getresponse(), b""
+        while len(got) < len(SSE_EVENTS[0]):
+            got += resp.read1(65536) or self.fail("the stream ended before its first event: %r" % got)
+        Resetting.relayed.set()
+        with self.assertRaises((http.client.HTTPException, OSError)):
+            resp.read()
+        (row,) = fakes.recorded(rt)
+        self.assertEqual((row["status"], row["completed"], row["client_disconnected"], row["error_code"]),
+                         (200, 0, 0, "stream_error"))
+        self.assertEqual((row.get("error_class"), row["error_head"].startswith("ConnectionResetError")), ("reset", True))
+
+    def test_a_host_pause_is_recorded_and_closes_the_idle_upstream_connections(self):
+        rt, port = fakes.start_gateway(self, self.up)
+        client = self.kept(port)
+        self.assertEqual(self.ask(client, "POST", "/v1/json", b"{}"), 200)
+        self.assertEqual(len(rt.upstream.pool.idle), 1)
+        slept = clock.slept
+        with mock.patch.object(clock, "slept", lambda: slept() + 3600):  # the host slept an hour
+            self.assertEqual(self.ask(client, "GET", "/__gateway/health"), 200)
+        resumed = [e["fields"]["gap_s"] for e in fakes.events(rt, "host_resumed")]
+        self.assertEqual([gap >= 3599 for gap in resumed], [True])
+        self.assertEqual(rt.upstream.pool.idle, [])
 
     def test_a_request_whose_exchange_breaks_still_gets_its_row(self):
         from unittest import mock
@@ -90,8 +187,9 @@ class PassthroughTest(unittest.TestCase):
         body = json.loads(data)
         self.assertEqual((resp.status, body["type"]), (502, "error"))
         self.assertTrue(body["error"]["message"].startswith("gpt-gateway: upstream unreachable"))
-        self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"])
-                          for r in fakes.recorded(rt)], [("POST", "/v1/messages", 502, "api_error", True)])
+        self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"],
+                           r.get("error_class"), r["reused"], r["stale"], r["attempts"]) for r in fakes.recorded(rt)],
+                         [("POST", "/v1/messages", 502, "api_error", True, "connect", 0, 0, 1)])
 
     def test_a_header_sent_twice_goes_upstream_twice_in_order(self):
         rt, port = fakes.start_gateway(self, self.up)

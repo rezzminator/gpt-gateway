@@ -22,9 +22,9 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | entry | the `gateway.py` script: import path setup, hand-off to the CLI | `gateway.py` | assumed: changes only when the package's entry changes |
 | cli | core and `chatgpt-login`, `chatgpt-status`, `chatgpt-stats` commands; usage | `gpt_gateway/cli.py` | assumed: a new command adds a table row and its function together |
 | env | environment reads, `GPT_GATEWAY_*`, `CoreEnv`, `ChatGPTEnv` | `gpt_gateway/env.py` | assumed: a new knob lands here alone |
-| clock | wall time, local-time stamps, sleeping | `gpt_gateway/clock.py` | assumed: never co-changes |
+| clock | wall time, local-time stamps, the time the host slept, sleeping | `gpt_gateway/clock.py` | assumed: never co-changes |
 | log | the locked, rotating text log: start, stop, fatal, settings-error and database-failure lines | `gpt_gateway/log.py` | assumed: rotation and line format change together |
-| db | the SQLite database: its schema and views, the one writer thread off a bounded queue, drops and failures counted, retention, the readers | `gpt_gateway/db.py` | assumed: a column, its view and its reader change together |
+| db | the SQLite database: its schema and views, the in-place column migration, the one writer thread off a bounded queue, drops and failures counted and recorded as `db_lost`, retention, the readers | `gpt_gateway/db.py` | assumed: a column, its view and its reader change together |
 | usage | a relayed response's token usage and error code, read beside the relay | `gpt_gateway/usage.py` | assumed: changes with the Messages API usage shape only |
 | settings | `settings.json`: the core keys, the `middleware` entries, env over file over default for core keys and each module's `SETTINGS`, `check()`, the strict start read, the mtime/size/inode reload with last-good | `gpt_gateway/settings.py` | assumed: a new core key changes its default, validator and reload together |
 | middleware | loading `{middleware_dir}/{module}.py`, the module attribute checks, the `SETTINGS` shape | `gpt_gateway/middleware.py` | assumed: the module half of the contract |
@@ -32,15 +32,16 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | headers | the secret headers, the hop-by-hop set, the read-only `ctx.headers` mapping, the debug header pick | `gpt_gateway/headers.py` | assumed: the secret set changes once, for capture and hooks alike |
 | events | splitting an SSE stream into events across chunk boundaries; the one-call JSON event | `gpt_gateway/events.py` | assumed: changes only with the SSE wire format |
 | capture | the capture folder layout, secret redaction, sequence numbers | `gpt_gateway/capture.py` | assumed: the layout and its file names change together |
-| upstream | the upstream connection leased from the pool, the one fresh retry, TLS, the WebSocket upgrade, an out-of-handles failure named as one | `gpt_gateway/upstream.py` | assumed: never co-changes with the hooks |
+| upstream | the upstream connection leased from the pool, the one retry of a kept-alive connection that failed before its answer, TLS, the WebSocket upgrade, an out-of-handles failure named as one, a failure's class | `gpt_gateway/upstream.py` | assumed: never co-changes with the hooks |
 | pool | the idle upstream connections shared across serving threads: give back when a body is complete, the idle cap, the reaper | `gpt_gateway/pool.py` | assumed: the lease rule and the bounds co-change |
 | handles | the soft open-file limit raised at start, the open count, the out-of-handles diagnosis and its rate-limited event | `gpt_gateway/handles.py` | assumed: the limit, the count and the diagnosis co-change |
+| reach | a failed upstream exchange's class, failures in a row as one start and one end event, host pauses | `gpt_gateway/reach.py` | assumed: a class and the events that count it change together |
 | frames | RFC 6455 frames on an upgraded socket: masking, fragments, pings, closes, the idle check | `gpt_gateway/frames.py` | assumed: the wire format changes alone |
 | proxy | one exchange: read the body (chunked included), run the hooks, forward or take a hook's answer, relay chunk by chunk, the request's row | `gpt_gateway/proxy.py` | assumed: the exchange's steps co-change, so they are one unit (see § Tree, flow order) |
 | response | the in-memory response the relay reads where no upstream HTTP response exists: a hook's answer, a ChatGPT-route body | `gpt_gateway/response.py` | assumed: changes with the relay's reading surface only |
 | health | the health line | `gpt_gateway/health.py` | assumed: changes with the health contract only |
 | server | the listening socket with `SO_REUSEPORT` and its backlog, accept failures, in-flight tracking, SIGTERM drain | `gpt_gateway/server.py` | assumed: graceful restart and drain change together |
-| runtime | composing env, log, database, settings, middleware, upstream and drain into one object | `gpt_gateway/runtime.py` | assumed: changes when a new mechanism joins |
+| runtime | composing env, log, database, settings, middleware, upstream, the host pause watch and drain into one object | `gpt_gateway/runtime.py` | assumed: changes when a new mechanism joins |
 | harness | the public middleware test harness | `gpt_gateway/harness.py` | assumed: changes with the hooks contract |
 | chatgpt signature | reasoning signature codec | `gpt_gateway/chatgpt/signature.py` | assumed: replay and stream share the codec |
 | chatgpt auth | credential source selection, own token storage and refresh | `gpt_gateway/chatgpt/auth.py` | assumed: token lifecycle co-changes |
@@ -83,7 +84,7 @@ gpt_gateway/cli.py                      COMMANDS table → serve | check | mw | 
 gpt_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 gpt_gateway/clock.py                    façade: time
 gpt_gateway/log.py                      façade: the text log
-gpt_gateway/db.py                       façade: Db, query, chatgpt_responses, anthropic_timings, DbError
+gpt_gateway/db.py                       façade: Db, query, chatgpt_responses, anthropic_timings, anthropic_transport, DbError
 gpt_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
 gpt_gateway/middleware.py               Module, load_modules, MiddlewareError
 gpt_gateway/hooks.py                    Context, Request, Answer, Result, Chain, last_turn_message
@@ -93,6 +94,7 @@ gpt_gateway/capture.py                  façade: Capture, Sequence
 gpt_gateway/upstream.py                 façade: Upstream, UpstreamError, Upgrade
 gpt_gateway/pool.py                     Pool, PooledResponse: the idle upstream connections
 gpt_gateway/handles.py                  raise_limit, open_count, diagnose, announce: file handles
+gpt_gateway/reach.py                    error_class, Runs, Pause: reachability as data
 gpt_gateway/frames.py                   WebSocket, mask, parse_frame: RFC 6455 frames on an upgraded socket
 gpt_gateway/proxy.py                    Handler, the request row
 gpt_gateway/usage.py                    Meter: usage and error code off a relayed response
@@ -140,7 +142,7 @@ tests/fakes.py                            fake upstreams (SSE, split SSE, slow S
 tests/test_gateway.py                     ↔ gateway.py
 tests/test_jail.py                        ↔ tests/jail.py
 tests/gpt_gateway/__init__.py
-tests/gpt_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,headers,events,capture,upstream,frames,proxy,response,health,server,runtime,harness}.py
+tests/gpt_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,headers,events,capture,upstream,pool,handles,reach,frames,proxy,response,health,server,runtime,harness}.py
 tests/gpt_gateway/chatgpt/__init__.py
 tests/gpt_gateway/chatgpt/test_codex_login.py
 tests/gpt_gateway/chatgpt/test_response.py
@@ -195,7 +197,7 @@ The census of the product spelling exempts this document, since its glossary mus
 | Concern | Module | The primitive it hides |
 | --- | --- | --- |
 | environment reads | `gpt_gateway/env.py` | `os.environ`, `os.getenv` |
-| clock | `gpt_gateway/clock.py` | `time.time`, `time.sleep`, `time.strftime`, `time.localtime`, `time.monotonic` |
+| clock | `gpt_gateway/clock.py` | `time.time`, `time.sleep`, `time.strftime`, `time.localtime`, `time.monotonic`, `time.clock_gettime` |
 | logging | `gpt_gateway/log.py` | appending to the log file, rotation, the `logging` module |
 | the database | `gpt_gateway/db.py` | the `sqlite3` module: connections, the schema, every read and write |
 | settings | `gpt_gateway/settings.py` | reading `settings.json` and its file name |
