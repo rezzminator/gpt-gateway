@@ -121,6 +121,12 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         # Waiting for the next request is the only wait this bounds; stdlib answers the timeout by closing the connection.
         self.connection.settimeout(CLIENT_IDLE_SECONDS)
+        drain = self.server.runtime.drain
+        if drain.preserve_pending and self.connection in drain.pending:
+            if not drain.readable(self.connection, CLIENT_IDLE_SECONDS):
+                self.close_connection = True
+                return
+            drain.receiving(self.connection)  # remember data before readline can consume a partial line
         super().handle_one_request()
 
     def log_message(self, *args):
@@ -158,7 +164,15 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(None)  # the request is in; the idle limit does not cut its body, hooks or stream
         snap = rt.settings.current()  # one settings snapshot per request
         if self.path == HEALTH_PATH:
-            return self.reply(200, "text/plain", health_line(snap, rt).encode())
+            if not rt.drain.preserve_pending:
+                return self.reply(200, "text/plain", health_line(snap, rt).encode())
+            rt.drain.begin(self.connection)
+            try:
+                return self.reply(200, "text/plain", health_line(snap, rt).encode())
+            finally:
+                rt.drain.end(self.connection)
+                if rt.drain.draining:
+                    self.close_connection = True
         rt.drain.begin(self.connection)
         try:
             self.proxy(rt, snap)

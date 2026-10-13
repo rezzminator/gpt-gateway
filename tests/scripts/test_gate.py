@@ -37,13 +37,14 @@ class Tree:
         self.write("b.sh", "#!/bin/sh\n# A script.\n")
         self.write("tests/__init__.py", "")
         self.write("tests/test_one.py", tests)
-        self.bin = os.path.join(self.root, "bin")
+        self.bin = os.path.join(self.root, 'bin')
+        self.clean_path = test.clean_path
         if shellcheck is not None:
             self.write("bin/shellcheck", "#!/bin/sh\n" + shellcheck)
             os.chmod(os.path.join(self.bin, "shellcheck"), 0o755)
         self.write(".gitignore", "bin/\n")
-        subprocess.run(["git", "init", "-q"], cwd=self.root, env=jail.clean_env(self.root), check=True,
-                       capture_output=True)
+        subprocess.run(['git', 'init', '-q'], cwd=self.root, env=jail.clean_env(self.root),
+                       check=True, capture_output=True)
 
     def write(self, rel, text):
         path = os.path.join(self.root, rel)
@@ -52,7 +53,7 @@ class Tree:
             f.write(text)
 
     def gate(self, *args):
-        env = jail.clean_env(self.root, PATH=self.bin + ":" + CLEAN_PATH, GATE_TEST_PROBE="1")
+        env = jail.clean_env(self.root, PATH=self.bin + ':' + self.clean_path, GATE_TEST_PROBE="1")
         p = subprocess.run(["/bin/bash", os.path.join(self.root, "scripts", "gate.sh")] + list(args), env=env,
                            capture_output=True, text=True, timeout=120)
         lines = {}
@@ -66,7 +67,13 @@ class Tree:
 
 class GateTest(unittest.TestCase):
     def setUp(self):
-        self.assertIsNone(shutil.which("shellcheck", path=CLEAN_PATH), "a shellcheck outside the stub would hide it")
+        self.clean_path = os.path.join(jail.scratch(self), 'commands')
+        os.mkdir(self.clean_path)
+        for command in ('bash', 'dirname', 'mktemp', 'rm', 'mkdir', 'grep', 'wc', 'tr', 'sed',
+                        'sort', 'paste', 'awk', 'tail', 'cat', 'env', 'cut', 'git'):
+            os.symlink(shutil.which(command, path=CLEAN_PATH), os.path.join(self.clean_path, command))
+        self.assertIsNone(shutil.which('shellcheck', path=self.clean_path),
+                          'a shellcheck outside the stub would hide it')
 
     def test_every_link_passing_is_a_pass(self):
         tree = Tree(self, tests=CLEAN)

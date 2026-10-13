@@ -13,9 +13,9 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 - ChatGPT route: GPT models as Claude Code sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, its `requests` rows and `retry`/`final_error` events, and `gateway.py chatgpt-stats` · `gpt_gateway/chatgpt/`, `README.md` § ChatGPT route; its login, Codex's `auth.json` first and the gateway's own store second · `gpt_gateway/chatgpt/codex_login.py`, `gpt_gateway/chatgpt/auth.py`; third-party licences · `THIRD_PARTY_NOTICES.md`
 - capture: one folder per exchange, off by default · `gpt_gateway/capture.py`
 - database: `~/.local/state/gpt-gateway/gateway.db` (`GPT_GATEWAY_DB`), tables `requests` and `events`, views `cache_misses` and `daily`, retention `db_retention_days`; never a request or response body · `gpt_gateway/db.py`, `README.md` § Database
-- launchd: the supervisor, `ctl.sh`, `install.sh`, `uninstall.sh`; the installed copy is flat under `~/.local/share/gpt-gateway/`, a shipped package keeping its subdirectories, label `local.gpt-gateway` · `launchd/`
+- service: the portable supervisor and platform-dispatching `ctl.sh`, `install.sh`, `uninstall.sh`; flat install under `~/.local/share/gpt-gateway/`, package subdirectories preserved; macOS label `local.gpt-gateway`, Linux user unit `gpt-gateway.service` · `service/`
 - gates: `scripts/checks.sh` (every countable law, one `CHECK` line each), `scripts/gate.sh` (the only definition of ready), committed baselines · `scripts/baselines/`
-- test jail: every scratch directory, port and environment a test uses · `tests/jail.py`; fake upstreams and the recording middleware · `tests/fakes.py`; the stub launchctl · `tests/launchd/stub.py`
+- test jail: scratch directories, ports, environments and scratch Git fixtures · `tests/jail.py`; fake upstreams and recording middleware · `tests/fakes.py`; stub launchctl, systemctl and macOS tools · `tests/service/stub.py`
 
 # Runtime
 
@@ -33,7 +33,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 
 ## Live systems
 
-- No test, script or session runs `launchd/*.sh` against the real `HOME` or reaches the real launchd, the real Claude Code settings, the real database or a running gateway: tests take a scratch `HOME` and `GPT_GATEWAY_DB` from `tests/jail.py`, free ports, fake upstreams and the stub launchctl.
+- No test, script or session runs `service/*.sh` against the real `HOME` or reaches the real launchd or systemd user manager, Claude Code settings, database or a running gateway: tests take a scratch `HOME` and `GPT_GATEWAY_DB` from `tests/jail.py`, free ports, fake upstreams and stub launchctl/systemctl.
 - No test reads or writes the real `~/.codex/auth.json`, the real Keychain entry `gpt-gateway.chatgpt`, the real ChatGPT token or catalog file, or reaches OpenAI: ChatGPT-route tests take a jailed `HOME` without `CODEX_HOME`, a jailed Codex login file or `GPT_GATEWAY_CHATGPT_CODEX_AUTH=off`, a jailed file store (`GPT_GATEWAY_CHATGPT_AUTH_STORE=file`) and the fake ChatGPT upstream in `tests/fakes.py`.
 - The gateway shares Codex's ChatGPT login in place, the way Codex shares it between its own processes: it re-reads `auth.json` before every refresh, refreshes only on Codex's schedule, writes rotated tokens back in Codex's format and never marks or blanks that file; its own store and `chatgpt-login` serve only when no Codex login exists.
 

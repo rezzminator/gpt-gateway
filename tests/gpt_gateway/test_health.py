@@ -3,8 +3,10 @@ import os
 import re
 import resource
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
-from gpt_gateway import db
+from gpt_gateway import db, proxy
 from tests import fakes, jail
 from tests.fakes import RECORDER, calls
 
@@ -28,6 +30,21 @@ def db_part(rt):
 
 
 class HealthTest(unittest.TestCase):
+    def test_darwin_health_keeps_its_untracked_keepalive_behavior(self):
+        drain = mock.Mock(preserve_pending=False, draining=True)
+        handler = object.__new__(proxy.Handler)
+        handler.connection = mock.Mock()
+        handler.server = SimpleNamespace(runtime=SimpleNamespace(drain=drain, settings=mock.Mock()))
+        handler.path = '/__gateway/health'
+        handler.close_connection = False
+        handler.reply = mock.Mock()
+        with mock.patch.object(proxy, 'health_line', return_value='healthy'):
+            handler.handle_any()
+        handler.reply.assert_called_once_with(200, 'text/plain', b'healthy')
+        self.assertFalse(handler.close_connection, 'health changed macOS keep-alive behavior')
+        drain.begin.assert_not_called()
+        drain.end.assert_not_called()
+
     def test_chatgpt_health_uses_only_the_memory_count(self):
         from unittest.mock import Mock
         from gpt_gateway.health import health_line

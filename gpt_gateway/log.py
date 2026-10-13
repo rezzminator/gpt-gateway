@@ -1,6 +1,6 @@
 """The gateway log: one locked writer, a timestamp per line, rotation to `.1` past 5 MiB.
 
-A write that fails is reported on stderr (launchd's stderr log) when the failing starts, never
+A write that fails is reported on stderr (the service manager's stderr log) when the failing starts, never
 dropped in silence; the request it belonged to goes on. The file is UTF-8; a character UTF-8 cannot
 hold (a lone surrogate from a JSON escape) is written backslash-escaped.
 """

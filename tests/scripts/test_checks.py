@@ -36,8 +36,8 @@ class Tree:
             target = os.path.join(self.root, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copy2(os.path.join(jail.ROOT, rel), target)
-        subprocess.run(["git", "init", "-q"], cwd=self.root, env=jail.clean_env(self.root), check=True,
-                       capture_output=True)
+        subprocess.run(['git', 'init', '-q'], cwd=self.root, env=jail.clean_env(self.root),
+                       check=True, capture_output=True)
 
     def path(self, rel):
         return os.path.join(self.root, rel)
@@ -91,16 +91,16 @@ def run(tree, *args):
 
 
 def plant_sh_without_purpose(t):
-    t.write("launchd/bare.sh", "#!/bin/sh\necho hi\n")
+    t.write("service/bare.sh", "#!/bin/sh\necho hi\n")
 
 
 def add_ctl_arm(t):
-    t.replace("launchd/ctl.sh", CTL_FALLBACK, "  sideways) ;;\n" + CTL_FALLBACK)
+    t.replace("service/ctl.sh", CTL_FALLBACK, "  sideways) ;;\n" + CTL_FALLBACK)
 
 
 def strip_usage(t):
     for name in ("ctl.sh", "install.sh", "uninstall.sh", "run.sh"):
-        t.replace("launchd/" + name, "usage: ", "use: ")
+        t.replace("service/" + name, "usage: ", "use: ")
 
 
 def ignore_sources(t):
@@ -117,7 +117,7 @@ VIOLATIONS = (
     ("size-test", lambda t: t.lines_of("tests/jail.py", 601), "tests/jail.py (new 601)"),
     ("negation-dirs", lambda t: t.write("docs/misc/note.md", "x\n"), "new: docs/misc"),
     ("module-purpose", lambda t: t.write("gpt_gateway/stray.py", "x = 1\n"), "new: gpt_gateway/stray.py"),
-    ("module-purpose", plant_sh_without_purpose, "new: launchd/bare.sh"),
+    ("module-purpose", plant_sh_without_purpose, "new: service/bare.sh"),
     ("test-mirror", lambda t: t.write("gpt_gateway/stray.py", '"""A stray."""\n'), "new: gpt_gateway/stray.py"),
     ("test-mirror", lambda t: t.remove("tests/test_gateway.py"), "new: gateway.py"),
     ("test-jail", lambda t: t.append("tests/fakes.py", "import " + "temp" + "file\n"), "tests/fakes.py (new 1)"),
@@ -145,9 +145,9 @@ VIOLATIONS = (
     ("spelling-old-name", lambda t: t.append("README.md", OLD_NAME + "\n"), "README.md (new 1)"),
     ("spelling-product", lambda t: t.append("README.md", PRODUCT_VARIANT + "\n"), "README.md (new 1)"),
     ("spelling-product", lambda t: t.append("README.md", FORMER_NAME + "\n"), "README.md (new 1)"),
-    ("spelling-product", lambda t: t.append("launchd/ctl.sh", "LEGACY_NAME=" + FORMER_NAME + "\n"), "launchd/ctl.sh (new 1)"),
-    ("spelling-product", lambda t: t.append("launchd/install.sh", "# " + FORMER_NAME + "\n"), "launchd/install.sh (new 1)"),
-    ("spelling-env-prefix", lambda t: t.append("launchd/ctl.sh", "X=${OTHER_KNOB:-1}\n"), "new: OTHER_KNOB"),
+    ("spelling-product", lambda t: t.append("service/ctl.sh", "LEGACY_NAME=" + FORMER_NAME + "\n"), "service/ctl.sh (new 1)"),
+    ("spelling-product", lambda t: t.append("service/install.sh", "# " + FORMER_NAME + "\n"), "service/install.sh (new 1)"),
+    ("spelling-env-prefix", lambda t: t.append("service/ctl.sh", "X=${OTHER_KNOB:-1}\n"), "new: OTHER_KNOB"),
     ("spelling-env-prefix", lambda t: t.append("gpt_gateway/env.py", 'STRAY = "STRAY_KNOB"\n'), "new: STRAY_KNOB"),
     ("spelling-kind", lambda t: t.append("gpt_gateway/proxy.py", 'X = " conv=main"\n'),
      "gpt_gateway/proxy.py (new 1)"),
@@ -165,9 +165,9 @@ ERRORS = (
     ("dup-functions", lambda t: t.remove("scripts/baselines/dup-functions.txt"), "baseline"),
     ("orientation-truth", lambda t: t.remove("README.md"), "README.md missing"),
     ("orientation-truth", lambda t: (t.write("README.md", "no citations\n"), t.write("CLAUDE.md", "no citations\n")), "no backticked citation parsed"),
-    ("registry-parity", lambda t: t.remove("launchd"), "no dispatched case arm parsed"),
+    ("registry-parity", lambda t: t.remove("service"), "no dispatched case arm parsed"),
     ("registry-parity", strip_usage, "no usage line parsed"),
-    ("spelling-env-prefix", lambda t: (t.remove("launchd"), t.remove("gpt_gateway/env.py")), "no knob names parsed"),
+    ("spelling-env-prefix", lambda t: (t.remove("service"), t.remove("gpt_gateway/env.py")), "no knob names parsed"),
     ("setup", ignore_sources, "no sources listed"),
     ("setup", unreadable, "unreadable: gpt_gateway/clock.py"),
     ("setup", lambda t: t.write("docs/a b.md", "x\n"), "a path holds a space: docs/a b.md"),

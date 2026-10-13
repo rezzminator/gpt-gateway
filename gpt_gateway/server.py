@@ -1,10 +1,12 @@
 """The listening server: SO_REUSEPORT for a graceful restart, in-flight tracking, the SIGTERM drain.
 
-A restarted gateway binds the port while its predecessor still drains; new connections go to the
-newest. On SIGTERM the gateway stops accepting, closes idle keep-alive connections at once, and lets
-in-flight requests finish for up to the drain limit.
+The Linux supervisor and its gateways share one inherited listener and accept queue. A handover
+keeps queued connections on that socket and drains accepted connections with request data as well as streams.
+Independently bound SO_REUSEPORT listeners can lose queued connections when one closes on Linux.
+On SIGTERM silent accepted clients and idle keep-alives close; received requests finish up to the drain limit.
 """
 import errno
+import select
 import signal
 import socket
 import sys
@@ -26,6 +28,8 @@ class Drain:
         self.lock = threading.Lock()
         self.inflight = 0
         self.idle = set()  # client connections between requests
+        self.pending = {}  # first connections: False until request data is ready to read
+        self.preserve_pending = sys.platform == 'linux'
         self.stopping = threading.Event()
 
     @property
@@ -34,16 +38,32 @@ class Drain:
 
     def connected(self, conn):
         with self.lock:
-            self.idle.add(conn)
+            if self.preserve_pending:
+                self.pending.setdefault(conn, False)
+            else:
+                self.idle.add(conn)
 
     def disconnected(self, conn):
         with self.lock:
             self.idle.discard(conn)
+            self.pending.pop(conn, None)
+
+    def receiving(self, conn):
+        with self.lock:
+            if conn in self.pending:
+                self.pending[conn] = True
+
+    @staticmethod
+    def readable(conn, seconds=0):
+        poll = select.poll()
+        poll.register(conn, select.POLLIN)
+        return bool(poll.poll(int(seconds * 1000)))
 
     def begin(self, conn):
         with self.lock:
             self.inflight += 1
             self.idle.discard(conn)
+            self.pending.pop(conn, None)
 
     def end(self, conn):
         with self.lock:
@@ -54,7 +74,17 @@ class Drain:
         """Wait until no request is in flight, or `limit` seconds pass; log the outcome; return the count left."""
         deadline = clock.now() + limit
         with self.lock:
-            busy = self.inflight
+            for conn, receiving in list(self.pending.items()):
+                if receiving:
+                    continue
+                try:
+                    ready = self.readable(conn)
+                except (OSError, ValueError):
+                    ready = []
+                if not ready:  # a TCP handshake without request data is an idle client
+                    self.pending.pop(conn, None)
+                    self.idle.add(conn)
+            busy = self.inflight + len(self.pending)
             idle = list(self.idle)
         for conn in idle:  # an idle keep-alive client sees the close and reconnects to the successor
             try:
@@ -64,9 +94,9 @@ class Drain:
                     log("stop: shutdown of an idle connection failed: %r" % (e,))
         log("stop: draining %d in-flight request(s), up to %ss" % (busy, limit))
         while busy and clock.now() < deadline:
-            clock.sleep(0.2)
+            clock.sleep(min(0.2, max(0.0, deadline - clock.now())))
             with self.lock:
-                busy = self.inflight
+                busy = self.inflight + len(self.pending)
         if busy:
             log("stop: %d request(s) still in flight after %ss; exiting anyway" % (busy, limit))
         else:
@@ -82,7 +112,20 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, address, runtime, handler=Handler):
         self.runtime = runtime
-        super().__init__(address, handler)
+        descriptor = getattr(runtime.env, 'listener_fd', None)
+        if descriptor is None:
+            super().__init__(address, handler)
+        else:
+            super().__init__(address, handler, bind_and_activate=False)
+            self.socket.close()
+            self.socket = socket.socket(fileno=descriptor)
+            self.socket.setblocking(False)
+            self.server_address = self.socket.getsockname()
+            if self.server_address != address or not self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+                self.socket.close()
+                raise OSError('inherited gateway descriptor is not the configured listener')
+            self.server_name = socket.getfqdn(address[0])
+            self.server_port = address[1]
 
     def server_bind(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
@@ -93,6 +136,8 @@ class Server(ThreadingHTTPServer):
         try:
             accepted = super().get_request()
         except OSError as error:
+            if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise  # another gateway accepted the readiness event's connection first
             shortage = handles.diagnose(error)
             if shortage is None:
                 handles.announce(self.runtime.db.event, "accept_failed", error=repr(error))
@@ -104,7 +149,12 @@ class Server(ThreadingHTTPServer):
             clock.sleep(min(ACCEPT_BACKOFF * 2 ** doublings, ACCEPT_BACKOFF_MAX))
             raise
         self.accept_failures = 0
+        self.runtime.drain.connected(accepted[0])
         return accepted
+
+    def close_request(self, request):
+        self.runtime.drain.disconnected(request)
+        super().close_request(request)
 
     def handle_error(self, request, client_address):
         # Claude Code drops idle keep-alive connections; that is not an error worth a traceback.
@@ -130,8 +180,8 @@ def serve(runtime, server):
 
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
-    server.serve_forever()
-    server.server_close()  # no new connections from here on; the successor takes them
+    server.serve_forever(poll_interval=0.1 if sys.platform == 'linux' else 0.5)
+    server.server_close()  # the shared Linux listener stays open in the supervisor and successor
     left = runtime.drain.wait(runtime.env.drain_seconds, runtime.log.write)
     if runtime.chatgpt is not None:
         runtime.chatgpt.client.close()

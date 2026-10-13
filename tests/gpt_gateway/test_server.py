@@ -1,6 +1,7 @@
 """Tests for gpt_gateway.server: real gateway processes; SIGTERM lets in-flight streams finish while a
 successor takes the port, and the drain gives up at its limit."""
 import errno
+import fcntl
 import http.client
 import json
 import os
@@ -11,6 +12,7 @@ import subprocess
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 
 from unittest import mock
 
@@ -20,6 +22,28 @@ from tests import fakes, jail
 
 
 class DrainTest(unittest.TestCase):
+    def test_accept_registers_the_connection_before_a_handler_can_run(self):
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            runtime = SimpleNamespace(env=SimpleNamespace(), drain=Drain())
+        server = Server(('127.0.0.1', jail.free_port()), runtime)
+        self.addCleanup(server.server_close)
+        client = socket.create_connection(server.server_address, timeout=2)
+        self.addCleanup(client.close)
+        accepted, _ = server.get_request()
+        self.addCleanup(accepted.close)
+        self.assertIn(accepted, runtime.drain.pending)
+
+    def test_an_accepted_first_request_waits_in_the_linux_drain(self):
+        client, connection = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(connection.close)
+        client.sendall(b'GET /')
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(connection)
+        self.assertEqual(drain.wait(0, lambda line: None), 1)
+        self.assertEqual(connection.recv(5), b'GET /', 'a first request was closed as an idle keep-alive')
+
     def setUp(self):
         self.tmp = jail.scratch(self)
         self.app = jail.stage_install(os.path.join(self.tmp, "app"))
@@ -108,6 +132,98 @@ class DrainTest(unittest.TestCase):
 
 
 class DrainStateTest(unittest.TestCase):
+    def test_a_pending_request_above_the_select_descriptor_limit_is_preserved(self):
+        jail.raise_open_files(self, 1100)
+        client, original = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(original.close)
+        accepted = socket.socket(fileno=fcntl.fcntl(original.fileno(), fcntl.F_DUPFD, 1025))
+        self.addCleanup(accepted.close)
+        client.sendall(b'G')
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 1, 'readiness lost a valid high descriptor')
+
+    def test_a_first_request_byte_already_read_is_not_treated_as_a_silent_client(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = socket.SocketIO.readinto
+        rt, port = fakes.start_gateway(self)
+        def paused(reader, buffer):
+            count = original(reader, buffer)
+            if count and reader._sock.getsockname()[1] == port and not entered.is_set():
+                entered.set()
+                release.wait(5)
+            return count
+        with mock.patch.object(socket.SocketIO, 'readinto', new=paused):
+            client = socket.create_connection(('127.0.0.1', port), timeout=3)
+            self.addCleanup(client.close)
+            client.sendall(b'G')
+            try:
+                self.assertTrue(entered.wait(3), 'the first byte was not read')
+                rt.drain.stopping.set()
+                self.assertEqual(rt.drain.wait(0, lambda line: None), 1,
+                                 'request data consumed before a complete line was forgotten')
+                client.sendall(b'ET /__gateway/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+                release.set()
+                reply = http.client.HTTPResponse(client)
+                reply.begin()
+                self.assertEqual(reply.status, 200)
+                self.assertTrue(reply.read().startswith(b'ok pid='))
+            finally:
+                release.set()
+
+    def test_a_request_line_already_read_keeps_its_connection_while_headers_arrive(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = http.client.parse_headers
+        def paused(stream, *args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                release.wait(5)
+            return original(stream, *args, **kwargs)
+        with mock.patch.object(http.client, 'parse_headers', side_effect=paused):
+            rt, port = fakes.start_gateway(self)
+            client = socket.create_connection(('127.0.0.1', port), timeout=3)
+            self.addCleanup(client.close)
+            client.sendall(b'GET /__gateway/health HTTP/1.1\r\n')
+            try:
+                self.assertTrue(entered.wait(3), 'the request line was not read')
+                rt.drain.stopping.set()
+                self.assertEqual(rt.drain.wait(0, lambda line: None), 1,
+                                 'a partially received request was mistaken for a silent client')
+                client.sendall(b'Host: localhost\r\nConnection: close\r\n\r\n')
+                release.set()
+                reply = http.client.HTTPResponse(client)
+                reply.begin()
+                self.assertEqual(reply.status, 200)
+                self.assertTrue(reply.read().startswith(b'ok pid='))
+            finally:
+                release.set()
+
+    def test_a_silent_accepted_client_does_not_hold_the_linux_drain(self):
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 0, 'a silent client was counted as a request')
+        client.settimeout(1)
+        self.assertEqual(client.recv(1), b'', 'the idle client was not closed')
+
+    def test_an_accepted_request_already_on_the_wire_survives_the_linux_drain(self):
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        client.sendall(b'GET /')
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 1)
+        self.assertEqual(accepted.recv(5), b'GET /')
+
     def test_an_idle_gateway_drains_at_once(self):
         lines = []
         d = Drain()
@@ -129,8 +245,11 @@ class DrainStateTest(unittest.TestCase):
                 raise OSError(self.code, os.strerror(self.code))
         lines = []
         d = Drain()
-        d.connected(Conn(errno.ENOTCONN))
-        d.connected(Conn(errno.EBADF))
+        for code in (errno.ENOTCONN, errno.EBADF):
+            connection = Conn(code)
+            d.connected(connection)
+            d.begin(connection)
+            d.end(connection)
         self.assertEqual(d.wait(0, lines.append), 0)
         failed = [line for line in lines if "shutdown" in line]
         self.assertEqual(len(failed), 1, lines)
@@ -255,6 +374,11 @@ class AcceptBackoffTest(unittest.TestCase):
 
     def setUp(self):
         handles.THROTTLE.clear()
+
+    def test_a_shared_queue_consumed_by_the_successor_is_not_an_accept_failure(self):
+        waits, seen, events = self.accepts([BlockingIOError(errno.EAGAIN, 'queue consumed')])
+        self.assertEqual((waits, events), ([], []))
+        self.assertEqual(seen, [None])
 
     def accepts(self, outcomes, failures=0):
         """The waits and the events of a listener whose accepts end as `outcomes`, after `failures` in a row: an error is

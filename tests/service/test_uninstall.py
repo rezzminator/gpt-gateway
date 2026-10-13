@@ -1,9 +1,9 @@
-"""Tests for launchd/uninstall.sh, with a scratch HOME and the stub launchctl."""
+"""Tests for service/uninstall.sh, with a scratch HOME and the stub launchctl."""
 import json
 import os
 import unittest
 
-from tests.launchd.stub import Host
+from tests.service.stub import Host
 
 
 class UninstallTest(unittest.TestCase):

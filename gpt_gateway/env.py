@@ -4,6 +4,7 @@
 mapping (or a test's own) and reads it through `value()`.
 """
 import os
+import sys
 from urllib.parse import urlsplit
 
 PORT = "GPT_GATEWAY_PORT"
@@ -13,6 +14,7 @@ DB = "GPT_GATEWAY_DB"
 CAPTURE_DIR = "GPT_GATEWAY_CAPTURE_DIR"
 DRAIN_SECONDS = "GPT_GATEWAY_DRAIN_SECONDS"
 DEBUG = "GPT_GATEWAY_DEBUG"
+LISTENER_FD = "GPT_GATEWAY_LISTENER_FD"
 MIDDLEWARE_DIR = "GPT_GATEWAY_MIDDLEWARE_DIR"
 CHATGPT = "GPT_GATEWAY_CHATGPT"
 
@@ -54,15 +56,16 @@ def under_home(environ, path, needed_for):
 class CoreEnv:
     """The knobs the environment alone sets: port, upstream, log, database, drain limit, debug."""
 
-    __slots__ = ("port", "upstream", "log_path", "db_path", "drain_seconds", "debug")
+    __slots__ = ("port", "upstream", "log_path", "db_path", "drain_seconds", "debug", "listener_fd")
 
-    def __init__(self, port, upstream, log_path, db_path, drain_seconds, debug):
+    def __init__(self, port, upstream, log_path, db_path, drain_seconds, debug, listener_fd=None):
         self.port = port
         self.upstream = upstream
         self.log_path = log_path
         self.db_path = db_path
         self.drain_seconds = drain_seconds
         self.debug = debug
+        self.listener_fd = listener_fd
 
     @classmethod
     def parse(cls, env):
@@ -81,7 +84,8 @@ class CoreEnv:
             parts.port
         except ValueError as e:
             raise EnvError("env %s: bad port in %r: %s" % (UPSTREAM, upstream, e))
-        log_path = under_home(env, value(env, LOG) or DEFAULT_LOG, "the log, or set %s" % LOG)
+        default_log = '~/.local/state/gpt-gateway/gpt-gateway.log' if sys.platform == 'linux' else DEFAULT_LOG
+        log_path = under_home(env, value(env, LOG) or default_log, "the log, or set %s" % LOG)
         if not os.path.isabs(log_path):
             raise EnvError("env %s: must be an absolute path, got %r" % (LOG, log_path))
         raw = value(env, DRAIN_SECONDS)
@@ -96,7 +100,13 @@ class CoreEnv:
         db_path = under_home(env, value(env, DB) or DEFAULT_DB, "the database, or set %s" % DB)
         if not os.path.isabs(db_path):
             raise EnvError("env %s: must be an absolute path, got %r" % (DB, db_path))
-        return cls(port, upstream, log_path, db_path, drain, value(env, DEBUG) is not None)
+        raw = value(env, LISTENER_FD)
+        listener_fd = None
+        if raw is not None:
+            if not raw.isascii() or not raw.isdigit() or int(raw) < 3:
+                raise EnvError("env %s: must be a listening descriptor >= 3" % LISTENER_FD)
+            listener_fd = int(raw)
+        return cls(port, upstream, log_path, db_path, drain, value(env, DEBUG) is not None, listener_fd)
 
 
 CHATGPT_ORIGIN = "GPT_GATEWAY_CHATGPT_ORIGIN"

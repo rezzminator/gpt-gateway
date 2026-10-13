@@ -1,11 +1,11 @@
-"""Tests for launchd/install.sh, into a scratch HOME with a stub launchctl that reports the agent off."""
+"""Tests for service/install.sh, into a scratch HOME with a stub launchctl that reports the agent off."""
 import json
 import os
 import subprocess
 import unittest
 
 from tests import jail
-from tests.launchd.stub import Host
+from tests.service.stub import Host
 
 FIRST_SETTINGS = {"capture_dir": None, "middleware": [{"module": "status_label"}]}
 # The former product name, which the install migrates from.
@@ -22,7 +22,7 @@ class InstallTest(unittest.TestCase):
                      "gpt_gateway/harness.py", "gpt_gateway/chatgpt/stream.py", "THIRD_PARTY_NOTICES.md"):
             with self.subTest(name=name):
                 self.assertTrue(os.path.isfile(os.path.join(h.dest, name)), name)
-        self.assertFalse(os.path.exists(os.path.join(h.dest, "gpt_gateway", "__pycache__")))
+        self.assertTrue(os.path.isdir(os.path.join(h.dest, "gpt_gateway", "__pycache__")))
         self.assertTrue(os.access(os.path.join(h.dest, "run.sh"), os.X_OK))
         self.assertTrue(os.path.isdir(os.path.join(h.dest, "middleware")))
         with open(os.path.join(h.dest, "settings.json")) as f:

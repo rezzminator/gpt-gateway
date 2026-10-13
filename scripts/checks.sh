@@ -11,11 +11,11 @@ T=$(mktemp -d) || { say setup ERROR "mktemp failed"; exit 2; }; trap 'rm -rf "$T
 listed() { git ls-files -co --exclude-standard | while read -r f; do [ -f "$f" ] && echo "$f"; done; }   # tracked + new, minus deleted
 all() { cat "$T/all"; }
 src() { all | grep -E '\.(py|sh)$' | grep -vE '^tests/'; }
-# shellcheck disable=SC2329 # called indirectly, as the lister gin and facade name
+# shellcheck disable=SC2329,SC2317 # called indirectly, as the lister gin and facade name
 pys() { src | grep -E '\.py$'; }
 shs() { src | grep -E '\.sh$'; }
 tests_py() { all | grep -E '^tests/.*\.py$'; }
-# shellcheck disable=SC2329 # called indirectly, as the lister gin names
+# shellcheck disable=SC2329,SC2317 # called indirectly, as the lister gin names
 not_design() { all | grep -vxF "$DESIGN"; }
 listed > "$T/all" || { say setup ERROR "git ls-files failed under $P"; exit 2; }
 [ "$(src | wc -l)" -gt 0 ] || { say setup ERROR "no sources listed under $P"; exit 2; }
@@ -68,7 +68,7 @@ src | grep -vE '(^|/)__init__\.py$' | while read -r f; do h=$(test_home "$f"); [
 if gin "$T/raw" tests_py -nE '\btempfile\b|mkdtemp|mkstemp|TemporaryDirectory|NamedTemporaryFile'; then
   grep -v '^tests/jail\.py:' "$T/raw" | by_file > "$T/jail"; ratchet_counts test-jail test-jail "$T/jail"
 else say test-jail ERROR "grep could not read tests"; fi
-grep -E '(^|/)(run\.[^/]*|[^/]*\.sh)$' "$T/all" | grep -vE '^(scripts|launchd)/' > "$T/run"; ratchet stray-runners stray-runners "$T/run"
+grep -E '(^|/)(run\.[^/]*|[^/]*\.sh)$' "$T/all" | grep -vE '^(scripts|service)/' > "$T/run"; ratchet stray-runners stray-runners "$T/run"
 
 facade env gpt_gateway/env.py '\bos\.environ\b|\bgetenv\(|from os import .*environ'
 facade clock gpt_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter)\(|^[[:space:]]*from time import'
@@ -81,8 +81,8 @@ facade db gpt_gateway/db.py '^[[:space:]]*(import|from) sqlite3\b|\bsqlite3\.'
 census spelling-predecessor all -noiE 'adv[i]sor[-_ ]?(cache[-_ ]?)?gateway'
 census spelling-old-name all -noiE 'cache[-_ ]?gateway'
 # The former name survives on one line per file: the install migration's LEGACY_NAME and its test's.
-# shellcheck disable=SC2329 # called indirectly, as the lister gin names
-migration() { all | grep -xE 'launchd/install\.sh|tests/launchd/test_install\.py'; }
+# shellcheck disable=SC2329,SC2317 # called indirectly, as the lister gin names
+migration() { all | grep -xE 'service/install\.sh|tests/service/test_install\.py'; }
 if gin "$T/raw" not_design -noiE '(model|gpt)[^a-z0-9]?gateway' \
   && gin "$T/legacy" migration -nE '^LEGACY_NAME ?= ?"?model[-]gateway"?$'; then
   grep -vE ':(gpt-gateway|gpt_gateway|GPT_GATEWAY)$' "$T/raw" \
@@ -91,9 +91,9 @@ if gin "$T/raw" not_design -noiE '(model|gpt)[^a-z0-9]?gateway' \
 else say spelling-product ERROR "grep could not read files"; fi
 { shs | while read -r f; do grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' "$f" | sed -E 's/^\$\{//; s/:-$//'; done
   grep -E '^[A-Z_][A-Z0-9_]* = "[A-Z_][A-Z0-9_]*"$' gpt_gateway/env.py | sed -E 's/.*= "//; s/"$//'; } | sort -u > "$T/knobs"
-if [ ! -s "$T/knobs" ]; then say spelling-env-prefix ERROR "no knob names parsed from launchd/*.sh or gpt_gateway/env.py"
+if [ ! -s "$T/knobs" ]; then say spelling-env-prefix ERROR "no knob names parsed from service/*.sh or gpt_gateway/env.py"
 # HOME and CODEX_HOME: read, never defined.
-else grep -vE '^(GPT_GATEWAY_[A-Z0-9_]+|HOME|CODEX_HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
+else grep -vE '^(GPT_GATEWAY_[A-Z0-9_]+|HOME|CODEX_HOME|XDG_CONFIG_HOME)$' "$T/knobs" > "$T/env"; ratchet spelling-env-prefix spelling-env-prefix "$T/env"; fi
 census spelling-kind src -nE 'conv[=]'
 
 if gin "$T/raw" src -nE '^def [A-Za-z_][A-Za-z0-9_]*|^[a-z_][a-z0-9_]*\(\) *\{'; then
@@ -103,13 +103,13 @@ if gin "$T/raw" src -nE '^def [A-Za-z_][A-Za-z0-9_]*|^[a-z_][a-z0-9_]*\(\) *\{';
 else say dup-functions ERROR "grep could not read sources"; fi
 
 : > "$T/disp"; : > "$T/use"
-shs | grep '^launchd/' | while read -r f; do s=$(basename "$f")
+shs | grep '^service/' | while read -r f; do s=$(basename "$f")
   grep -E '^[[:space:]]+[a-z-][a-z|-]*\)' "$f" | sed -E 's/^[[:space:]]+//; s/\).*//' | tr '|' '\n' | sed "s|^|$s:|" >> "$T/disp"
   grep -oE 'usage: [^"]*' "$f" | head -n 1 | sed 's/^usage: //' | tr -c 'A-Za-z0-9._-' '\n' | grep -v '^$' | sed "s|^|$s:|" >> "$T/use"
 done
 sort -u "$T/disp" -o "$T/disp"; sort -u "$T/use" -o "$T/use"
-if [ ! -s "$T/disp" ]; then say registry-parity ERROR "no dispatched case arm parsed from launchd/*.sh"
-elif [ ! -s "$T/use" ]; then say registry-parity ERROR "no usage line parsed from launchd/*.sh"
+if [ ! -s "$T/disp" ]; then say registry-parity ERROR "no dispatched case arm parsed from service/*.sh"
+elif [ ! -s "$T/use" ]; then say registry-parity ERROR "no usage line parsed from service/*.sh"
 else comm -23 "$T/disp" "$T/use" > "$T/par"; ratchet registry-parity undocumented "$T/par"; fi
 
 if [ ! -f README.md ]; then say orientation-truth ERROR "README.md missing"
@@ -127,7 +127,7 @@ else
       elif [[ $n =~ $path ]]; then
         case $n in
           */*) [ -e "$n" ] || echo "$n" ;;
-          *.py|*.sh|*.md) [ -e "$n" ] || [ -e "launchd/$n" ] || echo "$n" ;;  # the installed copy is flat
+          *.py|*.sh|*.md) [ -e "$n" ] || [ -e "service/$n" ] || echo "$n" ;;  # the installed copy is flat
         esac
       fi
     done < "$T/cited" > "$T/dang"; ratchet orientation-truth dangling "$T/dang"

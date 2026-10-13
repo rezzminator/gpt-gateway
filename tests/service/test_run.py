@@ -1,4 +1,4 @@
-"""Tests for launchd/run.sh: it links Claude Code's settings to the gateway only while the gateway answers."""
+"""Tests for service/run.sh: it links Claude Code's settings to the gateway only while the gateway answers."""
 import http.client
 import json
 import os
@@ -53,9 +53,11 @@ class RunTest(unittest.TestCase):
         with open(self.settings) as f:
             return json.load(f)
 
-    def start(self, python="/usr/bin/python3", upstream=None):
-        env = jail.clean_env(self.dir, GPT_GATEWAY_PYTHON=python, GPT_GATEWAY_JQ=JQ,
-                             GPT_GATEWAY_RETRY_SECONDS="0", GPT_GATEWAY_CLAUDE_SETTINGS=self.settings,
+    def start(self, python="/usr/bin/python3", upstream=None, jq=JQ, stop_seconds='630', drain='600', retry='0'):
+        env = jail.clean_env(self.dir, GPT_GATEWAY_PYTHON=python, GPT_GATEWAY_JQ=jq,
+                             GPT_GATEWAY_STOP_SECONDS=stop_seconds,
+                             GPT_GATEWAY_DRAIN_SECONDS=drain,
+                             GPT_GATEWAY_RETRY_SECONDS=retry, GPT_GATEWAY_CLAUDE_SETTINGS=self.settings,
                              GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
                              GPT_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
         # A file, not a pipe: a read to the end of a pipe waits for every gateway still draining to let go of it.
@@ -119,6 +121,143 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
         self.assertIn(b"missing or older", self.stderr())
 
+    def test_missing_settings_stop_succeeds_without_retrying(self):
+        self.write_settings({})
+        self.start(stop_seconds='4', drain='0')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        os.remove(self.settings)
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=8), 0, self.stderr())
+        self.assertNotIn(b'retrying', self.stderr())
+
+    def test_unlink_failure_leaves_time_for_the_full_stream_drain(self):
+        entered, release = threading.Event(), threading.Event()
+        class HeldUpstream(fakes.SlowUpstream):
+            def do_POST(self):
+                entered.set()
+                release.wait(12)
+                super().do_POST()
+        self.addCleanup(release.set)
+        self.write_settings({})
+        self.start(upstream=fakes.start_upstream(self, HeldUpstream), stop_seconds='7', drain='4')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        got, errors = [], []
+        def stream():
+            try:
+                self.stream(got)
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=stream)
+        thread.start()
+        self.assertTrue(entered.wait(5), 'the stream never reached upstream')
+        jail.write_json(self.settings, '{broken')
+        started = time.monotonic()
+        self.proc.send_signal(signal.SIGTERM)
+        try:
+            self.assertTrue(jail.wait_for(lambda: b'stopping: gateways draining' in self.stderr(), 3),
+                            'unlink consumed the stream drain budget: %r' % self.stderr())
+            release.set()
+            thread.join(8)
+            self.assertEqual(errors, [])
+            self.assertIn(b'message_stop', got[0])
+            self.assertEqual(self.proc.wait(timeout=5), 1, self.stderr())
+            self.assertLess(time.monotonic() - started, 7, 'stop reached the manager kill deadline')
+        finally:
+            release.set()
+            thread.join(10)
+
+    def assert_refused(self):
+        try:
+            connection = socket.create_connection(('127.0.0.1', self.port), timeout=1)
+        except ConnectionRefusedError:
+            return
+        connection.close()
+        self.fail('a failed gateway still accepts TCP connections without serving them')
+
+    def test_failed_start_closes_the_listener_before_the_retry_sleep(self):
+        jail.write_json(os.path.join(self.app, 'settings.json'), {'capture_dir': 'relative'})
+        self.write_settings({'ANTHROPIC_BASE_URL': self.url})
+        self.start(retry='5')
+        self.assertTrue(jail.wait_for(lambda: b'the gateway could not start' in self.stderr()), self.stderr())
+        self.assertIsNone(self.proc.poll(), 'the retry window was not exercised')
+        self.assert_refused()
+
+    def test_a_crash_closes_the_listener_before_failed_settings_cleanup(self):
+        self.write_settings({})
+        self.start(stop_seconds='3')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        child = self.health_pid()
+        jail.write_json(self.settings, '{broken')
+        os.kill(child, signal.SIGKILL)
+        self.assertTrue(jail.wait_for(lambda: b'gateway exited with status' in self.stderr()), self.stderr())
+        self.assert_refused()
+
+    def test_a_broken_gateway_package_still_unlinks_on_linux(self):
+        jail.write_json(os.path.join(self.app, 'gpt_gateway', 'server.py'), 'invalid python !')
+        self.write_settings({'ANTHROPIC_BASE_URL': self.url, 'KEEP': '1'})
+        self.start(stop_seconds='1')
+        self.assertEqual(self.proc.wait(timeout=10), 1, self.stderr())
+        self.assertEqual(self.read_settings()['env'], {'KEEP': '1'}, self.stderr())
+
+    def test_hup_before_the_listener_interpreter_starts_is_safe(self):
+        ready, release = os.path.join(self.dir, 'ready'), os.path.join(self.dir, 'release')
+        wrapper = os.path.join(self.dir, 'paused-python')
+        with open(wrapper, 'w') as output:
+            output.write('#!/bin/sh\ncase "$2" in */listener.py)\n'
+                         'touch "' + ready + '"\n'
+                         'while [ ! -f "' + release + '" ]; do sleep 0.01; done ;;\nesac\n'
+                         'exec /usr/bin/python3 "$@"\n')
+        os.chmod(wrapper, 0o755)
+        self.write_settings({})
+        self.start(python=wrapper)
+        self.assertTrue(jail.wait_for(lambda: os.path.exists(ready)), self.stderr())
+        self.proc.send_signal(signal.SIGHUP)
+        time.sleep(0.1)
+        open(release, 'w').close()
+        self.assertTrue(jail.wait_for(self.linked), 'HUP killed the listener entry: %r' % self.stderr())
+
+
+    def test_stop_retries_settings_that_are_temporarily_unreadable(self):
+        self.write_settings({'KEEP': '1'})
+        self.start(stop_seconds='4', drain='0')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        saved = self.read_settings()
+        jail.write_json(self.settings, '{broken')
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertTrue(jail.wait_for(lambda: b'could not read settings' in self.stderr(), 3), self.stderr())
+        jail.write_json(self.settings, saved)
+        self.assertEqual(self.proc.wait(timeout=8), 0, self.stderr())
+        self.assertEqual(self.read_settings()['env'], {'KEEP': '1'})
+        self.assertIn(b'could not read settings', self.stderr())
+
+    def test_stop_reports_settings_read_failure_at_its_deadline(self):
+        self.write_settings({})
+        self.start(stop_seconds='1')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        jail.write_json(self.settings, '{broken')
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=8), 1, self.stderr())
+        self.assertIn(b'could not read settings', self.stderr())
+        self.assertIn(b'deadline', self.stderr())
+
+    def test_stop_retries_a_settings_rewrite_failure(self):
+        self.write_settings({'KEEP': '1'})
+        marker = os.path.join(self.dir, 'reject-edit')
+        wrapper = os.path.join(self.dir, 'retry-jq')
+        with open(wrapper, 'w') as output:
+            output.write('#!/bin/sh\ncase "$*" in *"del(.env.ANTHROPIC_BASE_URL)"*)\n'
+                         '  [ -f "' + marker + '" ] && exit 3 ;;\nesac\nexec "' + JQ + '" "$@"\n')
+        os.chmod(wrapper, 0o755)
+        self.start(jq=wrapper, stop_seconds='4', drain='0')
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        open(marker, 'w').close()
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertTrue(jail.wait_for(lambda: b'could not rewrite settings' in self.stderr(), 3), self.stderr())
+        os.remove(marker)
+        self.assertEqual(self.proc.wait(timeout=8), 0, self.stderr())
+        self.assertEqual(self.read_settings()['env'], {'KEEP': '1'})
+        self.assertIn(b'could not rewrite settings', self.stderr())
+
     def test_gateway_that_dies_fails_open(self):
         self.write_settings({})
         self.start()
@@ -161,7 +300,7 @@ class RunTest(unittest.TestCase):
     def test_a_stop_while_the_gateway_starts_stops_it_too(self):
         slow = os.path.join(self.dir, "slow-python")
         with open(slow, "w") as f:  # the version probe answers; the gateway itself never does
-            f.write('#!/bin/sh\ncase "$1 $2" in "-I -c") exec /usr/bin/python3 "$@" ;; esac\nexec sleep 30\n')
+            f.write('#!/bin/sh\ncase "$2" in */gateway.py) exec sleep 30 ;; esac\nexec /usr/bin/python3 "$@"\n')
         os.chmod(slow, 0o755)
         self.write_settings({"KEEP": "1"})
         self.start(python=slow)
@@ -219,6 +358,44 @@ class RunTest(unittest.TestCase):
         self.assertTrue(jail.wait_for(lambda: b"restarted: gateway" in self.stderr(), 30), self.stderr())
         self.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.proc.wait(timeout=30), 0)
+
+    def test_connections_opened_during_hup_keep_their_first_request(self):
+        self.write_settings({})
+        self.start()
+        self.assertTrue(jail.wait_for(self.linked), self.stderr())
+        before = self.health_pid()
+        os.kill(before, signal.SIGSTOP)
+        def resume():
+            try:
+                os.kill(before, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        self.addCleanup(resume)
+        self.proc.send_signal(signal.SIGHUP)
+        def successor_started():
+            children = subprocess.run(['pgrep', '-P', str(self.proc.pid)],
+                                      capture_output=True, text=True).stdout.split()
+            return len(children) >= 2
+        self.assertTrue(jail.wait_for(successor_started), self.stderr())
+        connections = [socket.create_connection(('127.0.0.1', self.port), timeout=5) for _ in range(32)]
+        for connection in connections:
+            self.addCleanup(connection.close)
+        self.assertTrue(jail.wait_for(lambda: b'restarted: gateway' in self.stderr(), 30), self.stderr())
+        resume()
+        failures = []
+        for connection in connections:
+            try:
+                connection.sendall(b'GET /__gateway/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                response = http.client.HTTPResponse(connection)
+                response.begin()
+                body = response.read()
+                if response.status != 200 or not body.startswith(b'ok pid='):
+                    failures.append((response.status, body))
+            except (OSError, http.client.HTTPException) as error:
+                failures.append(str(error))
+        self.assertEqual(failures, [], 'handover lost connections that had already reached a listener')
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=15), 0)
 
     def test_stop_unlinks_first_then_drains_the_stream(self):
         self.write_settings({})

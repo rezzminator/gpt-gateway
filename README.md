@@ -6,17 +6,31 @@ Claude Code reaches it through `ANTHROPIC_BASE_URL=http://127.0.0.1:18787`. By d
 
 The supervisor points Claude Code at the gateway only while the gateway answers, and removes that setting whenever it is down, so a broken gateway never cuts Claude Code off (§ Fail-open).
 
-macOS, Python 3.9+ standard library only (`/usr/bin/python3`), `jq` for the settings edits.
+macOS and Linux, Python 3.9+ standard library only (`/usr/bin/python3`), `jq` for the settings edits.
 
 ## Install, update, remove
 
 ```sh
-launchd/install.sh            # install or update; --port N (default 18787)
+service/install.sh            # install or update; --port N (default 18787)
 ~/.local/share/gpt-gateway/ctl.sh status
-launchd/uninstall.sh          # --purge also deletes the logs and the database
+service/uninstall.sh          # --purge also deletes the logs and the database
 ```
 
-`install.sh` runs the unit tests first and refuses to install when one fails: it keeps the whole run in `~/Library/Logs/gpt-gateway-install-tests.log` (`uninstall.sh --purge` deletes it), prints that path and the names of the failing tests, and stops a run still going after `GPT_GATEWAY_TEST_SECONDS` (default 1800) with every thread's stack at the end of the log. It copies `gateway.py`, the `gpt_gateway/` package (all Python sources, preserving subdirectories), `run.sh`, `ctl.sh`, this README, the LICENSE and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, creates a `middleware` directory there and copies the shipped middleware into it (each file replaces only its own copy, so your own modules stay), writes `settings.json` on a first install, listing `status_label` (§ Shipped middleware), and writes the launchd agent `local.gpt-gateway`. A first install turns the gateway on. An update keeps the on/off state: when on, the new code takes over through a graceful restart and no stream is cut. An existing `settings.json` is validated and kept, so a module an update ships newly is copied but not listed: add it to `middleware`, then `ctl.sh restart`. An install that finds the gateway's install under its former name migrates it once: that copy's `settings.json` and `middleware` modules seed a first install, its agent stops (in-flight streams finish first) and its plist goes, its state directory moves to `~/.local/state/gpt-gateway/` unless that already exists, and its installed copy is deleted. A ChatGPT login kept in the Keychain under the former name is not moved: run `gateway.py chatgpt-login` again, or let the gateway use Codex's login.
+The commands select macOS or Linux with `uname -s`. Both require Python 3.9+, jq and curl, and an existing Claude Code settings file. `GPT_GATEWAY_CLAUDE_SETTINGS` selects another settings file; its real path is recorded, so a symlink stays intact.
+
+`install.sh` runs the unit tests first and refuses to install when one fails. It keeps the whole run in `gpt-gateway-install-tests.log` under the platform's log directory, prints that path and the failing test names, and stops a run still going after `GPT_GATEWAY_TEST_SECONDS` (default 1800) with every thread's stack in the log. It copies `gateway.py`, the `gpt_gateway/` package (all Python sources, preserving subdirectories), `run.sh`, `ctl.sh`, `platform.sh`, `settings.sh`, `listener.py`, this README, LICENSE and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, and copies the shipped middleware into `middleware/`, replacing only each module's own file. A first install writes `settings.json` listing `status_label` (§ Shipped middleware) and turns the gateway on. An update validates and keeps that file and the on/off state: when on, new gateway code takes over through HUP without cutting a stream; a changed supervisor or service definition drains and reloads the service. Newly shipped middleware is copied but unlisted: add it to `middleware`, then `ctl.sh restart`.
+
+### macOS
+
+Run `service/install.sh` from the checkout. It writes the launchd agent `local.gpt-gateway` under `~/Library/LaunchAgents/`. Logs, including install-test output and supervisor stderr, live under `~/Library/Logs/`. The system Python needs the command line developer tools.
+
+On macOS an install under the former product name is migrated once: its settings and middleware seed a first install, its agent drains and its plist goes, its state directory moves to `~/.local/state/gpt-gateway/` unless that already exists, and its installed copy is deleted. A ChatGPT login under the former Keychain name is not moved: run `gateway.py chatgpt-login` again, or use Codex's login.
+
+### Linux
+
+Run `service/install.sh` from the checkout in a session with a systemd 252+ user manager. Install checks this minimum and bus reachability before changing files. It writes `gpt-gateway.service` under `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`, reloads the user manager, and enables and starts a first install. `systemctl --user enable`/`disable` carry the on/off state across logins; updating a disabled unit keeps it off. Logs and install-test output live under `~/.local/state/gpt-gateway/`. The installed `service.json` records the environment used by `ctl.sh` and `uninstall.sh`.
+
+Without linger, the user manager and gateway stop at logout. Check with `loginctl show-user "$USER" -p Linger`; an owner who needs it to run between logins enables linger with `loginctl enable-linger "$USER"`. HUP is sent with `systemctl --user kill -s HUP --kill-whom=main gpt-gateway.service`: it reaches the supervisor, which replaces and drains the gateways. `Restart=on-failure` retries a failed supervisor, and `KillMode=mixed` gives `run.sh` TERM first so it tries to unlink settings before signalling its children to drain. Failed cleanup retries alongside the full drain, with its deadline one second before the 630-second stop timeout. The [Linux switch-on runbook](docs/operations/linux-service.md) covers backup, verification, switch-off and rollback.
 
 `uninstall.sh` stops the agent (in-flight streams finish first), points Claude Code back at the API, deletes the agent and the installed copy, and keeps `settings.json` and the `middleware` directory under `~/.local/state/gpt-gateway/backups/`.
 
@@ -41,13 +55,13 @@ An environment variable that is set and not empty wins over the file, which wins
 
 `gateway.py check [FILE]` validates a settings file and loads its middleware the way a start would; it exits 1 with the reason.
 
-The environment alone sets the rest (the launchd agent sets them in its plist):
+The environment alone sets the rest (the service manager sets them in its plist or user unit):
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `GPT_GATEWAY_PORT` | listen port on 127.0.0.1 | 18787 |
 | `GPT_GATEWAY_UPSTREAM` | upstream origin | `https://api.anthropic.com` |
-| `GPT_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error and database-failure lines only; an absolute path or `~/` under `HOME` | `~/Library/Logs/gpt-gateway.log` |
+| `GPT_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error and database-failure lines only; an absolute path or `~/` under `HOME` | macOS: `~/Library/Logs/gpt-gateway.log`; Linux: `~/.local/state/gpt-gateway/gpt-gateway.log` |
 | `GPT_GATEWAY_DB` | the [database](#database), an absolute path or `~/` under `HOME` | `~/.local/state/gpt-gateway/gateway.db` |
 | `GPT_GATEWAY_DRAIN_SECONDS` | on SIGTERM, how long in-flight requests may finish | 600 |
 | `GPT_GATEWAY_DEBUG` | set to record each messages request's non-secret headers and metadata as a `debug` event | off |
@@ -233,7 +247,7 @@ Hence both kinds default to 5m. Price your real calls from the rows above (`in` 
 
 `GET http://127.0.0.1:18787/__gateway/health` answers one line:
 
-```
+```text
 ok pid=4242 fds=212/10240 capture=off settings=ok db=~/.local/state/gpt-gateway/gateway.db db_rows=1830 db_drops=0 db_errors=0 middleware=[model-note errors=0]
 ```
 
@@ -251,7 +265,9 @@ Every client connection and every upstream connection is a file handle, and a pr
 
 ## Fail-open
 
-`run.sh` supervises the gateway under launchd and owns `env.ANTHROPIC_BASE_URL` in Claude Code's `settings.json`, and `env.ENABLE_TOOL_SEARCH=true` beside it (Claude Code turns tool search off behind any base URL that is not Anthropic's; the gateway forwards `defer_loading` and `tool_reference` intact): it sets them only once the gateway answers its health check, and removes them when Python is missing, when the gateway cannot start (a bad `settings.json`, a middleware that fails to load, a taken port), when the gateway exits, and when the agent stops. A URL other than the gateway's is never touched, and an `ENABLE_TOOL_SEARCH` you set yourself to anything but `"true"` is kept; a `"true"` reads as the one `run.sh` wrote and leaves with the URL. HUP starts a new gateway on the same port (`SO_REUSEPORT`) and, once it answers, lets the old one drain: no in-flight stream is cut.
+`run.sh` supervises the gateway under launchd or a systemd user service and owns `env.ANTHROPIC_BASE_URL` in Claude Code's `settings.json`, and `env.ENABLE_TOOL_SEARCH=true` beside it (Claude Code turns tool search off behind any base URL that is not Anthropic's; the gateway forwards `defer_loading` and `tool_reference` intact). Every Claude Code session reading that settings file is routed through the gateway; it is not scoped to one chat. Set `GPT_GATEWAY_CLAUDE_SETTINGS` when installing to point at another settings file.
+
+The supervisor sets these values only once the gateway answers its health check, and removes them when Python is missing, when the gateway cannot start (bad gateway settings, rejected middleware, a taken port), when the gateway exits, and when the service stops. An absent settings file is already unlinked. A failed read or rewrite is logged and retried; on stop the retries run alongside the gateway drain and end one second before `GPT_GATEWAY_STOP_SECONDS` (default 630), so they never postpone the drain. ctl and uninstall report `could not read settings` when an existing file cannot be read; ctl only waits for the supervisor to unlink. A URL other than the gateway's is never touched, and a user-selected `ENABLE_TOOL_SEARCH` other than `"true"` is kept; `"true"` reads as the supervisor's value and leaves with the URL. On Linux, the supervisor holds a `SO_REUSEPORT` listening socket and passes that same descriptor to each gateway. HUP starts a successor on the shared accept queue before stopping the predecessor, so closing the old gateway leaves queued connections available to the successor. Accepted connections with request data and in-flight streams drain on their original gateway, up to the drain limit. Accepted clients that have sent no request data close as idle clients at drain start. On a failed start or the last gateway exit, the supervisor closes its listener before cleanup or a retry sleep, so new connections are refused. macOS retains its separate-listener handover.
 
 ## Capture
 
@@ -372,11 +388,11 @@ The gateway records what it observes in one SQLite file, `GPT_GATEWAY_DB` (defau
 ## Operating it
 
 ```sh
-~/.local/share/gpt-gateway/ctl.sh on|off|restart|status
+~/.local/share/gpt-gateway/ctl.sh start|stop|restart|status
 sqlite3 -readonly ~/.local/state/gpt-gateway/gateway.db 'SELECT * FROM daily ORDER BY day DESC LIMIT 10'
 ```
 
-`on` starts it and waits until Claude Code uses it; `off` points Claude Code at the API at once and lets in-flight streams finish; `restart` takes up new code and a changed middleware list without cutting a stream; `status` prints the on/off state, the health line and where Claude Code points. The database holds a row per request and an event for everything else (§ Database); the text log keeps the start, stop, fatal, settings-error and database-failure lines; the supervisor logs to `~/Library/Logs/gpt-gateway.stderr.log`.
+`start` (`on`) enables it and waits until Claude Code uses it; `stop` (`off`) disables it, points Claude Code at the API at once and lets in-flight streams finish; `restart` takes up new code and a changed middleware list without cutting a stream; `status` prints the on/off state, health and where Claude Code points. The database holds a row per request and an event for everything else (§ Database); the text log keeps the start, stop, fatal, settings-error and database-failure lines. Supervisor stderr is `gpt-gateway.stderr.log` in the platform's log directory.
 
 ## Development
 
