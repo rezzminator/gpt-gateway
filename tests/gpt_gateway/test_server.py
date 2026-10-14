@@ -33,6 +33,25 @@ class DrainTest(unittest.TestCase):
         self.addCleanup(accepted.close)
         self.assertIn(accepted, runtime.drain.pending)
 
+    def test_a_server_adopts_an_inherited_listening_descriptor_and_refuses_any_other(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(5)
+        address = listener.getsockname()
+        descriptor = os.dup(listener.fileno())
+        runtime = SimpleNamespace(env=SimpleNamespace(listener_fd=descriptor), drain=Drain())
+        server = Server(address, runtime)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_address, address)
+        client = socket.create_connection(address, timeout=2)
+        self.addCleanup(client.close)
+        accepted, _ = server.get_request()
+        accepted.close()
+        connected = os.dup(client.fileno())
+        with self.assertRaisesRegex(OSError, 'not the configured listener'):
+            Server(address, SimpleNamespace(env=SimpleNamespace(listener_fd=connected), drain=Drain()))
+
     def test_an_accepted_first_request_waits_in_the_linux_drain(self):
         client, connection = socket.socketpair()
         self.addCleanup(client.close)
@@ -152,6 +171,7 @@ class DrainStateTest(unittest.TestCase):
         self.addCleanup(release.set)
         original = socket.SocketIO.readinto
         rt, port = fakes.start_gateway(self)
+        rt.drain.preserve_pending = True  # the Linux drain these two tests exercise; macOS closes pending clients
         def paused(reader, buffer):
             count = original(reader, buffer)
             if count and reader._sock.getsockname()[1] == port and not entered.is_set():
@@ -187,6 +207,7 @@ class DrainStateTest(unittest.TestCase):
             return original(stream, *args, **kwargs)
         with mock.patch.object(http.client, 'parse_headers', side_effect=paused):
             rt, port = fakes.start_gateway(self)
+            rt.drain.preserve_pending = True  # the Linux drain this test exercises; macOS closes pending clients
             client = socket.create_connection(('127.0.0.1', port), timeout=3)
             self.addCleanup(client.close)
             client.sendall(b'GET /__gateway/health HTTP/1.1\r\n')

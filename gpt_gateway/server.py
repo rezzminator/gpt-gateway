@@ -121,11 +121,25 @@ class Server(ThreadingHTTPServer):
             self.socket = socket.socket(fileno=descriptor)
             self.socket.setblocking(False)
             self.server_address = self.socket.getsockname()
-            if self.server_address != address or not self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+            if self.server_address != address or not self.listening(self.socket):
                 self.socket.close()
                 raise OSError('inherited gateway descriptor is not the configured listener')
             self.server_name = socket.getfqdn(address[0])
             self.server_port = address[1]
+
+    @staticmethod
+    def listening(sock):
+        """Whether `sock` is a listening socket; macOS cannot report it (ENOPROTOOPT), so listen() proves it there."""
+        try:
+            return bool(sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))
+        except OSError as error:
+            if error.errno != errno.ENOPROTOOPT:
+                raise
+        try:
+            sock.listen(REQUEST_QUEUE_SIZE)  # idempotent on a listening socket; EINVAL on a connected one
+        except OSError:
+            return False
+        return True
 
     def server_bind(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)

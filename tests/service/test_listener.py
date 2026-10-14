@@ -132,7 +132,9 @@ class ListenerTest(unittest.TestCase):
                                  '/usr/bin/python3', '-I', '-c', child],
                                 env=jail.clean_env(home), capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {'blocking': False, 'port': port, 'reuse': 1})
+        shared = json.loads(result.stdout)
+        self.assertGreater(shared.pop('reuse'), 0)  # nonzero means set: Linux reports 1, macOS 512
+        self.assertEqual(shared, {'blocking': False, 'port': port})
 
 
 if __name__ == '__main__':
