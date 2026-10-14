@@ -3,6 +3,8 @@ strips the advisor from a request, and the advisor rows of a response. The advis
 shape and last line; every conversation around it is invented."""
 import json
 import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -206,9 +208,15 @@ class CheckTest(unittest.TestCase):
         os.mkdir(os.path.join(root, "locked"))
         os.chmod(os.path.join(root, "locked"), 0)
         self.addCleanup(os.chmod, os.path.join(root, "locked"), 0o700)
-        with self.assertRaises(SettingsError) as caught:
-            load(MODULE, {"advisor_agents": ["Role"], "agent_dirs": [root]})
-        self.assertIn("advisor_agents: cannot read the agents under %s" % root, str(caught.exception))
+        # A child loads it, demoted under root (who reads a mode-0 directory): the refusal is its exit 3 and message.
+        child = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom gpt_gateway.harness import load\n"
+                 "from gpt_gateway.settings import SettingsError\ntry:\n"
+                 "    load(sys.argv[2], {'advisor_agents': ['Role'], 'agent_dirs': [sys.argv[3]]})\n"
+                 "except SettingsError as caught:\n    print(caught)\n    sys.exit(3)\n")
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", child, jail.ROOT, MODULE, root], capture_output=True,
+                              text=True, timeout=30, **jail.demote(self, root))
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertIn("advisor_agents: cannot read the agents under %s" % root, done.stdout)
 
 
 class CachingTest(unittest.TestCase):

@@ -16,6 +16,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFIX = "gpt-gateway-test-"
+UNPRIVILEGED = 65534  # nobody, the id a root run demotes a permission test to
 
 
 def scratch(test):
@@ -23,6 +24,28 @@ def scratch(test):
     path = os.path.realpath(tempfile.mkdtemp(prefix=PREFIX))
     test.addCleanup(shutil.rmtree, path, True)
     return path
+
+
+def demote(test, *paths):
+    """Root reads every file whatever its mode, so a test of an unreadable file runs as an unprivileged user there.
+    Gives the scratch trees at `paths` to that user, opens the way down to them and into this checkout (whose code the
+    child runs) for the length of `test`, and returns the `subprocess` arguments that run a child as it; `{}` when this
+    process is not root, and the test runs as itself."""
+    if os.geteuid() != 0:
+        return {}
+    for path in paths:
+        for directory, names, files in os.walk(path):
+            for name in [""] + names + files:
+                os.lchown(os.path.join(directory, name), UNPRIVILEGED, UNPRIVILEGED)
+    for start in [os.path.dirname(path) for path in paths] + [ROOT]:
+        ancestor = start
+        while ancestor != os.path.dirname(ancestor):
+            mode = os.stat(ancestor).st_mode & 0o7777
+            if not mode & 0o001:
+                os.chmod(ancestor, mode | 0o001)
+                test.addCleanup(os.chmod, ancestor, mode)
+            ancestor = os.path.dirname(ancestor)
+    return {"user": UNPRIVILEGED, "group": UNPRIVILEGED, "extra_groups": []}
 
 
 def free_port():

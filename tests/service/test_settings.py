@@ -17,12 +17,10 @@ class SettingsTest(unittest.TestCase):
         jail.write_json(settings, {})
         os.chmod(directory, 0)
         self.addCleanup(os.chmod, directory, 0o700)
-        if os.access(directory, os.X_OK):
-            self.skipTest('this user can search directories regardless of permission bits')
         env = jail.clean_env(home, SETTINGS=settings, URL='http://127.0.0.1:%d' % jail.free_port(), JQ='/usr/bin/jq')
         result = subprocess.run(['/bin/sh', '-c', '. "$1"; settings_linked; code=$?; [ "$code" -eq 2 ]',
                                  'test', os.path.join(jail.ROOT, 'service', 'settings.sh')],
-                                env=env, capture_output=True, text=True, timeout=5)
+                                env=env, capture_output=True, text=True, timeout=5, **jail.demote(self, home))
         self.assertEqual(result.returncode, 0, 'an inaccessible file was misreported as absent')
 
     def test_a_settings_rewrite_keeps_the_files_mode(self):

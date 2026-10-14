@@ -32,6 +32,7 @@ class Tree:
     def __init__(self, test):
         self.test = test
         self.root = jail.scratch(test)
+        self.unprivileged = False  # the run is demoted where root would read what the planted violation locks
         for rel in listed():
             target = os.path.join(self.root, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -70,9 +71,12 @@ class Tree:
         self.append(rel, "#\n" * (n - have))
 
     def start(self, *args):
-        return subprocess.Popen(["/bin/bash", self.path("scripts/checks.sh")] + list(args),
-                                env=jail.clean_env(self.root, PATH="/usr/bin:/bin"),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        env, demoted = jail.clean_env(self.root, PATH="/usr/bin:/bin"), {}
+        if self.unprivileged:
+            env["TMPDIR"] = jail.scratch(self.test)
+            demoted = jail.demote(self.test, self.root, env["TMPDIR"])
+        return subprocess.Popen(["/bin/bash", self.path("scripts/checks.sh")] + list(args), env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **demoted)
 
 
 def finish(proc):
@@ -109,6 +113,7 @@ def ignore_sources(t):
 
 def unreadable(t):
     os.chmod(t.path("gpt_gateway/clock.py"), 0)
+    t.unprivileged = True
 
 
 # (check id, plant one violation, a fragment its FAIL line names)
