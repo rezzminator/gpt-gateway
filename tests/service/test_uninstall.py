@@ -46,13 +46,15 @@ class UninstallTest(unittest.TestCase):
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
         self.assertFalse(os.path.exists(h.dest))
 
-    def test_another_gateways_link_stays(self):
+    def test_a_stale_secret_link_on_this_port_is_removed(self):
+        # Only this gateway listens on its port: a link holding an earlier install's secret is its own, and kept it
+        # would send Claude Code's every request to a gateway that no longer strips it.
         h, _ = self.installed()
-        other = "http://127.0.0.1:%d/%s" % (h.port, "d" * 64)
-        h.write_claude({"env": {"ANTHROPIC_BASE_URL": other}})
+        stale = "http://127.0.0.1:%d/%s" % (h.port, "d" * 64)
+        h.write_claude({"env": {"ANTHROPIC_BASE_URL": stale}})
         code, out = h.run("uninstall.sh")
         self.assertEqual(code, 0, out)
-        self.assertEqual(h.read_claude()["env"], {"ANTHROPIC_BASE_URL": other})
+        self.assertEqual(h.read_claude()["env"], {})
 
     def test_an_unreadable_route_secret_stops_the_uninstall_and_says_so(self):
         h, _ = self.installed()

@@ -160,18 +160,28 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.proc.wait(timeout=10), 0)
         self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
 
-    def test_a_route_secret_that_cannot_be_used_fails_open_without_linking(self):
+    def test_a_route_secret_that_cannot_be_used_fails_open_and_removes_a_secret_link(self):
         for mode, text in ((0o600, "not hex"), (0o644, "a" * 64)):
             with self.subTest(mode=oct(mode)):
                 shutil.rmtree(self.app)
                 self.app = jail.stage_install(os.path.join(self.dir, "app"))
                 self.install_secret(text, mode)
-                self.write_settings({"KEEP": "1"})
+                # linked through an earlier, readable secret: the supervisor cannot read the current one
+                self.write_settings({"ANTHROPIC_BASE_URL": self.url + "/" + "c" * 64, "KEEP": "1"})
                 self.start()
                 self.assertEqual(self.proc.wait(timeout=20), 1)
                 self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
                 self.stop()
                 self.stopped = False
+
+    def test_a_secret_link_whose_secret_is_gone_is_relinked_without_it(self):
+        self.write_settings({"ANTHROPIC_BASE_URL": self.url + "/" + "d" * 64, "KEEP": "1"})
+        self.start()
+        self.assertTrue(jail.wait_for(lambda: self.read_settings()["env"].get("ANTHROPIC_BASE_URL") == self.url),
+                        self.stderr())
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
 
     def test_missing_python_fails_open(self):
         self.write_settings({"ANTHROPIC_BASE_URL": self.url, "ENABLE_TOOL_SEARCH": "true", "KEEP": "1"})

@@ -557,7 +557,31 @@ class RouteGateTest(unittest.TestCase):
         self.assertEqual(self.send(port)[0].status, 200)
         self.assertEqual([r["input_tokens"] for r in fakes.gpt_rows(rt)], [100])  # the upstream's total, image included
         resp, data = self.send(port, path="/v1/messages/count_tokens")
-        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2000))  # 100 total is under the allowance: no text ratio
+        # 100 total is under the allowance, so the turn teaches nothing: the text keeps the prior 0.25 ratio
+        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2154))
+
+
+class RouteSecretStripTest(unittest.TestCase):
+    def test_the_secret_segment_is_stripped_whatever_follows_it(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from gpt_gateway import proxy
+        secret = "a" * 64
+        for path, stripped, authorized in (("/%s/v1/messages" % secret, "/v1/messages", True),
+                                           ("/" + secret, "/", True), ("/%s?x=1" % secret, "/?x=1", True),
+                                           ("/%sb/v1" % secret, "/%sb/v1" % secret, False),
+                                           ("/v1/messages", "/v1/messages", False)):
+            with self.subTest(path=path):
+                handler = object.__new__(proxy.Handler)
+                handler.connection = mock.Mock()
+                handler.server = SimpleNamespace(runtime=SimpleNamespace(
+                    drain=mock.Mock(), settings=mock.Mock(), route_secret=secret,
+                    pause=mock.Mock(check=mock.Mock(return_value=False))))
+                handler.path = path
+                handler.proxy = mock.Mock()
+                handler.handle_any()
+                self.assertEqual(handler.path, stripped)
+                self.assertEqual(handler.proxy.call_args[0][2], authorized)
 
 
 if __name__ == "__main__":

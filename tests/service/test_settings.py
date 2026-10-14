@@ -42,6 +42,41 @@ class SettingsTest(unittest.TestCase):
                 with open(settings) as source:
                     self.assertEqual(json.load(source), {'env': {'KEEP': '1'}})
 
+    def test_a_symlinked_settings_rewrite_keeps_the_targets_mode(self):
+        home = jail.scratch(self)
+        url = 'http://127.0.0.1:%d' % jail.free_port()
+        target = os.path.join(home, 'dotfiles-settings.json')
+        jail.write_json(target, {'env': {'ANTHROPIC_BASE_URL': url, 'KEEP': '1'}})
+        os.chmod(target, 0o600)
+        settings = os.path.join(home, 'settings.json')
+        os.symlink(target, settings)
+        env = jail.clean_env(home, SETTINGS=settings, URL=url, JQ='/usr/bin/jq')
+        result = subprocess.run(['/bin/sh', '-c', '. "$1"; settings_edit "del(.env.ANTHROPIC_BASE_URL)"',
+                                 'test', os.path.join(jail.ROOT, 'service', 'settings.sh')],
+                                env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(os.stat(settings).st_mode & 0o777, 0o600)
+
+    def test_a_route_secret_that_is_not_a_regular_file_is_refused_without_reading(self):
+        home = jail.scratch(self)
+        os.mkfifo(os.path.join(home, 'route-secret'), 0o600)
+        env = jail.clean_env(home, URL='http://127.0.0.1:1')
+        result = subprocess.run(['/bin/sh', '-c', '. "$1"; settings_route "$2"; code=$?; [ "$code" -eq 1 ]',
+                                 'test', os.path.join(jail.ROOT, 'service', 'settings.sh'), home],
+                                env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_any_secret_form_of_this_gateways_url_is_ours(self):
+        url = 'http://127.0.0.1:1'
+        script = '. "$1"; LINK_URL=$URL; settings_is_ours "$2"'
+        for value, ours in ((url, True), (url + '/' + 'e' * 64, True), (url + '/' + 'E' * 64, False),
+                            (url + '/' + 'e' * 63, False), (url + '/x', False), ('http://other', False)):
+            with self.subTest(value=value):
+                result = subprocess.run(['/bin/sh', '-c', script, 'test',
+                                         os.path.join(jail.ROOT, 'service', 'settings.sh'), value],
+                                        env=jail.clean_env(jail.scratch(self), URL=url), capture_output=True, timeout=5)
+                self.assertEqual(result.returncode == 0, ours, result.stderr)
+
     def test_missing_settings_are_definitely_not_linked(self):
         home = jail.scratch(self)
         env = jail.clean_env(home, SETTINGS=os.path.join(home, 'absent.json'),

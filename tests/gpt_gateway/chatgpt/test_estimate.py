@@ -29,8 +29,9 @@ class EstimateTest(unittest.TestCase):
         self.assertEqual(lane.estimate(100, 2), 4025)
         lane.observe(100, 4050, 2)  # image and PDF allowances, plus 50 text tokens
         self.assertEqual(lane.estimate(200, 1), 2100)
-        lane.observe(100, 2000, 1)  # attachment-only usage cannot push the ratio negative
-        self.assertEqual(lane.estimate(200), 50)
+        for total in (2000, 1500):  # an allowance that meets or exceeds the total measures no text: the ratio holds
+            lane.observe(100, total, 1)
+            self.assertEqual(lane.estimate(200), 100)
 
     def test_invalid_counts_are_rejected(self):
         for method, args in ((Estimator().estimate, (-1,)),

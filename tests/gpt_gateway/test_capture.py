@@ -102,6 +102,20 @@ class CaptureTest(unittest.TestCase):
         finally:
             os.umask(previous_umask)
 
+    def test_a_symlinked_capture_root_is_used_without_changing_its_target(self):
+        base = jail.scratch(self)
+        target, root = os.path.join(base, "shared"), os.path.join(base, "capture")
+        os.mkdir(target)
+        os.chmod(target, 0o755)
+        os.symlink(target, root)
+        events = []
+        exchange = capture.Capture(root, 1, "POST", "/v1/messages", {}, "main", lambda *a, **k: events.append(a))
+        exchange.close()
+        self.assertEqual(events, [])
+        self.assertIsNotNone(exchange.dir)
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(exchange.dir)).st_mode), 0o700)
+
     def test_capture_rejects_existing_symlink_without_touching_target(self):
         root = os.path.join(jail.scratch(self), "private-capture")
         events = []

@@ -11,6 +11,7 @@ window, the ones held back counted).
 import json
 import os
 import re
+import stat
 import threading
 
 from . import clock, handles
@@ -21,6 +22,11 @@ REQUEST_BODY = "2-request.body"
 SENT_BODY = "3-request.sent.body"
 RESPONSE = "4-response.json"
 RESPONSE_BODY = "5-response.body"
+
+
+def _own_directory(path):
+    st = os.lstat(path)
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
 
 
 class Sequence:
@@ -54,7 +60,9 @@ class Capture:
             self.dir = os.path.join(day, name)
             for directory in (root, day, self.dir):
                 os.makedirs(directory, mode=0o700, exist_ok=True)
-                os.chmod(directory, 0o700)
+                # The user's root is tightened only when it is a directory this user owns, never through a symlink.
+                if directory != root or _own_directory(root):
+                    os.chmod(directory, 0o700)
             hdrs = [[k, "<redacted>" if k.lower() in SECRET else v] for k, v in headers.items()]
             self.write(REQUEST, json.dumps({"time": clock.stamp("%Y-%m-%d %H:%M:%S", now), "seq": seq,
                                             "kind": kind, "method": method, "path": path, "headers": hdrs},

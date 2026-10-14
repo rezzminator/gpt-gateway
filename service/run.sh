@@ -46,7 +46,7 @@ tool_search() { "$JQ" -r '.env.ENABLE_TOOL_SEARCH // ""' "$SETTINGS" 2>/dev/null
 
 link() {
   cur=$(settings_current) || { log "could not read settings ($SETTINGS)"; return 1; }
-  if [ -n "$cur" ] && [ "$cur" != "$URL" ] && [ "$cur" != "$LINK_URL" ]; then log "settings point at another URL, not this gateway; left unchanged"; return 0; fi
+  if [ -n "$cur" ] && ! settings_is_ours "$cur"; then log "settings point at another URL, not this gateway; left unchanged"; return 0; fi
   if [ "$cur" = "$LINK_URL" ] && [ -n "$(tool_search)" ]; then return 0; fi
   # shellcheck disable=SC2016 # $url is a jq variable bound by --arg, not a shell expansion
   settings_edit '.env = ((.env // {}) + {ANTHROPIC_BASE_URL: $url}) | if .env | has("ENABLE_TOOL_SEARCH") then . else .env.ENABLE_TOOL_SEARCH = "true" end' \

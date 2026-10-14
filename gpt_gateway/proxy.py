@@ -175,11 +175,13 @@ class Handler(BaseHTTPRequestHandler):
         # else sees the path, so Anthropic still gets its original path and body bytes and no row holds the credential.
         authorized = False
         if rt.route_secret:
-            parts = self.path.split("/", 2)  # the request line is latin-1 text; compare as bytes
-            authorized = len(parts) == 3 and parts[0] == "" and hmac.compare_digest(
-                parts[1].encode("latin-1"), rt.route_secret.encode("ascii"))
+            # The first segment ends at "/", "?" or the end, so "/<secret>" and "/<secret>?q" are stripped too.
+            end = min([i for i in (self.path.find("/", 1), self.path.find("?", 1)) if i != -1] or [len(self.path)])
+            authorized = self.path.startswith("/") and hmac.compare_digest(  # latin-1 request text; compare as bytes
+                self.path[1:end].encode("latin-1"), rt.route_secret.encode("ascii"))
             if authorized:
-                self.path = "/" + parts[2]
+                rest = self.path[end:]
+                self.path = rest if rest.startswith("/") else "/" + rest
         snap = rt.settings.current()  # one settings snapshot per request
         if rt.pause.check():
             rt.upstream.pool.clear()  # idle connections from before the pause are dead, or die on their next use
