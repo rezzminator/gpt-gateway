@@ -177,7 +177,7 @@ class UpstreamTest(unittest.TestCase):
         for error, status, message, cls in (
                 (ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"), b"HTTP/1.1 200 OK\r\n",
                  "upstream connection failed: ConnectionResetError", "reset"),
-                (socket.timeout("timed out"), None, "upstream unreachable: timeout", "timeout"),
+                (socket.timeout("timed out"), None, "upstream unreachable: %s" % socket.timeout.__name__, "timeout"),  # TimeoutError since 3.10
                 (TimeoutError(errno.ETIMEDOUT, "Operation timed out"), None, "upstream unreachable: TimeoutError",
                  "timeout")):
             with self.subTest(error=repr(error)):

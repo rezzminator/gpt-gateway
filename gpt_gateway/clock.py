@@ -28,7 +28,8 @@ def slept():
     if _ASLEEP is None:
         return now() - monotonic()
     running, awake = _ASLEEP
-    return time.clock_gettime(running) - time.clock_gettime(awake)
+    awake_at = time.clock_gettime(awake)  # read first, so the later read of the running clock never makes it negative
+    return time.clock_gettime(running) - awake_at
 
 
 def milliseconds(seconds):
