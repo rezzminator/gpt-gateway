@@ -22,13 +22,14 @@ class Clean(unittest.TestCase):
 """
 CHECKS_PASS = 'echo "CHECK stub-check PASS 0 new"\nexit 0\n'
 SC_PASS = "exit 0\n"
+SC_PINNED = "0.11.0"  # scripts/gate.sh SHELLCHECK_VERSION
 CLEAN_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 class Tree:
     """A scratch git work tree: this repository's gate.sh beside stub links."""
 
-    def __init__(self, test, *, checks=CHECKS_PASS, shellcheck=SC_PASS, tests=PASSING, source="x = 1\n"):
+    def __init__(self, test, *, checks=CHECKS_PASS, shellcheck=SC_PASS, sc_version=SC_PINNED, tests=PASSING, source="x = 1\n"):
         self.root = jail.scratch(test)
         os.makedirs(os.path.join(self.root, "scripts"))
         shutil.copy2(os.path.join(jail.ROOT, "scripts", "gate.sh"), os.path.join(self.root, "scripts", "gate.sh"))
@@ -40,7 +41,9 @@ class Tree:
         self.bin = os.path.join(self.root, 'bin')
         self.clean_path = test.clean_path
         if shellcheck is not None:
-            self.write("bin/shellcheck", "#!/bin/sh\n" + shellcheck)
+            version = ('[ "$1" = --version ] && { printf "ShellCheck - shell script analysis tool\\nversion: %s\\n"; exit 0; }\n'
+                       % sc_version)
+            self.write("bin/shellcheck", "#!/bin/sh\n" + version + shellcheck)
             os.chmod(os.path.join(self.bin, "shellcheck"), 0o755)
         self.write(".gitignore", "bin/\n")
         subprocess.run(['git', 'init', '-q'], cwd=self.root, env=jail.clean_env(self.root),
@@ -106,6 +109,8 @@ class GateTest(unittest.TestCase):
         cases = (
             ("shellcheck", dict(shellcheck=None), "shellcheck not found on PATH — brew install shellcheck"),
             ("shellcheck", dict(shellcheck="exit 3\n"), "shellcheck exited 3"),
+            ("shellcheck", dict(sc_version="0.9.0"),
+             "shellcheck 0.9.0 found, the gate pins 0.11.0 — install the v0.11.0 release from github.com/koalaman/shellcheck/releases"),
             ("checks", dict(checks="exit 0\n"), "no CHECK line printed (exit 0)"),
             ("checks", dict(checks='echo "CHECK facade-env ERROR baseline missing"\nexit 2\n'), "facade-env (exit 2)"),
             ("tests", dict(tests=EMPTY), "Ran 0 tests"),

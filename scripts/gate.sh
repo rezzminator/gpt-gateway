@@ -43,8 +43,13 @@ fi
 
 # lint: shellcheck over every shell script; a missing tool is an ERROR, never a skipped link
 grep -E '\.sh$' "$T/all" > "$T/sh"
+# One version on every host (macOS, Linux, the fence): a newer or older release reports different findings.
+SHELLCHECK_VERSION=0.11.0
 SC=$(command -v shellcheck) || SC=""
+sc_found="of unknown version"; [ -z "$SC" ] || sc_found=$("$SC" --version 2>/dev/null | sed -n 's/^version: //p'); [ -n "$sc_found" ] || sc_found="of unknown version"
 if [ -z "$SC" ]; then report shellcheck ERROR "shellcheck not found on PATH — brew install shellcheck"
+elif [ "$sc_found" != "$SHELLCHECK_VERSION" ]; then
+  report shellcheck ERROR "shellcheck $sc_found found, the gate pins $SHELLCHECK_VERSION — install the v$SHELLCHECK_VERSION release from github.com/koalaman/shellcheck/releases"
 elif [ ! -s "$T/sh" ]; then report shellcheck ERROR "no shell script listed"
 else
   # shellcheck disable=SC2046 # word splitting is the point: a path holding a space was refused above

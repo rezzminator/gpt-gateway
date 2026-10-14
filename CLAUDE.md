@@ -22,7 +22,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 - Python 3.9+, standard library only, run as `/usr/bin/python3 -I`; `-I` keeps the script directory off `sys.path`, so `gateway.py` inserts its own.
 - The gate: `scripts/gate.sh` from this root — compile, shellcheck, checks, the whole suite under `env -i` with an empty `HOME`; its last line is `GATE PASS`, `GATE FAIL …` or `GATE ERROR …`.
 - One test module: `/usr/bin/python3 -I -B -m unittest discover -s tests -t . -p test_hooks.py`; a dotted module name does not import under `-I`.
-- `shellcheck` is a gate link: a host without it gets `GATE ERROR` naming `brew install shellcheck`.
+- `shellcheck` is a gate link pinned to one version (`SHELLCHECK_VERSION` in `scripts/gate.sh`) on macOS, Linux and the fence: a host without it, or with another version, gets `GATE ERROR` naming the fix.
 
 # Rules
 
