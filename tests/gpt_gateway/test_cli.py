@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 from contextlib import redirect_stderr, redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import subprocess
 import unittest
 
@@ -160,6 +160,61 @@ class CliCase(unittest.TestCase):
 
 
 class ServeTest(CliCase):
+    def test_other_cli_failures_emit_level_rows_without_changing_stderr(self):
+        for command, changes, event, function in (("chatgpt-login", {"GPT_GATEWAY_CHATGPT_AUTH_STORE": "bad"}, "start-failed", "start_error"),
+                                                  ("chatgpt-status", {"GPT_GATEWAY_CHATGPT_AUTH_STORE": "bad"}, "start-failed", "start_error"),
+                                                  ("chatgpt-stats", {}, "stats-unreadable", "cmd_chatgpt_stats")):
+            with self.subTest(command=command):
+                root = os.path.join(self.tmp, command)
+                code, _, err = self.run_gateway(command, PLUGIN_LOG_DIR=root, **changes)
+                self.assertEqual(code, 1)
+                self.assertTrue(err)
+                path = os.path.join(root, "gpt-gateway", "errors.jsonl")
+                self.assertTrue(os.path.isfile(path), "CLI diagnostic must reach errors.jsonl")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["level"], row["event"], row["where"]),
+                                 ("error", event, "gpt_gateway/cli.py#" + function))
+
+    def test_successful_start_emits_one_ready_and_started_without_extra_text(self):
+        from gpt_gateway.log import Log
+        from gpt_gateway.settings import Settings
+        from gpt_gateway import env
+        environ = jail.clean_env(self.tmp, PLUGIN_LOG_DIR=self.tmp)
+        with patch.object(env, "snapshot", return_value=environ):
+            log = Log(self.log)
+        settings = Settings(self.settings, environ, log.write)
+        settings.load()
+        rt = Mock(env=env.CoreEnv.parse(environ), log=log, settings=settings, db=Mock(path="test.db"))
+        with patch.object(cli, "Runtime", return_value=rt), patch.object(cli.handles, "raise_limit"), \
+                patch.object(cli.servermod, "bind"), patch.object(cli.servermod, "serve", return_value=0):
+            self.assertEqual(cli.cmd_serve([], self.app, environ), 0)
+        path = os.path.join(self.tmp, "gpt-gateway", "info.jsonl")
+        self.assertTrue(os.path.isfile(path), "successful start must emit ready and started rows")
+        with open(path) as source:
+            rows = [json.loads(line) for line in source]
+        self.assertEqual([r["event"] for r in rows], ["logger-ready", "started"])
+        self.assertEqual(rows[0]["detail"], {"version": cli.build(os.path.dirname(cli.__file__)),
+                                              "dir_source": "PLUGIN_LOG_DIR"})
+        self.assertEqual(len(self.logged().splitlines()), 1)
+
+    def test_stderr_failures_also_emit_classified_rows(self):
+        for args, changes, event, where in ((["serve"], {"GPT_GATEWAY_DRAIN_SECONDS": "soon"},
+                                            "start-failed", "gpt_gateway/cli.py#start_error"),
+                                           (["check"], {}, "check-failed", "gpt_gateway/cli.py#cmd_check")):
+            with self.subTest(args=args):
+                home = os.path.join(self.tmp, args[0])
+                os.makedirs(home)
+                jail.write_json(self.settings, {"capture_dir": "relative"})
+                code, _, err = self.run_gateway(*args, PLUGIN_LOG_DIR=home, **changes)
+                self.assertEqual(code, 1)
+                self.assertTrue(err)
+                path = os.path.join(home, "gpt-gateway", "errors.jsonl")
+                self.assertTrue(os.path.isfile(path), "stderr failure must also reach errors.jsonl")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["event"], row["where"]), (event, where))
+
     def test_a_bad_file_at_start_exits_non_zero_and_says_why(self):
         jail.write_json(self.settings, {"capture_dir": "relative"})
         code, _, err = self.run_gateway()
@@ -213,6 +268,35 @@ class CheckTest(CliCase):
 
 
 class MwTest(CliCase):
+    def test_stderr_only_middleware_sites_emit_their_classified_rows(self):
+        cases = (("no-cli", 'NAME = "tool"\n', {}, ["tool"], 2, "warning", "middleware-cli-unavailable", "invoke"),
+                 ("crash", 'NAME = "tool"\ndef cli(argv, ctx):\n    raise RuntimeError("bad")\n', {},
+                  ["tool"], 1, "error", "middleware-cli-failed", "invoke"),
+                 ("exit", 'NAME = "tool"\ndef cli(argv, ctx):\n    raise SystemExit("refused")\n', {},
+                  ["tool"], 1, "error", "middleware-cli-exit", "invoke"),
+                 ("wrong-result", 'NAME = "tool"\ndef cli(argv, ctx):\n    return "bad"\n', {},
+                  ["tool"], 1, "error", "middleware-cli-invalid-result", "invoke"),
+                 ("unknown", MW_CLI, {}, ["missing"], 2, "warning", "middleware-unknown", "cmd_mw"),
+                 ("env", MW_CLI, {"GPT_GATEWAY_DRAIN_SECONDS": "soon"}, ["tool"], 1, "error", "env-invalid", "cmd_mw"),
+                 ("settings", MW_CLI, {}, ["tool"], 1, "error", "settings-invalid", "cmd_mw"))
+        for name, source, changes, args, expected_code, level, event, function in cases:
+            with self.subTest(event=event):
+                root = os.path.join(self.tmp, name)
+                jail.write_middleware(os.path.join(self.app, "middleware"), "tool", source)
+                body = {"middleware": [{"module": "tool"}]}
+                if name == "settings":
+                    body["capture_dir"] = "relative"
+                jail.write_json(self.settings, body)
+                code, _, err = self.run_gateway("mw", *args, PLUGIN_LOG_DIR=root, **changes)
+                self.assertEqual(code, expected_code)
+                self.assertTrue(err)
+                path = os.path.join(root, "gpt-gateway", "warnings.jsonl" if level == "warning" else "errors.jsonl")
+                self.assertTrue(os.path.isfile(path), "middleware CLI diagnostic must reach its level file")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["level"], row["event"], row["where"]),
+                                 (level, event, "gpt_gateway/cli.py#" + function))
+
     def setUp(self):
         super().setUp()
         jail.write_middleware(os.path.join(self.app, "middleware"), "tool", MW_CLI)

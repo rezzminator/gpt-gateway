@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from gpt_gateway import db
+from gpt_gateway.log import Log
 from tests import fakes, jail
 from tests.gpt_gateway.chatgpt import test_route as route_tests
 
@@ -27,6 +28,65 @@ def opened(test, path, **kw):
 
 
 class RowsTest(unittest.TestCase):
+    def test_database_diagnostic_sites_emit_their_declared_levels_and_events(self):
+        for event, level, function in (("queue-full-dropping", "error", "_put"),
+                                       ("db-rows-lost", "error", "_failed"),
+                                       ("close-after-error-failed", "error", "_discard"),
+                                       ("retention-unreadable", "warning", "_prune"),
+                                       ("close-failed", "error", "_run")):
+            with self.subTest(event=event):
+                home = jail.scratch(self)
+                with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+                    log = Log(os.path.join(home, "gw.log"))
+                store = db.Db(os.path.join(home, "gateway.db"), log.write, queue_size=1)
+                conn = mock.Mock()
+                conn.close.side_effect = sqlite3.OperationalError("close failed")
+                if event == "queue-full-dropping":
+                    store.event("first")
+                    store.event("lost")
+                elif event == "db-rows-lost":
+                    store._failed(2, RuntimeError("write failed"))
+                elif event == "close-after-error-failed":
+                    store._discard(conn)
+                elif event == "retention-unreadable":
+                    store.retention = mock.Mock(side_effect=RuntimeError("retention failed"))
+                    self.assertIsNone(store._prune(None))
+                else:
+                    store.queue.put_nowait(("stop", threading.Event()))
+                    with mock.patch.object(store, "_prune", return_value=conn):
+                        store._run()
+                filename = "warnings.jsonl" if level == "warning" else "errors.jsonl"
+                path = os.path.join(home, "gpt-gateway", filename)
+                self.assertTrue(os.path.isfile(path), "database diagnostic must also reach its level file")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["level"], row["event"], row["where"]),
+                                 (level, event, "gpt_gateway/db.py#" + function))
+                with open(log.path) as source:
+                    self.assertIn(row["msg"], source.read())
+
+    def test_writer_failure_records_level_row_and_existing_text(self):
+        home = jail.scratch(self)
+        text = os.path.join(home, "gw.log")
+        with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+            log = Log(text)
+        store = db.Db(os.path.join(home, "gateway.db"), log.write)
+        store.start()
+        self.addCleanup(store.close)
+        with mock.patch.object(store, "_write", side_effect=RuntimeError("boom")):
+            store.event("lost")
+            self.assertTrue(store.flush())
+        with open(text) as source:
+            self.assertIn("db error, rows are lost", source.read())
+        rows_path = os.path.join(home, "gpt-gateway", "errors.jsonl")
+        self.assertTrue(os.path.isfile(rows_path), "DB row loss must also reach errors.jsonl")
+        with open(rows_path) as source:
+            row, = [json.loads(line) for line in source]
+        self.assertEqual((row["level"], row["event"], row["where"]),
+                         ("error", "db-rows-lost", "gpt_gateway/db.py#_failed"))
+        self.assertIn("RuntimeError('boom')", row["msg"])
+        self.assertEqual(store.errors, 1)
+
     def setUp(self):
         self.path = os.path.join(jail.scratch(self), "state", "gateway.db")
 

@@ -18,6 +18,7 @@ import threading
 from urllib.parse import quote
 
 from . import clock
+from .log import record
 
 QUEUE_SIZE = 10000
 BATCH = 500  # rows per transaction
@@ -200,16 +201,16 @@ class Db:
                 self.drops += 1
                 first, self.dropping = not self.dropping, True
             if first:
-                self.log("db queue full at %d rows: dropping rows, counted as db_drops on the health line (%s)" % (
-                    self.queue.maxsize, self.path))
+                record(self.log, "error", "queue-full-dropping", "db queue full at %d rows: dropping rows, counted as db_drops on the health line (%s)" % (
+                    self.queue.maxsize, self.path), "gpt_gateway/db.py#_put")
 
     def _failed(self, rows, error):
         with self.lock:
             self.errors += rows
             first, self.failing = not self.failing, True
         if first:
-            self.log("db error, rows are lost and counted as db_errors until a write succeeds (%s): %r" % (
-                self.path, error))
+            record(self.log, "error", "db-rows-lost", "db error, rows are lost and counted as db_errors until a write succeeds (%s): %r" % (
+                self.path, error), "gpt_gateway/db.py#_failed")
 
     def _connect(self):
         directory = os.path.dirname(self.path)
@@ -262,7 +263,7 @@ class Db:
             try:
                 conn.close()
             except sqlite3.Error as error:
-                self.log("db close after an error failed (%s): %r" % (self.path, error))
+                record(self.log, "error", "close-after-error-failed", "db close after an error failed (%s): %r" % (self.path, error), "gpt_gateway/db.py#_discard")
 
     def _write(self, conn, items):
         statements = []
@@ -292,7 +293,7 @@ class Db:
         try:
             cutoff = clock.now() - float(self.retention()) * 86400
         except Exception as error:  # a retention source that fails keeps every row until it answers
-            self.log("db retention unreadable, nothing pruned (%s): %r" % (self.path, error))
+            record(self.log, "warning", "retention-unreadable", "db retention unreadable, nothing pruned (%s): %r" % (self.path, error), "gpt_gateway/db.py#_prune")
             return conn
         conn, error = self._transaction(conn, [("DELETE FROM requests WHERE started < ?", (cutoff,)),
                                                ("DELETE FROM events WHERE at < ?", (cutoff,))])
@@ -346,7 +347,7 @@ class Db:
                 try:
                     conn.close()
                 except sqlite3.Error as error:
-                    self.log("db close failed (%s): %r" % (self.path, error))
+                    record(self.log, "error", "close-failed", "db close failed (%s): %r" % (self.path, error), "gpt_gateway/db.py#_run")
             for _, done in markers:
                 done.set()
             if stop:

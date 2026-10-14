@@ -123,6 +123,8 @@ config = {
     "GPT_GATEWAY_JQ": jq,
     "GPT_GATEWAY_CLAUDE_SETTINGS": settings,
 }
+if "PLUGIN_LOG_DIR" in os.environ:
+    config["PLUGIN_LOG_DIR"] = os.environ["PLUGIN_LOG_DIR"]
 with open(os.path.join(dest, "service.json.new"), "w") as output:
     json.dump(config, output, indent=2)
     output.write("\n")

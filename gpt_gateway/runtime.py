@@ -16,7 +16,7 @@ class Runtime:
 
     def __init__(self, environ, settings_path):
         self.env = CoreEnv.parse(environ)
-        self.log = Log(self.env.log_path)  # start, stop, fatal and settings-error lines, and the database's failures
+        self.log = Log(self.env.log_path, environ=environ)  # start, stop, fatal and settings-error lines, and the database's failures
         self.db = Db(self.env.db_path, self.log.write, lambda: self.settings.snapshot.db_retention_days)  # no reload on its thread
         self.settings = Settings(settings_path, environ, self.log.write, self.db.event)
         self.upstream = Upstream(self.env.upstream, self.db.event)

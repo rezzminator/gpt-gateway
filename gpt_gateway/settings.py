@@ -15,6 +15,7 @@ from types import MappingProxyType
 
 from . import env as envmod
 from . import middleware
+from .log import record
 
 FILE_NAME = "settings.json"
 KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention")
@@ -282,7 +283,7 @@ class Settings:
             snap = self.build(core, self.modules, "missing" if file_values is None else "ok")
         except SettingsError as e:
             self.snapshot = dataclasses.replace(self.snapshot, state="error(%s)" % str(e).replace("\n", " "))
-            self.log("settings error, keeping the last good settings (%s): %s" % (describe(self.snapshot), e))
+            record(self.log, "warning", "settings-kept-last-good", "settings error, keeping the last good settings (%s): %s" % (describe(self.snapshot), e), "gpt_gateway/settings.py#reload")
             self.event("settings_error", path=self.path, error=str(e))
             return
         self.snapshot = snap

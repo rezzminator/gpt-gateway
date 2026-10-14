@@ -214,6 +214,13 @@ if [ "$PLATFORM" = Linux ]; then
   service_write_linux
 else
 mkdir -p "$(dirname "$PLIST")"
+PLUGIN_LOG_ENV=$("$PY" -I - <<'PYLOG'
+import os
+from xml.sax.saxutils import escape
+if "PLUGIN_LOG_DIR" in os.environ:
+    print("    <key>PLUGIN_LOG_DIR</key><string>" + escape(os.environ["PLUGIN_LOG_DIR"]) + "</string>")
+PYLOG
+)
 cat > "$PLIST.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -231,6 +238,7 @@ cat > "$PLIST.new" <<EOF
     <key>GPT_GATEWAY_PYTHON</key><string>$PY</string>
     <key>GPT_GATEWAY_JQ</key><string>$JQ</string>
     <key>GPT_GATEWAY_CLAUDE_SETTINGS</key><string>$SETTINGS</string>
+$PLUGIN_LOG_ENV
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

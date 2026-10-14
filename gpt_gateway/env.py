@@ -45,6 +45,21 @@ def value(env, name):
     return raw or None
 
 
+def plugin_log_dir(environ):
+    """The shared level root, otherwise HOME state on every platform; no HOME means no directory."""
+    root = value(environ, "PLUGIN_LOG_DIR")
+    if root is not None:
+        if not os.path.isabs(root):
+            raise EnvError("env PLUGIN_LOG_DIR: must be an absolute path")
+        return os.path.join(root, "gpt-gateway")
+    home = value(environ, "HOME")
+    if home is None:
+        return None
+    if not os.path.isabs(home):
+        raise EnvError("env HOME: an absolute path is required for level logs")
+    return os.path.join(home, ".local", "state", "gpt-gateway", "logs")
+
+
 def under_home(environ, path, needed_for):
     """`path` with a leading `~/` resolved against the mapping's HOME, never the process's own."""
     if path.startswith("~/"):

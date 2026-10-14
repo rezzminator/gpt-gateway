@@ -13,6 +13,28 @@ LEGACY_NAME = "model-gateway"
 
 
 class InstallTest(unittest.TestCase):
+    def test_installer_preserves_plugin_log_dir_in_the_service_environment(self):
+        for platform in ("Darwin", "Linux"):
+            for configured in (False, True):
+                with self.subTest(platform=platform, configured=configured):
+                    h = Host(self, platform=platform)
+                    chosen = os.path.join(h.home, "logs & <xml> ' quote % $ space")
+                    if configured:
+                        h.env["PLUGIN_LOG_DIR"] = chosen
+                    code, out = h.install()
+                    self.assertEqual(code, 0, out)
+                    if platform == "Darwin":
+                        self.assertEqual(h.plist_value("EnvironmentVariables.PLUGIN_LOG_DIR"), chosen if configured else "")
+                    else:
+                        with open(os.path.join(h.dest, "service.json")) as source:
+                            config = json.load(source)
+                        self.assertEqual(config.get("PLUGIN_LOG_DIR"), chosen if configured else None)
+                        if configured:
+                            unit = os.path.join(h.home, ".config/systemd/user/gpt-gateway.service")
+                            with open(unit) as source:
+                                self.assertIn("Environment=" + json.dumps("PLUGIN_LOG_DIR=" + chosen.replace("%", "%%")),
+                                              source.read())
+
     def test_a_first_install_lays_out_the_copy_settings_and_agent(self):
         h = Host(self)
         code, out = h.install()

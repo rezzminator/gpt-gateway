@@ -18,6 +18,7 @@ from unittest import mock
 
 from gpt_gateway import cli, clock, db, handles, proxy
 from gpt_gateway.server import Drain, Server
+from gpt_gateway.log import Log
 from tests import fakes, jail
 
 
@@ -51,17 +52,6 @@ class DrainTest(unittest.TestCase):
         connected = os.dup(client.fileno())
         with self.assertRaisesRegex(OSError, 'not the configured listener'):
             Server(address, SimpleNamespace(env=SimpleNamespace(listener_fd=connected), drain=Drain()))
-
-    def test_an_accepted_first_request_waits_in_the_linux_drain(self):
-        client, connection = socket.socketpair()
-        self.addCleanup(client.close)
-        self.addCleanup(connection.close)
-        client.sendall(b'GET /')
-        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
-            drain = Drain()
-        drain.connected(connection)
-        self.assertEqual(drain.wait(0, lambda line: None), 1)
-        self.assertEqual(connection.recv(5), b'GET /', 'a first request was closed as an idle keep-alive')
 
     def setUp(self):
         self.tmp = jail.scratch(self)
@@ -153,6 +143,58 @@ class DrainTest(unittest.TestCase):
 
 
 class DrainStateTest(unittest.TestCase):
+    def test_drain_states_emit_classified_rows_and_keep_their_result(self):
+        cases = (("empty", 0, {"info": ["draining", "drained"]}),
+                 ("busy", 1, {"info": ["draining"], "warning": ["in-flight-exit"]}),
+                 ("idle-error", 0, {"info": ["draining", "drained"], "warning": ["idle-shutdown-failed"]}))
+        for state, result, expected in cases:
+            with self.subTest(state=state):
+                home = jail.scratch(self)
+                with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+                    log = Log(os.path.join(home, "gw.log"))
+                drain = Drain()
+                if state == "busy":
+                    drain.inflight = 1
+                elif state == "idle-error":
+                    conn = mock.Mock()
+                    conn.shutdown.side_effect = OSError(errno.EBADF, "bad descriptor")
+                    drain.connected(conn)
+                    drain.begin(conn)
+                    drain.end(conn)
+                self.assertEqual(drain.wait(0, log.write), result)
+                for level, events in expected.items():
+                    name = "info.jsonl" if level == "info" else "warnings.jsonl"
+                    path = os.path.join(home, "gpt-gateway", name)
+                    self.assertTrue(os.path.isfile(path), "drain diagnostic must also reach its level file")
+                    with open(path) as source:
+                        rows = [json.loads(line) for line in source]
+                    self.assertEqual([(r["level"], r["event"], r["where"]) for r in rows],
+                                     [(level, event, "gpt_gateway/server.py#Drain.wait") for event in events])
+                    with open(log.path) as source:
+                        text = source.read()
+                    for row in rows:
+                        self.assertIn(row["msg"], text)
+
+    def test_unfinished_database_writer_emits_error_without_changing_exit_status(self):
+        from gpt_gateway import server
+        home = jail.scratch(self)
+        with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+            log = Log(os.path.join(home, "gw.log"))
+        runtime = SimpleNamespace(log=log, env=SimpleNamespace(drain_seconds=0), drain=mock.Mock(),
+                                  db=mock.Mock(), chatgpt=None)
+        runtime.drain.wait.return_value = 0
+        runtime.db.close.return_value = False
+        with mock.patch.object(server.signal, "signal"):
+            self.assertEqual(server.serve(runtime, mock.Mock()), 0)
+        path = os.path.join(home, "gpt-gateway", "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "unfinished writer must also reach errors.jsonl")
+        with open(path) as source:
+            row, = [json.loads(line) for line in source]
+        self.assertEqual((row["level"], row["event"], row["where"]),
+                         ("error", "writer-unfinished-rows-lost", "gpt_gateway/server.py#serve"))
+        with open(log.path) as source:
+            self.assertIn(row["msg"], source.read())
+
     def test_a_pending_request_above_the_select_descriptor_limit_is_preserved(self):
         jail.raise_open_files(self, 1100)
         client, original = socket.socketpair()

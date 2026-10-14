@@ -59,7 +59,7 @@ def free_port():
 def clean_env(home, **overrides):
     """Drop CODEX_HOME and GPT_GATEWAY_*; set HOME to `home` and the database inside it, then apply `overrides`."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("GPT_GATEWAY_", "GIT_"))
-           and k not in ("CODEX_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")}
+           and k not in ("CODEX_HOME", "PLUGIN_LOG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")}
     env["HOME"] = home
     env["GPT_GATEWAY_DB"] = os.path.join(home, "state", "gateway.db")
     env.update(overrides)

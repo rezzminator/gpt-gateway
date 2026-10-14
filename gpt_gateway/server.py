@@ -14,6 +14,7 @@ import threading
 from http.server import ThreadingHTTPServer
 
 from . import clock, handles
+from .log import record
 from .proxy import Handler
 
 REQUEST_QUEUE_SIZE = 256  # the listen backlog; the stdlib's 5 reset a burst of simultaneous connects (the kernel caps it)
@@ -91,16 +92,16 @@ class Drain:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError as e:
                 if e.errno != errno.ENOTCONN:  # ENOTCONN: the client closed it already
-                    log("stop: shutdown of an idle connection failed: %r" % (e,))
-        log("stop: draining %d in-flight request(s), up to %ss" % (busy, limit))
+                    record(log, "warning", "idle-shutdown-failed", "stop: shutdown of an idle connection failed: %r" % (e,), "gpt_gateway/server.py#Drain.wait")
+        record(log, "info", "draining", "stop: draining %d in-flight request(s), up to %ss" % (busy, limit), "gpt_gateway/server.py#Drain.wait")
         while busy and clock.now() < deadline:
             clock.sleep(min(0.2, max(0.0, deadline - clock.now())))
             with self.lock:
                 busy = self.inflight + len(self.pending)
         if busy:
-            log("stop: %d request(s) still in flight after %ss; exiting anyway" % (busy, limit))
+            record(log, "warning", "in-flight-exit", "stop: %d request(s) still in flight after %ss; exiting anyway" % (busy, limit), "gpt_gateway/server.py#Drain.wait")
         else:
-            log("stop: drained, exiting")
+            record(log, "info", "drained", "stop: drained, exiting", "gpt_gateway/server.py#Drain.wait")
         return busy
 
 
@@ -201,5 +202,5 @@ def serve(runtime, server):
         runtime.chatgpt.client.close()
     runtime.db.event("stop", left=left, drain_seconds=runtime.env.drain_seconds)
     if not runtime.db.close(5.0):
-        runtime.log.write("stop: the database writer did not finish within 5s; the rows still queued are lost")
+        runtime.log.record("error", "writer-unfinished-rows-lost", "stop: the database writer did not finish within 5s; the rows still queued are lost", "gpt_gateway/server.py#serve")
     return 0
