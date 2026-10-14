@@ -2,7 +2,7 @@
 watch, drain, sequence."""
 from .capture import Sequence
 from .db import Db
-from .env import CoreEnv
+from .env import CoreEnv, ROUTE_SECRET_PATH, route_secret
 from .hooks import Chain
 from .log import Log
 from .reach import Pause
@@ -25,6 +25,7 @@ class Runtime:
         self.sequence = Sequence()
         self.chain = Chain((), self.db.event)
         self.chatgpt = None
+        self.route_secret = ""  # the install's local-client credential; "" when none is installed
 
     def load(self):
         """Read the settings, load the middleware and start the database writer; SettingsError, MiddlewareError or
@@ -34,6 +35,10 @@ class Runtime:
         if self.settings.snapshot.chatgpt:
             from .env import ChatGPTEnv
             from .chatgpt.route import Route
+            knobs = ChatGPTEnv.parse(self.settings.env)
+            self.route_secret = route_secret(self.settings.env, required=True)
             # The token store opens on first use, so a Codex login never waits on a Keychain probe (K11).
-            self.chatgpt = Route(ChatGPTEnv.parse(self.settings.env), self.db.event)
+            self.chatgpt = Route(knobs, self.db.event)
+        elif ROUTE_SECRET_PATH in self.settings.env:
+            self.route_secret = route_secret(self.settings.env)
         self.db.start()

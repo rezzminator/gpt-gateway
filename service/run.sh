@@ -4,7 +4,8 @@
 # in Claude Code's settings. It removes that setting again (fail open: Claude
 # Code talks to the API directly) when Python is missing, when the gateway
 # fails to start or exits, and when the agent is stopped. A URL other than
-# this gateway's is never touched.
+# this gateway's is never touched. An install holding a route-secret links the URL with that secret as its first
+# path segment: the gateway strips it, and a GPT route request without it is refused.
 #
 # Signals:
 #   HUP   graceful restart: starts a new gateway from the gateway.py on disk, on
@@ -32,6 +33,12 @@ log() { printf '%s run.sh %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 
 # shellcheck source=service/settings.sh
 . "$DIR/settings.sh"
+route_failed=
+if [ -e "$DIR/route-secret" ]; then
+  GPT_GATEWAY_ROUTE_SECRET_PATH="$DIR/route-secret"
+  export GPT_GATEWAY_ROUTE_SECRET_PATH
+fi
+settings_route "$DIR" || route_failed=yes
 
 # Tool search rides the link: Claude Code turns it off behind a non-Anthropic base URL unless this is set. A value the
 # user chose is kept, linked or not; a "true" reads as the one this script wrote and is removed with the URL.
@@ -39,8 +46,8 @@ tool_search() { "$JQ" -r '.env.ENABLE_TOOL_SEARCH // ""' "$SETTINGS" 2>/dev/null
 
 link() {
   cur=$(settings_current) || { log "could not read settings ($SETTINGS)"; return 1; }
-  if [ -n "$cur" ] && [ "$cur" != "$URL" ]; then log "settings point at $cur, not this gateway; left unchanged"; return 0; fi
-  if [ "$cur" = "$URL" ] && [ -n "$(tool_search)" ]; then return 0; fi
+  if [ -n "$cur" ] && [ "$cur" != "$URL" ] && [ "$cur" != "$LINK_URL" ]; then log "settings point at another URL, not this gateway; left unchanged"; return 0; fi
+  if [ "$cur" = "$LINK_URL" ] && [ -n "$(tool_search)" ]; then return 0; fi
   # shellcheck disable=SC2016 # $url is a jq variable bound by --arg, not a shell expansion
   settings_edit '.env = ((.env // {}) + {ANTHROPIC_BASE_URL: $url}) | if .env | has("ENABLE_TOOL_SEARCH") then . else .env.ENABLE_TOOL_SEARCH = "true" end' \
     && log "linked: Claude Code uses $URL with tool search on"
@@ -120,6 +127,7 @@ restart() {
 
 supervise() {
   trap stop TERM INT
+  [ -z "$route_failed" ] || fail "cannot read the installed route secret ($DIR/route-secret)"
   # Without the developer tools, /usr/bin/python3 is a stub that opens an install dialog.
   if [ "$(uname -s)" = Darwin ] && [ "$PY" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then
     fail "no command line developer tools, so no $PY"

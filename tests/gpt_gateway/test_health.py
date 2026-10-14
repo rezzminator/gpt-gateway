@@ -34,7 +34,8 @@ class HealthTest(unittest.TestCase):
         drain = mock.Mock(preserve_pending=False, draining=True)
         handler = object.__new__(proxy.Handler)
         handler.connection = mock.Mock()
-        handler.server = SimpleNamespace(runtime=SimpleNamespace(drain=drain, settings=mock.Mock()))
+        handler.server = SimpleNamespace(runtime=SimpleNamespace(drain=drain, settings=mock.Mock(), route_secret=None,
+                                                                  pause=mock.Mock(check=mock.Mock(return_value=False))))
         handler.path = '/__gateway/health'
         handler.close_connection = False
         handler.reply = mock.Mock()

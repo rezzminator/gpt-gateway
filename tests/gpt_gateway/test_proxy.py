@@ -14,6 +14,7 @@ from unittest import mock
 
 from gpt_gateway import clock
 from tests import fakes, jail
+from tests.gpt_gateway.chatgpt import test_route as route_tests
 from tests.fakes import ERROR_BODY, JSON_BODY, RECORDER, SSE_BODY, SSE_EVENTS, Upstream, calls
 
 ODD = b'{"model":  "claude-x", "stream": true,\n "messages": [{"role": "user", "content": "hi"}]}'
@@ -390,7 +391,9 @@ class AnswerExchangeTest(unittest.TestCase):
         auth = os.path.join(home, "auth.json")
         jail.write_json(auth, dict(access_token="fixture.%s.signature" % claims, refresh_token="refresh-invented",
                                    id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
+        secret = jail.write_secret(os.path.join(home, "route-secret"), "a" * 64)
         env = jail.clean_env(home, GPT_GATEWAY_CHATGPT="1", GPT_GATEWAY_CHATGPT_AUTH_STORE="file",
+                             GPT_GATEWAY_ROUTE_SECRET_PATH=secret,
                              GPT_GATEWAY_CHATGPT_TRANSPORT="http", GPT_GATEWAY_CHATGPT_AUTH_PATH=auth,
                              GPT_GATEWAY_CHATGPT_ORIGIN=origin, GPT_GATEWAY_CHATGPT_AUTH_ORIGIN=origin,
                              GPT_GATEWAY_CHATGPT_MODELS_PATH=os.path.join(home, "models.json"))
@@ -527,6 +530,34 @@ class ClaudeRouteTimingTest(unittest.TestCase):
         self.assertEqual(fakes.request(port, "POST", "/v1/json", b'{"model":"m"}')[0].status, 502)
         (row,) = fakes.recorded(rt)
         self.assertEqual((row["ttfb_ms"], row["upstream_ms"]), (None, None))
+
+
+class RouteGateTest(unittest.TestCase):
+    """The proxy's gate on the ChatGPT route, through a served gateway with the route's fixtures."""
+    setUp = route_tests.RouteTest.setUp
+    jwt = route_tests.RouteTest.jwt
+    gateway = route_tests.RouteTest.gateway
+    send = route_tests.RouteTest.send
+    responses = route_tests.RouteTest.responses
+
+    def test_gpt_route_requires_install_secret(self):
+        _, port = self.gateway()
+        unsigned = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), self.headers)
+        self.assertEqual((unsigned[0].status, json.loads(unsigned[1])["error"]["message"],
+                          unsigned[0].getheader("x-should-retry")),
+                         (403, "chatgpt upstream: local client authentication required", "false"))
+        anonymous = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), {})
+        self.assertEqual(anonymous[0].status, 400)  # the sub-agent rule answers first
+        self.assertEqual((len(self.responses()), self.send(port)[0].status), (0, 200))
+
+    def test_an_image_turn_teaches_the_text_ratio_without_the_attachment_allowance(self):
+        rt, port = self.gateway()
+        image = dict(type="image", source=dict(type="base64", media_type="image/png", data="invented"))
+        self.body["messages"].append(dict(role="user", content=[image]))
+        self.assertEqual(self.send(port)[0].status, 200)
+        self.assertEqual([r["input_tokens"] for r in fakes.gpt_rows(rt)], [100])  # the upstream's total, image included
+        resp, data = self.send(port, path="/v1/messages/count_tokens")
+        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2000))  # 100 total is under the allowance: no text ratio
 
 
 if __name__ == "__main__":

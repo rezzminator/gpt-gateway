@@ -33,6 +33,7 @@ fi
 URL="http://127.0.0.1:$PORT"
 # shellcheck source=service/settings.sh
 . "$DIR/settings.sh"
+settings_route "$DEST" || { echo "uninstall.sh: cannot read the route secret ($DEST/route-secret); remove env.ANTHROPIC_BASE_URL from $SETTINGS by hand, or delete that file and run again" >&2; exit 1; }
 
 if [ "$PLATFORM" = Linux ] && [ -f "$AGENT" ]; then service_disable; fi
 if service_loaded; then
@@ -46,7 +47,7 @@ else
 fi
 if [ "$PLATFORM" = Darwin ]; then service_enable 2>/dev/null || true; fi  # drop any off-state record
 
-if settings_linked; then
+if settings_ours; then
   mkdir -p "$BACKUPS"
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-uninstall-$(date +%Y%m%d-%H%M%S)"
 fi

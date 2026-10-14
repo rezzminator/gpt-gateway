@@ -43,6 +43,13 @@ def clean_env(home, **overrides):
     return env
 
 
+def write_secret(path, secret):
+    """The install's route credential: `secret` in a 0600 file at `path`; returns the path."""
+    write_json(path, secret)
+    os.chmod(path, 0o600)
+    return path
+
+
 def write_json(path, data, bump=0):
     """Write `data` (an object, or text as is); `bump` moves the mtime that many seconds past any earlier write."""
     with open(path, "w") as f:

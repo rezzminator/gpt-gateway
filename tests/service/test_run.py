@@ -53,13 +53,23 @@ class RunTest(unittest.TestCase):
         with open(self.settings) as f:
             return json.load(f)
 
-    def start(self, python="/usr/bin/python3", upstream=None, jq=JQ, stop_seconds='630', drain='600', retry='0'):
+    def start(self, python="/usr/bin/python3", upstream=None, jq=JQ, stop_seconds='630', drain='600', retry='0',
+              platform=None):
+        """Starts run.sh; `platform` makes `uname` answer it, as the Linux tests of tests/service/stub.py do on macOS."""
+        overrides = {}
+        if platform is not None:
+            stubs = os.path.join(self.dir, "platform-bin")
+            os.makedirs(stubs, exist_ok=True)
+            with open(os.path.join(stubs, "uname"), "w") as f:
+                f.write('#!/bin/sh\nprintf "%s\\n" ' + platform + '\n')
+            os.chmod(os.path.join(stubs, "uname"), 0o755)
+            overrides["PATH"] = stubs + ":" + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         env = jail.clean_env(self.dir, GPT_GATEWAY_PYTHON=python, GPT_GATEWAY_JQ=jq,
                              GPT_GATEWAY_STOP_SECONDS=stop_seconds,
                              GPT_GATEWAY_DRAIN_SECONDS=drain,
                              GPT_GATEWAY_RETRY_SECONDS=retry, GPT_GATEWAY_CLAUDE_SETTINGS=self.settings,
                              GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
-                             GPT_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port())
+                             GPT_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port(), **overrides)
         # A file, not a pipe: a read to the end of a pipe waits for every gateway still draining to let go of it.
         self.errors = open(os.path.join(self.dir, "run.err"), "wb")
         self.proc = subprocess.Popen(["/bin/sh", os.path.join(self.app, "run.sh"), "serve"], env=env,
@@ -113,6 +123,55 @@ class RunTest(unittest.TestCase):
         gateway = self.health_pid()
         self.stop()  # the cleanup, run while run.sh still serves, as when an assertion fails mid-test
         self.assertTrue(jail.wait_for(lambda: self.health_pid() != gateway, 5), "gateway %s outlived its test" % gateway)
+
+    def install_secret(self, secret="b" * 64, mode=0o600):
+        path = os.path.join(self.app, "route-secret")
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w") as target:
+            target.write(secret + "\n")
+        return secret
+
+    def test_installed_secret_is_linked_and_stripped_for_anthropic(self):
+        secret = self.install_secret()
+        upstream = fakes.start_upstream(self)
+        fakes.Upstream.seen.clear()
+        self.write_settings({})
+        self.start(upstream=upstream)
+        self.assertTrue(jail.wait_for(lambda: self.read_settings()["env"].get("ANTHROPIC_BASE_URL")
+                                      == self.url + "/" + secret), "never linked with the secret")
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        self.addCleanup(conn.close)
+        body = b'{"model":"claude-test","messages":[]}'
+        conn.request("POST", "/" + secret + "/v1/messages?probe=1", body)
+        self.assertEqual(conn.getresponse().status, 200)
+        self.assertEqual(fakes.Upstream.seen[-1]["path"], "/v1/messages?probe=1")
+        self.assertEqual(fakes.Upstream.seen[-1]["body"], body)
+        self.assertNotIn(secret.encode(), self.stderr())
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertEqual(self.read_settings()["env"], {})
+
+    def test_a_link_without_the_secret_is_replaced_and_both_forms_are_removed_on_stop(self):
+        secret = self.install_secret()
+        self.write_settings({"ANTHROPIC_BASE_URL": self.url, "KEEP": "1"})
+        self.start()
+        self.assertTrue(jail.wait_for(lambda: self.read_settings()["env"].get("ANTHROPIC_BASE_URL")
+                                      == self.url + "/" + secret), "the secretless link was kept")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
+
+    def test_a_route_secret_that_cannot_be_used_fails_open_without_linking(self):
+        for mode, text in ((0o600, "not hex"), (0o644, "a" * 64)):
+            with self.subTest(mode=oct(mode)):
+                shutil.rmtree(self.app)
+                self.app = jail.stage_install(os.path.join(self.dir, "app"))
+                self.install_secret(text, mode)
+                self.write_settings({"KEEP": "1"})
+                self.start()
+                self.assertEqual(self.proc.wait(timeout=20), 1)
+                self.assertEqual(self.read_settings()["env"], {"KEEP": "1"})
+                self.stop()
+                self.stopped = False
 
     def test_missing_python_fails_open(self):
         self.write_settings({"ANTHROPIC_BASE_URL": self.url, "ENABLE_TOOL_SEARCH": "true", "KEEP": "1"})
@@ -209,7 +268,7 @@ class RunTest(unittest.TestCase):
                          'exec /usr/bin/python3 "$@"\n')
         os.chmod(wrapper, 0o755)
         self.write_settings({})
-        self.start(python=wrapper)
+        self.start(python=wrapper, platform='Linux')
         self.assertTrue(jail.wait_for(lambda: os.path.exists(ready)), self.stderr())
         self.proc.send_signal(signal.SIGHUP)
         time.sleep(0.1)
@@ -361,7 +420,7 @@ class RunTest(unittest.TestCase):
 
     def test_connections_opened_during_hup_keep_their_first_request(self):
         self.write_settings({})
-        self.start()
+        self.start(platform='Linux')
         self.assertTrue(jail.wait_for(self.linked), self.stderr())
         before = self.health_pid()
         os.kill(before, signal.SIGSTOP)

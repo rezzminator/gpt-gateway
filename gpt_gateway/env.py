@@ -4,6 +4,8 @@
 mapping (or a test's own) and reads it through `value()`.
 """
 import os
+import re
+import stat
 import sys
 from urllib.parse import urlsplit
 
@@ -117,6 +119,7 @@ CHATGPT_AUTH_PATH = "GPT_GATEWAY_CHATGPT_AUTH_PATH"
 CHATGPT_CODEX_AUTH = "GPT_GATEWAY_CHATGPT_CODEX_AUTH"
 CHATGPT_TRANSPORT = "GPT_GATEWAY_CHATGPT_TRANSPORT"
 CHATGPT_AGENT_CONTRACT = "GPT_GATEWAY_CHATGPT_AGENT_CONTRACT"
+ROUTE_SECRET_PATH = "GPT_GATEWAY_ROUTE_SECRET_PATH"
 CODEX_HOME = "CODEX_HOME"
 
 
@@ -139,6 +142,26 @@ def chatgpt_path(environ, name, default, resolve=True):
     if not os.path.isabs(path):
         raise EnvError("env %s: must be an absolute path" % name)
     return os.path.realpath(path) if resolve else os.path.abspath(path)
+
+
+def route_secret(environ, required=False):
+    """Read the installed route credential; an enabled ChatGPT route must fail closed without it."""
+    path = chatgpt_path(environ, ROUTE_SECRET_PATH, "~/.local/share/gpt-gateway/route-secret")
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise EnvError("env %s: route secret must be a regular 0600 file: %s" % (ROUTE_SECRET_PATH, path))
+        with open(path, encoding="ascii") as source:
+            secret = source.read(65).strip()
+    except FileNotFoundError as error:
+        if not required:
+            return ""
+        raise EnvError("env %s: route secret is missing: %s" % (ROUTE_SECRET_PATH, path)) from error
+    except (OSError, UnicodeError) as error:
+        raise EnvError("env %s: cannot read route secret %s: %s" % (ROUTE_SECRET_PATH, path, error)) from error
+    if not re.fullmatch(r"[0-9a-f]{64}", secret):
+        raise EnvError("env %s: route secret must contain 64 lowercase hex digits" % ROUTE_SECRET_PATH)
+    return secret
 
 
 class ChatGPTEnv:

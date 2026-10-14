@@ -63,13 +63,52 @@ class LoginTest(unittest.TestCase):
         self.assertEqual(body["code"], ["invented-code"])
         self.assertEqual(self.store.credentials().account_id, "invented-1234")
 
-    def test_wrong_state_never_exchanges_a_code(self):
+    def test_wrong_state_does_not_end_a_valid_login(self):
+        statuses = []
+
+        def browser(url):
+            self.browser_callback(url, False)
+            statuses.append(self.callback_status)
+            self.browser_callback(url)
+            statuses.append(self.callback_status)
+
         with patch.object(self.login, "CALLBACK_PORTS", (jail.free_port(),)), \
-                patch.object(self.login, "open_browser", side_effect=lambda url: self.browser_callback(url, False)):
-            with self.assertRaisesRegex(self.auth.AuthError, "state"):
+                patch.object(self.login, "open_browser", side_effect=browser), \
+                patch.object(self.login, "LOGIN_SECONDS", 0.2):
+            self.login.browser_login(self.store, output=lambda _: None)
+        self.assertEqual(statuses, [400, 200])
+        self.assertEqual(len(self.fake.calls), 1)
+        self.assertEqual(self.store.credentials().account_id, "invented-1234")
+
+    def test_wrong_state_only_times_out_without_exchange(self):
+        with patch.object(self.login, "CALLBACK_PORTS", (jail.free_port(),)), \
+                patch.object(self.login, "open_browser", side_effect=lambda url: self.browser_callback(url, False)), \
+                patch.object(self.login, "LOGIN_SECONDS", 0.05):
+            with self.assertRaisesRegex(self.auth.AuthError, "timed out"):
                 self.login.browser_login(self.store, output=lambda _: None)
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(self.callback_status, 400)
+
+    def test_valid_state_provider_error_ends_login(self):
+        def browser(url):
+            authorize = parse_qs(urlsplit(url).query)
+            callback = urlsplit(authorize["redirect_uri"][0])
+            conn = HTTPConnection("127.0.0.1", callback.port, timeout=5)
+            try:
+                conn.request("GET", "/auth/callback?" + urlencode({
+                    "state": authorize["state"][0], "error": "access_denied"}))
+                reply = conn.getresponse()
+                reply.read()
+                self.assertEqual(reply.status, 400)
+            finally:
+                conn.close()
+
+        with patch.object(self.login, "CALLBACK_PORTS", (jail.free_port(),)), \
+                patch.object(self.login, "open_browser", side_effect=browser), \
+                patch.object(self.login, "LOGIN_SECONDS", 0.2):
+            with self.assertRaisesRegex(self.auth.AuthError, "authorization refused"):
+                self.login.browser_login(self.store, output=lambda _: None)
+        self.assertEqual(self.fake.calls, [])
 
     def test_port_fallback_only_on_address_in_use(self):
         real_bind = self.login.bind_callback
@@ -141,7 +180,7 @@ class LoginTest(unittest.TestCase):
             self.assertEqual(cli.main(["chatgpt-login", "bad"], self.home, self.mapping), 2)
             self.assertEqual(cli.main(["chatgpt-status", "bad"], self.home, self.mapping), 2)
 
-    def test_non_ascii_state_is_rejected_without_hanging(self):
+    def test_non_ascii_state_is_rejected_until_timeout(self):
 
         def browser(url):
             self.authorize = parse_qs(urlsplit(url).query)
@@ -158,11 +197,6 @@ class LoginTest(unittest.TestCase):
         with patch.object(self.login, "CALLBACK_PORTS", (jail.free_port(),)), \
                 patch.object(self.login, "open_browser", side_effect=browser), \
                 patch.object(self.login, "LOGIN_SECONDS", 0.05):
-            try:
+            with self.assertRaisesRegex(self.auth.AuthError, "timed out"):
                 self.login.browser_login(self.store, output=lambda _: None)
-            except self.auth.AuthError as error:
-                self.assertIn("state", str(error))
-            except Exception as error:
-                self.fail("callback did not reject invalid state cleanly: " + type(error).__name__)
-            else:
-                self.fail("invalid state accepted")
+        self.assertEqual(self.fake.calls, [])

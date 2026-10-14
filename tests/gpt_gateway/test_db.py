@@ -395,7 +395,7 @@ class EndToEndTest(unittest.TestCase):
         with mock.patch("gpt_gateway.chatgpt.errors.backoff", return_value=0):
             for body in (dict(claude, stream=True), dict(claude, stream=False), dict(gpt, stream=True),
                          dict(gpt, stream=False)):
-                resp, data = fakes.request(port, "POST", "/v1/messages", json.dumps(body).encode(), self.headers)
+                resp, data = fakes.request(port, "POST", "/" + self.route_secret + "/v1/messages", json.dumps(body).encode(), self.headers)
                 self.assertEqual((resp.status, SENTINEL.encode() in data), (200, True))
         names = ("route", "stream", "status", "model", "slug", "session_id", "input_tokens", "cache_read_tokens",
                  "cache_write_tokens", "output_tokens", "hit", "attempts", "transport", "completed")

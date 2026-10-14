@@ -46,7 +46,7 @@ class PlatformTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         settings = host.read_claude()
         self.assertEqual(settings['env'], {'KEEP': 'new', 'AFTER': 'preserve',
-                                          'ANTHROPIC_BASE_URL': self.url(host), 'ENABLE_TOOL_SEARCH': 'true'})
+                                          'ANTHROPIC_BASE_URL': self.link(host), 'ENABLE_TOOL_SEARCH': 'true'})
         self.assertEqual(settings['plugins'], {'changed': True})
 
     def test_runbook_failed_restart_stops_with_the_gateway_keys_unlinked(self):
@@ -140,6 +140,11 @@ class PlatformTest(unittest.TestCase):
     def url(self, host):
         return 'http://127.0.0.1:%d' % host.port
 
+    def link(self, host):
+        """What run.sh writes to Claude Code's settings: the URL with the install's route secret."""
+        with open(os.path.join(host.dest, 'route-secret')) as source:
+            return self.url(host) + '/' + source.read().strip()
+
     def health_pid(self, host):
         try:
             with urllib.request.urlopen(self.url(host) + '/__gateway/health', timeout=1) as result:
@@ -151,7 +156,7 @@ class PlatformTest(unittest.TestCase):
         host = self.installed()
         self.assertEqual(host.ctl('status')[0], 0)
         self.assertIn('state:  on', host.ctl('status')[1])
-        self.assertEqual(host.read_claude()['env'], {'KEEP': '1', 'ANTHROPIC_BASE_URL': self.url(host),
+        self.assertEqual(host.read_claude()['env'], {'KEEP': '1', 'ANTHROPIC_BASE_URL': self.link(host),
                                                     'ENABLE_TOOL_SEARCH': 'true'})
         with open(host.unit) as source:
             unit = source.read()
@@ -198,7 +203,7 @@ class PlatformTest(unittest.TestCase):
         self.assertIn('state:  off', host.ctl('status')[1])
         self.assertEqual(host.ctl('restart')[0], 1)
         self.assertEqual(host.ctl('start')[0], 0)
-        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.url(host))
+        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.link(host))
         self.assertEqual(host.ctl('off')[0], 0)
         self.assertEqual(host.ctl('on')[0], 0)
 
@@ -211,7 +216,7 @@ class PlatformTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertTrue(jail.wait_for(lambda: self.health_pid(host) not in (None, before)), out)
         self.assertIn('--user stop gpt-gateway.service', host.systemctl_calls())
-        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.url(host))
+        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.link(host))
         self.assertEqual(host.ctl('stop')[0], 0)
         code, out = host.install('--port', str(jail.free_port()))
         self.assertEqual(code, 0, out)
@@ -241,7 +246,7 @@ class PlatformTest(unittest.TestCase):
         self.assertTrue(jail.wait_for(lambda: self.health_pid(host) not in (None, before)), out)
         thread.join(20)
         self.assertIn(b'message_stop', got[0])
-        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.url(host))
+        self.assertEqual(host.read_claude()['env']['ANTHROPIC_BASE_URL'], self.link(host))
 
     def test_uninstall_stops_disables_unlinks_and_backs_up_user_files(self):
         host = self.installed()

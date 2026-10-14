@@ -21,6 +21,7 @@ service_read
 URL="http://127.0.0.1:$PORT"
 # shellcheck source=service/settings.sh
 . "$DIR/settings.sh"
+settings_route "$DEST" || { echo "ctl.sh: cannot read the route secret ($DEST/route-secret); run service/install.sh" >&2; exit 1; }
 
 health() { curl -sf --max-time 1 "$URL/__gateway/health" 2>/dev/null; }
 
@@ -46,9 +47,9 @@ case "${1:-}" in
       # bootout returns once in-flight streams have drained; Claude Code is unlinked within a second.
       service_stop >/dev/null 2>&1 &
       i=0
-      while settings_linked && [ $i -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
+      while settings_ours && [ $i -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
     fi
-    if settings_linked; then
+    if settings_ours; then
       echo "ctl.sh: the setting is still there; remove env.ANTHROPIC_BASE_URL, and env.ENABLE_TOOL_SEARCH if it is \"true\", from $SETTINGS by hand" >&2
       exit 1
     elif [ "$?" -eq 2 ]; then
@@ -93,7 +94,7 @@ case "${1:-}" in
       echo "enabled: $SERVICE_ENABLED"
     fi
     echo "health: $(health || echo 'not answering')"
-    if settings_linked; then echo "Claude Code: through the gateway ($URL)"
+    if settings_ours; then echo "Claude Code: through the gateway ($URL)"
     elif [ "$?" -eq 2 ]; then echo "Claude Code: could not read settings ($SETTINGS)"; result=1
     elif [ ! -e "$SETTINGS" ]; then echo "Claude Code: settings file is missing ($SETTINGS); straight to the API"
     else echo "Claude Code: straight to the API"; fi

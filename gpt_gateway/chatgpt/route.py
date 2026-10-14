@@ -30,12 +30,17 @@ def login_required(message="ChatGPT login required: run codex login, or gateway.
                        {"x-should-retry": "false"})
 
 
-def decide(catalog, method, path, body, headers):
+def decide(catalog, method, path, body, headers, authorized=False):
     """(route, Model or None, answer or None); only candidates touch the catalog."""
     model = body.get("model") if body is not None else None
     if (method != "POST" or path.split("?", 1)[0] not in ("/v1/messages", "/v1/messages/count_tokens")
             or not isinstance(model, str) or model.startswith("claude-")):
         return "anthropic", None, None  # no model id to route on: Anthropic validates the body, as before
+    if not headers.get("x-claude-code-agent-id"):
+        return "chatgpt", None, route_error(400, "invalid_request_error", "GPT models run as sub-agents only")
+    if not authorized:  # the install's credential rides the base URL; a client without it never spends the subscription
+        return "chatgpt", None, route_error(403, "permission_error", "local client authentication required",
+                                            {"x-should-retry": "false"})
     slug = model
     if slug.endswith("[1m]"):
         slug = slug[:-4]
@@ -50,8 +55,6 @@ def decide(catalog, method, path, body, headers):
     if slug not in models:
         return "chatgpt", None, route_error(400, "invalid_request_error",
                'unknown model "%s"; the ChatGPT catalog has: %s' % (model, ", ".join(models)))
-    if not headers.get("x-claude-code-agent-id"):
-        return "chatgpt", None, route_error(400, "invalid_request_error", "GPT models run as sub-agents only")
     return "chatgpt", models[slug], None
 
 
@@ -128,8 +131,8 @@ class Route:
         self.retention_settings = None  # the settings snapshot the last exchange ran under
         self.retention_rejected = False  # the backend refused it: no exchange sends it until the settings change
 
-    def decide(self, method, path, body, headers):
-        return decide(self.catalog, method, path, body, headers)
+    def decide(self, method, path, body, headers, authorized=False):
+        return decide(self.catalog, method, path, body, headers, authorized)
 
     def retention_sends(self, settings):
         """The cache retention to send under the settings snapshot `settings`: None when off or refused. Any change of
@@ -183,7 +186,7 @@ class Route:
                    error_head=head[:300].decode("utf-8", "replace"), **named)
 
     def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
-                  row, ended=None):
+                  row, ended=None, attachments=0):
         """The answering attempt's fields into the request row. `ended`: when the client had the last byte, the
         stream's end before the reader's join; now when None."""
         if translator.error is not None:
@@ -194,7 +197,7 @@ class Route:
         if translator.usage is not None:
             if translator.terminal == "response.completed":
                 with self.lock:
-                    estimator.observe(translation.estimate_chars, translator.input_tokens)
+                    estimator.observe(translation.estimate_chars, translator.input_tokens, attachments)
             row.update(
                 input_tokens=translator.input_tokens, cache_read_tokens=translator.usage["cache_read_input_tokens"],
                 cache_write_tokens=translator.usage["cache_creation_input_tokens"],
@@ -229,8 +232,9 @@ class Route:
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
+        attachments = attachment_count(body)
         with self.lock:
-            estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
+            estimated = estimator.estimate(translation.estimate_chars, attachments)
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
         with self.lock:
@@ -274,12 +278,12 @@ class Route:
                         if body.get("stream"):
                             reader.on_end = lambda: self._terminal(key, model, translation, translator,
                                                                   estimator, attempt, 200, reader, credentials, measure,
-                                                                  row, reader.ended_at)
+                                                                  row, reader.ended_at, attachments)
                             return Response(200, first, reader=reader)
                         data = stream.accumulate(first + Response(200, reader=reader).read())
                         code = 502 if data.get("type") == "error" else 200
                         self._terminal(key, model, translation, translator, estimator, attempt, code, reader,
-                                       credentials, measure, row)
+                                       credentials, measure, row, attachments=attachments)
                         return Response.json(code, data)
                     decision, head = translator.error, translator.failure or reader.error_head
                     if reader.transport_error:
@@ -329,8 +333,9 @@ class Route:
                 if decision.drop_reasoning or strip:
                     translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
                     cap.sent_body(translation.body_bytes)
+                    attachments = attachment_count(body)
                     with self.lock:
-                        estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
+                        estimated = estimator.estimate(translation.estimate_chars, attachments)
                     if decision.drop_reasoning:
                         self.event("drop_reasoning", request_id=row.get("request_id"), lane=key, slug=model.slug)
             except auth.LoginRequired as error:

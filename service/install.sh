@@ -29,6 +29,8 @@ SRC=$(cd "$(dirname "$0")/.." && pwd)
 SHIP="gateway.py gpt_gateway service/run.sh service/ctl.sh service/platform.sh service/settings.sh service/listener.py README.md LICENSE THIRD_PARTY_NOTICES.md"
 # shellcheck source=service/platform.sh
 . "$SRC/service/platform.sh"
+# shellcheck source=service/settings.sh
+. "$SRC/service/settings.sh"
 service_init
 if [ "$PLATFORM" = Linux ]; then service_require_linux; fi
 PY=${GPT_GATEWAY_PYTHON:-/usr/bin/python3}
@@ -121,17 +123,38 @@ if [ "$PLATFORM" = Linux ] && [ -f "$DEST/settings.json" ]; then
     || { echo "install.sh: $DEST/settings.json is invalid (above); fix or delete it, then run again" >&2; exit 1; }
 fi
 
-CUR=$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS")
-if [ -n "$CUR" ] && [ "$CUR" != "$URL" ]; then
+# The route secret: created once, kept by every update. Claude Code reaches the gateway at $URL/<secret>, and the GPT
+# route answers only requests that carry it, so no other local process spends the ChatGPT subscription.
+mkdir -p "$DEST"
+"$PY" -I - "$DEST/route-secret" <<'PY' || { echo "install.sh: the route secret could not be created or validated" >&2; exit 1; }
+import os
+import re
+import secrets
+import stat
+import sys
+
+path = sys.argv[1]
+if not os.path.lexists(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as target:
+        target.write(secrets.token_hex(32) + "\n")
+info = os.lstat(path)
+if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    raise ValueError("route secret must be a regular 0600 file")
+with open(path, encoding="ascii") as source:
+    if not re.fullmatch(r"[0-9a-f]{64}", source.read(65).strip()):
+        raise ValueError("route secret must contain 64 lowercase hex digits")
+PY
+settings_route "$DEST" || { echo "install.sh: the route secret is unreadable ($DEST/route-secret)" >&2; exit 1; }
+CUR=$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS") || { echo "install.sh: cannot read Claude Code settings at $SETTINGS" >&2; exit 1; }
+if [ -n "$CUR" ] && [ "$CUR" != "$URL" ] && [ "$CUR" != "$LINK_URL" ]; then
   # Another URL (an earlier port, another proxy) would keep run.sh from linking; this install replaces it,
   # and the tool search switch that rode that link.
   mkdir -p "$BACKUPS"
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-install-$(date +%Y%m%d-%H%M%S)"
-  TMP=$(mktemp "$SETTINGS.XXXXXX")
-  "$JQ" 'del(.env.ANTHROPIC_BASE_URL) | if .env.ENABLE_TOOL_SEARCH == "true" then del(.env.ENABLE_TOOL_SEARCH) else . end' "$SETTINGS" > "$TMP"
-  chmod 644 "$TMP"
-  mv "$TMP" "$SETTINGS"
-  echo "removed the earlier ANTHROPIC_BASE_URL $CUR (backup in $BACKUPS)"
+  settings_edit 'del(.env.ANTHROPIC_BASE_URL) | if .env.ENABLE_TOOL_SEARCH == "true" then del(.env.ENABLE_TOOL_SEARCH) else . end' \
+    || { echo "install.sh: could not rewrite Claude Code settings at $SETTINGS" >&2; exit 1; }
+  echo "removed the earlier ANTHROPIC_BASE_URL (backup in $BACKUPS)"
 fi
 
 LOADED=no
@@ -177,7 +200,7 @@ for f in "$SRC"/middleware/*.py; do
 done
 if [ ! -f "$DEST/settings.json" ]; then
   # The running gateway re-reads settings.json when it changes, so it is replaced whole, never edited in place.
-  printf '%s\n' '{"capture_dir": null, "middleware": [{"module": "status_label"}]}' > "$DEST/settings.json.new"
+  (umask 077; printf '%s\n' '{"capture_dir": null, "middleware": [{"module": "status_label"}]}' > "$DEST/settings.json.new")
   BYTECODE=
   [ "$PLATFORM" = Linux ] && BYTECODE=-B
   # shellcheck disable=SC2086 # The optional Linux -B flag expands to zero or one argument.
@@ -265,8 +288,12 @@ if [ "$PLATFORM" = Linux ]; then service_enable; fi
 service_start
 
 i=0
-until curl -sf --max-time 1 "$URL/__gateway/health" >/dev/null 2>&1 \
-  && [ "$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS")" = "$URL" ]; do
+while :; do
+  if curl -sf --max-time 1 "$URL/__gateway/health" >/dev/null 2>&1; then
+    # A settings file that cannot be read is no answer: fail loudly, never wait it out as "not linked yet".
+    if settings_linked; then break
+    elif [ "$?" -eq 2 ]; then echo "install.sh: cannot read Claude Code settings at $SETTINGS" >&2; exit 1; fi
+  fi
   i=$((i + 1))
   if [ $i -ge 80 ]; then
     echo "install.sh: the gateway did not come up within 20 seconds; Claude Code still talks to the API directly" >&2
@@ -276,4 +303,4 @@ until curl -sf --max-time 1 "$URL/__gateway/health" >/dev/null 2>&1 \
   sleep 0.25
 done
 echo "gateway on: $(curl -sf "$URL/__gateway/health")"
-echo "Claude Code uses $URL ($SETTINGS)"
+echo "Claude Code uses $URL with its route secret ($SETTINGS)"

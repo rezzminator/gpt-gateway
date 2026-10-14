@@ -50,8 +50,11 @@ class Capture:
             slug = re.sub(r"[^A-Za-z0-9]+", "_", path.split("?", 1)[0]).strip("_")[:60] or "root"
             name = "%s.%03d-%06d-%s-%s-%s" % (clock.stamp("%H%M%S", now), int(now * 1000) % 1000,
                                               seq, kind, method, slug)
-            self.dir = os.path.join(root, clock.stamp("%Y-%m-%d", now), name)
-            os.makedirs(self.dir, exist_ok=True)
+            day = os.path.join(root, clock.stamp("%Y-%m-%d", now))
+            self.dir = os.path.join(day, name)
+            for directory in (root, day, self.dir):
+                os.makedirs(directory, mode=0o700, exist_ok=True)
+                os.chmod(directory, 0o700)
             hdrs = [[k, "<redacted>" if k.lower() in SECRET else v] for k, v in headers.items()]
             self.write(REQUEST, json.dumps({"time": clock.stamp("%Y-%m-%d %H:%M:%S", now), "seq": seq,
                                             "kind": kind, "method": method, "path": path, "headers": hdrs},
@@ -68,11 +71,22 @@ class Capture:
                              limit=shortage.limit)
         self.dir = None
 
+    def _open_private(self, name):
+        """Open `name` for writing as a regular file only the owner can read; a symlink there is refused."""
+        f = os.fdopen(os.open(os.path.join(self.dir, name), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), "wb")
+        try:
+            os.fchmod(f.fileno(), 0o600)
+            f.truncate(0)
+        except Exception:
+            f.close()
+            raise
+        return f
+
     def write(self, name, data):
         if self.dir is None:
             return
         try:
-            with open(os.path.join(self.dir, name), "wb") as f:
+            with self._open_private(name) as f:
                 f.write(data)
         except Exception as e:
             self.fail(e)
@@ -91,7 +105,7 @@ class Capture:
                                          "headers": [[k, v] for k, v in headers]}, indent=2).encode())
         if self.dir is not None:
             try:
-                self.body = open(os.path.join(self.dir, RESPONSE_BODY), "wb")
+                self.body = self._open_private(RESPONSE_BODY)
             except Exception as e:
                 self.fail(e)
 

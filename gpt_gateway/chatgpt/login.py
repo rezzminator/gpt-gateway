@@ -65,15 +65,15 @@ def browser_login(store, output=print):
                 if parts.path == "/auth/callback" and not done.is_set():
                     state_values = query.get("state", [])
                     if len(state_values) != 1 or not secrets.compare_digest(state_values[0].encode(), state.encode()):
-                        result["error"] = "Invalid ChatGPT login state"
-                        status = 400
+                        status = 400  # not our login's callback: a stray request never ends the wait
                     elif query.get("error") or len(query.get("code", [])) != 1:
                         result["error"] = "ChatGPT authorization refused or missing code"
                         status = 400
+                        done.set()
                     else:
                         result["code"] = query["code"][0]
                         status = 200
-                    done.set()
+                        done.set()
             body = b"Authorization received. Return to the terminal." if status == 200 else b"Authorization failed."
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")

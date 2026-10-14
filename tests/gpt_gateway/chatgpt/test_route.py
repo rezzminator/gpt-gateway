@@ -22,7 +22,7 @@ class RouteTest(unittest.TestCase):
         fakes.Upstream.seen.clear()
         self.auth_path = os.path.join(self.home, "auth.json")
         self.models_path = os.path.join(self.home, "models.json")
-        self.capture = os.path.join(self.home, "capture")
+        self.capture, self.route_secret = os.path.join(self.home, "capture"), "a" * 64
         self.token = self.jwt("first")
         self.fake.tokens = dict(access_token=self.jwt("refreshed"), refresh_token="refresh-invented-2",
                                 id_token="id-invented", account_id="account-invented")
@@ -30,7 +30,8 @@ class RouteTest(unittest.TestCase):
                         id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
         self.env = jail.clean_env(self.home, GPT_GATEWAY_CHATGPT="1", GPT_GATEWAY_CHATGPT_AUTH_STORE="file", GPT_GATEWAY_CHATGPT_TRANSPORT="http",
                         GPT_GATEWAY_CHATGPT_AUTH_PATH=self.auth_path, GPT_GATEWAY_CHATGPT_ORIGIN=self.origin,
-                        GPT_GATEWAY_CHATGPT_AUTH_ORIGIN=self.origin, GPT_GATEWAY_CHATGPT_MODELS_PATH=self.models_path)
+                        GPT_GATEWAY_CHATGPT_AUTH_ORIGIN=self.origin, GPT_GATEWAY_CHATGPT_MODELS_PATH=self.models_path,
+                        GPT_GATEWAY_ROUTE_SECRET_PATH=jail.write_secret(os.path.join(self.home, "route-secret"), self.route_secret))
         self.headers = {"x-claude-code-session-id": "session-invented", "x-claude-code-agent-id": "agent-invented",
                         "authorization": "Bearer claude-secret", "x-api-key": "claude-key",
                         "anthropic-version": "invented", "anthropic-beta": "invented"}
@@ -47,8 +48,8 @@ class RouteTest(unittest.TestCase):
                middleware={"rec": fakes.RECORDER.format(name="rec")})
 
     def send(self, port, body=None, headers=None, path="/v1/messages"):
-        return fakes.request(port, "POST", path, json.dumps(self.body if body is None else body).encode(),
-                             self.headers if headers is None else headers)
+        return fakes.request(port, "POST", "/" + self.route_secret + path,
+                             json.dumps(self.body if body is None else body).encode(), self.headers if headers is None else headers)
 
     def responses(self):
         return [x for x in self.fake.seen if x["path"] == "/backend-api/codex/responses"]
@@ -323,7 +324,7 @@ class RouteRetryTest(unittest.TestCase):
         rt, port = self.gateway(GPT_GATEWAY_CHATGPT_ORIGIN=origin)
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         with patch.object(route, "Reader", side_effect=lambda *a: readers.append(response.Reader(*a)) or readers[-1]):
-            conn.request("POST", "/v1/messages", json.dumps(self.body).encode(), self.headers)
+            conn.request("POST", "/" + self.route_secret + "/v1/messages", json.dumps(self.body).encode(), self.headers)
             resp = conn.getresponse()
             self.assertIn(b"x0", resp.read1(65536))
         conn.sock.close()
@@ -479,7 +480,7 @@ class CodexRouteTest(unittest.TestCase):
                 with patch.object(rt.chatgpt.client, "watch", side_effect=watched), \
                         patch.object(rt.chatgpt.client.upstream, "connection", side_effect=connected):
                     for index in range(2):
-                        client.request("POST", "/v1/messages", json.dumps(self.body), self.headers)
+                        client.request("POST", "/" + self.route_secret + "/v1/messages", json.dumps(self.body), self.headers)
                         response = client.getresponse()
                         self.assertEqual(response.status, 200)
                         data = response.read()
@@ -510,7 +511,7 @@ class CodexRouteTest(unittest.TestCase):
         self.addCleanup(client.close)
         answers = []
         for _ in range(turns):
-            client.request("POST", "/v1/messages", json.dumps(self.body), self.headers)
+            client.request("POST", "/" + self.route_secret + "/v1/messages", json.dumps(self.body), self.headers)
             response = client.getresponse()
             answers.append((response.status, response.read()))
         return answers

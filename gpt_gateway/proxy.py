@@ -10,6 +10,7 @@ looks for a host pause (`gpt_gateway/reach.py`): one closes the idle upstream co
 """
 import json
 import copy
+import hmac
 from http.server import BaseHTTPRequestHandler
 
 from . import clock
@@ -170,6 +171,15 @@ class Handler(BaseHTTPRequestHandler):
     def handle_any(self):
         rt = self.server.runtime
         self.connection.settimeout(None)  # the request is in; the idle limit does not cut its body, hooks or stream
+        # Claude Code appends its API path to the credential-bearing base URL. The prefix is removed before anything
+        # else sees the path, so Anthropic still gets its original path and body bytes and no row holds the credential.
+        authorized = False
+        if rt.route_secret:
+            parts = self.path.split("/", 2)  # the request line is latin-1 text; compare as bytes
+            authorized = len(parts) == 3 and parts[0] == "" and hmac.compare_digest(
+                parts[1].encode("latin-1"), rt.route_secret.encode("ascii"))
+            if authorized:
+                self.path = "/" + parts[2]
         snap = rt.settings.current()  # one settings snapshot per request
         if rt.pause.check():
             rt.upstream.pool.clear()  # idle connections from before the pause are dead, or die on their next use
@@ -185,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
         rt.drain.begin(self.connection)
         try:
-            self.proxy(rt, snap)
+            self.proxy(rt, snap, authorized)
         finally:
             rt.drain.end(self.connection)
             if rt.drain.draining:
@@ -197,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
         row.setdefault("total_ms", clock.milliseconds(clock.monotonic() - started))
         rt.db.request(row)
 
-    def proxy(self, rt, snap):
+    def proxy(self, rt, snap, authorized=False):
         started, row = clock.monotonic(), {"started": clock.now(), "method": self.command, "path": self.path}
         try:
             raw = self.read_body()
@@ -212,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         body = parse_object(raw)
         selected = ("anthropic", None, None)
         if rt.chatgpt is not None:
-            selected = rt.chatgpt.decide(self.command, self.path, body, self.headers)
+            selected = rt.chatgpt.decide(self.command, self.path, body, self.headers, authorized)
         kind = "sub" if self.headers.get("x-claude-code-agent-id") else "main"
         seq = rt.sequence.next()
         row.update(request_row(self.command, self.path, body, self.headers, kind, selected[0], seq))

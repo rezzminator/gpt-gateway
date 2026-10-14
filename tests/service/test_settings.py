@@ -1,4 +1,5 @@
 """Fail-open settings errors are reported by both platform frontends and retried to the stop deadline."""
+import json
 import os
 import subprocess
 import unittest
@@ -23,6 +24,23 @@ class SettingsTest(unittest.TestCase):
                                  'test', os.path.join(jail.ROOT, 'service', 'settings.sh')],
                                 env=env, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, 'an inaccessible file was misreported as absent')
+
+    def test_a_settings_rewrite_keeps_the_files_mode(self):
+        home = jail.scratch(self)
+        url = 'http://127.0.0.1:%d' % jail.free_port()
+        for mode in (0o600, 0o640, 0o644):
+            with self.subTest(mode=oct(mode)):
+                settings = os.path.join(home, 'settings-%o.json' % mode)
+                jail.write_json(settings, {'env': {'ANTHROPIC_BASE_URL': url, 'KEEP': '1'}})
+                os.chmod(settings, mode)
+                env = jail.clean_env(home, SETTINGS=settings, URL=url, JQ='/usr/bin/jq')
+                result = subprocess.run(['/bin/sh', '-c', '. "$1"; settings_edit "del(.env.ANTHROPIC_BASE_URL)"',
+                                         'test', os.path.join(jail.ROOT, 'service', 'settings.sh')],
+                                        env=env, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(os.stat(settings).st_mode & 0o777, mode)
+                with open(settings) as source:
+                    self.assertEqual(json.load(source), {'env': {'KEEP': '1'}})
 
     def test_missing_settings_are_definitely_not_linked(self):
         home = jail.scratch(self)

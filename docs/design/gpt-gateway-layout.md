@@ -1,6 +1,6 @@
 # gpt-gateway layout
 
-The gateway has an Anthropic passthrough, a middleware contract and an optional ChatGPT route. The tables below define its units, vocabulary and façades; co-change evidence marked "assumed" is a design boundary, not a measured history. `scripts/checks.sh` and `scripts/gate.sh` enforce the countable laws.
+The gateway has an Anthropic passthrough, a middleware contract and an optional ChatGPT route. `install.sh` generates a 0600 `route-secret` once; `run.sh` places it as a base-URL path segment and the proxy strips it before Anthropic forwarding, while only an authenticated ChatGPT candidate may reach the catalog. The tables below define its units, vocabulary and façades; co-change evidence marked "assumed" is a design boundary, not a measured history. `scripts/checks.sh` and `scripts/gate.sh` enforce the countable laws.
 
 ## Contents
 
@@ -62,11 +62,11 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt websocket | the Responses WebSocket: per-lane socket pool, response.create, the answer the route reads | `gpt_gateway/chatgpt/websocket.py` | assumed: socket lifecycle and Codex's WebSocket contract co-change |
 | chatgpt keeper | the thread that answers and pings the idle pooled WebSockets, and takes a dead one out of the pool | `gpt_gateway/chatgpt/keeper.py` | assumed: pool lifecycle and the server's idle behaviour co-change |
 | chatgpt continuation | Codex's incremental request: a socket's last completed response, what the next request sends, output-item identity | `gpt_gateway/chatgpt/continuation.py` | assumed: Codex's continuation rule and the translator's round trip co-change |
-| chatgpt route | routing decision, attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
+| chatgpt route | routing decision, authenticated candidates, attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
 | chatgpt response | the reader thread behind a translated SSE body, read through the core's `Response` | `gpt_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
 | example | the minimal middleware, the contract's executable documentation | `examples/middleware/model_note.py` | assumed: changes with the contract |
 | shipped middleware | the middleware an install copies into its `middleware/`, each file its own, and a fresh `settings.json` lists | `middleware/` | assumed: each module changes alone, against the contract |
-| service | the portable supervisor (`run.sh`, fail-open), platform-dispatching install, control and removal, launchd agent and systemd user unit | `service/` | assumed: the stored service environment and lifecycle co-change |
+| service | the portable supervisor (`run.sh`, fail-open), platform-dispatching install, control and removal, launchd agent and systemd user unit, generated route credential | `service/` | assumed: the stored service environment and lifecycle co-change |
 | gates | `scripts/checks.sh`, `scripts/gate.sh`, `scripts/baselines/` | `scripts/` | assumed: a new check and its baseline land together |
 
 ## 2. Tree
