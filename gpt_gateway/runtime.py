@@ -1,9 +1,11 @@
-"""Runtime: the one object a running gateway holds — env, log, database, settings, hook chain, upstream, drain, sequence."""
+"""Runtime: the one object a running gateway holds — env, log, database, settings, hook chain, upstream, host pause
+watch, drain, sequence."""
 from .capture import Sequence
 from .db import Db
 from .env import CoreEnv
 from .hooks import Chain
 from .log import Log
+from .reach import Pause
 from .server import Drain
 from .settings import Settings
 from .upstream import Upstream
@@ -18,6 +20,7 @@ class Runtime:
         self.db = Db(self.env.db_path, self.log.write, lambda: self.settings.snapshot.db_retention_days)  # no reload on its thread
         self.settings = Settings(settings_path, environ, self.log.write, self.db.event)
         self.upstream = Upstream(self.env.upstream, self.db.event)
+        self.pause = Pause(self.db.event)  # the host's sleeps, seen by every request
         self.drain = Drain()
         self.sequence = Sequence()
         self.chain = Chain((), self.db.event)

@@ -3,16 +3,54 @@ its path with TCP keepalive; a WebSocket upgrade follows RFC 6455."""
 import errno
 import json
 import socket
+import ssl
 import threading
 import unittest
 import unittest.mock
+from urllib.parse import urlsplit
 
-from gpt_gateway import frames, handles, pool, upstream
+from gpt_gateway import frames, handles, pool, reach, upstream
 from gpt_gateway.upstream import Upstream, UpstreamError
 from tests import fakes, jail
 from tests.fakes import ClosingUpstream
 
 HEADERS = (("content-length", "2"),)
+ALERT = ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] sslv3 alert bad record mac (_ssl.c:2633)")
+
+
+class Failing:
+    """A kept-alive connection's socket whose peer fails the next exchange as `error`: before any answer, or after
+    the `status` line when one is given; while the request is written when `writing`."""
+
+    def __init__(self, real, error, status=None, writing=False):
+        self.real, self.error, self.lines, self.writing = real, error, [status] if status else [], writing
+
+    def sendall(self, data):
+        if self.writing:
+            raise self.error
+
+    def settimeout(self, value):
+        pass
+
+    def makefile(self, mode):
+        return self
+
+    def flush(self):
+        pass
+
+    def readline(self, limit=-1):
+        if self.lines:
+            return self.lines.pop(0)
+        raise self.error
+
+    def close(self):
+        self.real.close()
+
+
+class Keeping(ClosingUpstream):
+    def do_POST(self):
+        super().do_POST()
+        self.close_connection = False
 
 
 class UpstreamTest(unittest.TestCase):
@@ -85,22 +123,121 @@ class UpstreamTest(unittest.TestCase):
                                 (None, False)):
             self.assertEqual(is_stale(error), expected, repr(error))
 
-    def test_a_connection_that_fails_twice_is_final(self):
+    def kept(self):
+        """(Upstream, its events, the kept-alive connection its first answer left in the pool)."""
+        events = []
+        up = Upstream(fakes.start_upstream(self, Keeping), lambda kind, **fields: events.append((kind, fields)))
+        up.send("POST", "/x", b"{}", HEADERS).read()
+        self.assertEqual(len(up.pool.idle), 1)
+        return up, events, up.pool.idle[-1]
+
+    def test_a_reused_connection_that_fails_before_any_answer_goes_again_once_on_a_fresh_one(self):
+        # The alert the gateway logged 96 times overnight: the request is sent again, unchanged, on a new connection.
+        up, events, conn = self.kept()
+        conn.sock = Failing(conn.sock, ALERT)
+        try:
+            resp = up.send("POST", "/x", b"{}", HEADERS)
+        except UpstreamError as e:
+            self.fail("a reused connection's failure before any answer was final: %s" % e.message)
+        self.assertEqual(json.loads(resp.read())["n"] > 1, True)
+        self.assertIsNot(up.local.conn, conn)
+        self.assertEqual((up.reuse(), up.attempts()), ((False, True), 2))
+        (kind, fields), = events
+        self.assertEqual((kind, fields["request_id"], fields["error_class"], fields["error"]),
+                         ("upstream_retry", None, "tls", repr(ALERT)))
+        self.assertIsInstance(fields["idle_ms"], int)
+        self.assertIsInstance(fields.get("wait_ms"), int)  # how long after the whole request was written
+
+    def test_a_failure_long_after_the_whole_request_was_written_is_never_sent_again(self):
+        # The origin may have been working on it; a failure while it was still being written leaves it unread.
+        # A host that slept between the write and the failure held the request that long too.
+        for writing, window, slept, retried in ((False, 0, 0.0, False), (True, 0, 0.0, True),
+                                                (False, upstream.REUSE_WINDOW_SECONDS, 3600.0, False)):
+            with self.subTest(writing=writing, slept=slept), \
+                    unittest.mock.patch.object(upstream, "REUSE_WINDOW_SECONDS", window):
+                up, events, conn = self.kept()
+                conn.sock = Failing(conn.sock, ALERT, writing=writing)
+                readings = iter((0.0, slept))  # clock.slept() at the write, then at the failure
+                with unittest.mock.patch.object(upstream.clock, "slept", lambda: next(readings, slept)):
+                    try:
+                        resp = up.send("POST", "/x", b"{}", HEADERS)
+                    except UpstreamError as e:
+                        resp = e
+                if isinstance(resp, UpstreamError):
+                    self.assertEqual((retried, resp.error_class, up.reuse(), up.attempts(), events),
+                                     (False, "tls", (True, False), 1, []))
+                else:
+                    resp.read()
+                    self.assertTrue(retried, "a failure past the window was sent again")
+                    (kind, fields), = events
+                    self.assertEqual((kind, fields["wait_ms"], up.attempts()), ("upstream_retry", None, 2))
+
+    def test_a_reused_connection_whose_request_may_have_run_is_never_sent_again(self):
+        # After the status line the model ran; a timeout may be a slow answer, never only an idle connection's death.
+        for error, status, message, cls in (
+                (ConnectionResetError(errno.ECONNRESET, "Connection reset by peer"), b"HTTP/1.1 200 OK\r\n",
+                 "upstream connection failed: ConnectionResetError", "reset"),
+                (socket.timeout("timed out"), None, "upstream unreachable: timeout", "timeout"),
+                (TimeoutError(errno.ETIMEDOUT, "Operation timed out"), None, "upstream unreachable: TimeoutError",
+                 "timeout")):
+            with self.subTest(error=repr(error)):
+                up, events, conn = self.kept()
+                conn.sock = Failing(conn.sock, error, status)
+                with self.assertRaises(UpstreamError) as cm:
+                    up.send("POST", "/x", b"{}", HEADERS)
+                self.assertTrue(cm.exception.message.startswith(message), cm.exception.message)
+                self.assertEqual((cm.exception.error_class, up.reuse(), up.attempts(), events),
+                                 (cls, (True, False), 1, []))
+
+    def test_a_retry_whose_fresh_connection_fails_too_is_final_and_one_failure_of_the_origin(self):
+        up, events, conn = self.kept()
+        conn.sock = Failing(conn.sock, ALERT)
+        up.origin = urlsplit("http://127.0.0.1:%d" % jail.free_port())  # the origin went away with the connection
+        with self.assertRaises(UpstreamError) as cm:
+            up.send("POST", "/x", b"{}", HEADERS)
+        self.assertTrue(cm.exception.message.startswith("upstream unreachable: ConnectionRefusedError"),
+                        cm.exception.message)
+        self.assertEqual((cm.exception.error_class, up.reuse(), up.attempts()), ("connect", (False, True), 2))
+        with self.assertRaises(UpstreamError):
+            up.send("POST", "/x", b"{}", HEADERS)
+        self.assertEqual([kind for kind, _ in events], ["upstream_retry"])  # two failures: no run yet, the alert retried
+
+    def test_a_fresh_connection_that_fails_is_final_at_once(self):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(8)
+        listener.settimeout(5)
         self.addCleanup(listener.close)
+        served = []
 
         def slam():
             for _ in range(2):
-                conn, _ = listener.accept()
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    return
                 conn.recv(65536)
+                served.append(1)
                 conn.close()
         threading.Thread(target=slam, daemon=True).start()
         up = Upstream("http://127.0.0.1:%d" % listener.getsockname()[1])
         with self.assertRaises(UpstreamError) as cm:
             up.send("POST", "/x", b"{}", HEADERS)
+        self.assertEqual(len(served), 1)  # never sent again
         self.assertTrue(cm.exception.message.startswith("upstream connection failed: "), cm.exception.message)
+        self.assertEqual((cm.exception.error_class, up.reuse(), up.attempts()), ("reset", (False, False), 1))
+
+    def test_failed_sends_open_an_unreachable_run_and_an_answer_ends_it(self):
+        events = []
+        up = Upstream("http://127.0.0.1:%d" % jail.free_port(), lambda kind, **fields: events.append((kind, fields)))
+        for _ in range(reach.RUN_START):
+            with self.assertRaises(UpstreamError):
+                up.send("POST", "/x", b"{}", HEADERS)
+        up.origin = urlsplit(fakes.start_upstream(self, ClosingUpstream))
+        with unittest.mock.patch.object(reach, "QUIET_SECONDS", 0):
+            up.send("POST", "/x", b"{}", HEADERS).read()
+        self.assertEqual([(kind, f.get("error_class"), f["failures"]) for kind, f in events],
+                         [("upstream_unreachable_start", "connect", 3), ("upstream_unreachable_end", None, 3)])
 
     def test_a_malformed_response_is_final_and_drops_the_connection(self):
         listener = socket.socket()
@@ -114,11 +251,17 @@ class UpstreamTest(unittest.TestCase):
             conn.sendall(b"garbage\r\n\r\n")
             conn.close()
         threading.Thread(target=garble, daemon=True).start()
-        up = Upstream("http://127.0.0.1:%d" % listener.getsockname()[1])
+        events = []
+        up = Upstream("http://127.0.0.1:%d" % listener.getsockname()[1], lambda kind, **fields: events.append(kind))
+        for _ in range(reach.RUN_START - 1):
+            up.runs.failed("connect", "ConnectionRefusedError()")  # the failures in a row before it
         with self.assertRaises(UpstreamError) as cm:
             up.send("POST", "/x", b"{}", HEADERS)
         self.assertTrue(cm.exception.message.startswith("upstream protocol error: BadStatusLine"), cm.exception.message)
+        self.assertEqual(cm.exception.error_class, "protocol")
         self.assertIsNone(up.local.conn)
+        up.runs.failed("connect", "ConnectionRefusedError()")
+        self.assertEqual(events, [])  # the origin answered between: no run of it being unreachable
 
     def test_a_close_that_fails_is_recorded(self):
         class Broken:
@@ -139,6 +282,7 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaises(UpstreamError) as cm:
             up.send("POST", "/x", b"{}", HEADERS)
         self.assertTrue(cm.exception.message.startswith("upstream unreachable: ConnectionRefusedError"))
+        self.assertEqual(cm.exception.error_class, "connect")
         self.assertIsNone(up.local.conn)
 
     def test_every_connection_probes_its_path_with_tcp_keepalive(self):
@@ -194,6 +338,7 @@ class OutOfHandlesTest(unittest.TestCase):
         self.assertIn("out of file handles", caught.exception.message)
         self.assertIn("62 open of 64", caught.exception.message)
         self.assertNotIn("unreachable", caught.exception.message)
+        self.assertEqual(caught.exception.error_class, "fd")
         self.assertEqual([(kind, fields["where"], fields["open"], fields["limit"]) for kind, fields in events],
                          [("fd_exhausted", "upstream", 62, 64)])
 
@@ -219,8 +364,9 @@ class UpgradeTest(unittest.TestCase):
         with unittest.mock.patch("gpt_gateway.upstream.ACCEPT_GUID", b"wrong-guid"):
             with self.assertRaisesRegex(UpstreamError, "Sec-WebSocket-Accept is wrong"):
                 up.websocket("/backend-api/codex/responses", ())
-        with self.assertRaisesRegex(UpstreamError, "unreachable"):
+        with self.assertRaisesRegex(UpstreamError, "unreachable") as cm:
             Upstream("http://127.0.0.1:%d" % jail.free_port()).websocket("/", ())
+        self.assertEqual(cm.exception.error_class, "connect")
 
 
 if __name__ == "__main__":

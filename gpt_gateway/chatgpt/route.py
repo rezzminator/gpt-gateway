@@ -11,6 +11,7 @@ import threading
 from typing import Optional
 
 from .. import clock, db
+from ..reach import error_class
 from ..response import Response
 from ..upstream import UpstreamError, is_stale
 from . import auth, errors, estimate, lane, request, signature, stream, turn
@@ -165,9 +166,13 @@ class Route:
                 self.lanes[key] = Lane()
             return self.lanes[key]
 
-    def _attempt_event(self, row, key, slug, status, attempt, action, head, credentials=None, delay=None):
+    def _attempt_event(self, row, key, slug, status, attempt, action, head, credentials=None, delay=None, failure=None):
         """A failed attempt as a `retry` event, or the last one as `final_error`: at most 300 bytes of its error,
-        secrets redacted."""
+        secrets redacted. `failure`: the exception of a transport failure, whose class the event and, when final, the
+        row carry."""
+        named = {} if failure is None else {"error_class": error_class(failure)}
+        if action == "final":
+            row.update(named)
         if not isinstance(head, bytes):
             head = json.dumps(head, ensure_ascii=False).encode()
         if credentials is not None:
@@ -175,7 +180,7 @@ class Route:
                 head = head.replace(secret.encode(), b"[redacted]")
         self.event("final_error" if action == "final" else "retry", request_id=row.get("request_id"), lane=key,
                    slug=slug, status=status, attempt=attempt, action=action, retry_after=delay,
-                   error_head=head[:300].decode("utf-8", "replace"))
+                   error_head=head[:300].decode("utf-8", "replace"), **named)
 
     def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
                   row, ended=None):
@@ -184,7 +189,7 @@ class Route:
         if translator.error is not None:
             self._attempt_event(row, key, model.slug, "transport" if reader.transport_error else status,
                                 attempt, "final", translator.failure or reader.error_head, credentials,
-                                translator.error.delay)
+                                translator.error.delay, reader.transport_exception)
         row["attempts"] = attempt
         if translator.usage is not None:
             if translator.terminal == "response.completed":
@@ -238,7 +243,7 @@ class Route:
         while True:
             attempt += 1
             translator = stream.Translator(model.slug, translation.tool_names, estimated)
-            reader = None
+            reader = failure = None
             try:
                 credentials = credentials or self.store.credentials()
                 measure.sent_at = clock.monotonic()
@@ -250,7 +255,8 @@ class Route:
                     with self.lock:
                         if state.turn_state.observe(where, issued):
                             measure.turn = "issued"
-                response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK)
+                response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK,
+                                                 row.get("request_id"))
                 reused, retried, measure.transport, measure.delta = self.client.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
@@ -277,9 +283,10 @@ class Route:
                         return Response.json(code, data)
                     decision, head = translator.error, translator.failure or reader.error_head
                     if reader.transport_error:
-                        status = "transport"
+                        status, failure = "transport", reader.transport_exception
             except (UpstreamError, OSError, http.client.HTTPException) as error:
                 self.client.drop()
+                failure = error
                 status, head = "transport", {"message": error.message if isinstance(error, UpstreamError) else str(error)}
                 decision = errors.classify(None, head, "before-output")
             except auth.LoginRequired as error:
@@ -303,7 +310,7 @@ class Route:
             action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning
                       else "drop_retention" if strip else "retry")
             self._attempt_event(row, key, model.slug, status, attempt, action if can_retry else "final", head,
-                                credentials, decision.delay)
+                                credentials, decision.delay, failure)
             if not can_retry:
                 row["attempts"] = attempt
                 if decision.client_status == 401:

@@ -71,7 +71,7 @@ else say test-jail ERROR "grep could not read tests"; fi
 grep -E '(^|/)(run\.[^/]*|[^/]*\.sh)$' "$T/all" | grep -vE '^(scripts|service)/' > "$T/run"; ratchet stray-runners stray-runners "$T/run"
 
 facade env gpt_gateway/env.py '\bos\.environ\b|\bgetenv\(|from os import .*environ'
-facade clock gpt_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter)\(|^[[:space:]]*from time import'
+facade clock gpt_gateway/clock.py '\btime\.(time|sleep|strftime|localtime|gmtime|monotonic|perf_counter|clock_gettime)\(|^[[:space:]]*from time import'
 facade log gpt_gateway/log.py '^[[:space:]]*(import|from) logging\b|\blogging\.|open\([^)]*["'"'"']a[b+]?["'"'"']'
 facade settings gpt_gateway/settings.py '["'"'"']settings\.json["'"'"']'
 facade upstream gpt_gateway/upstream.py '\bHTTPS?Connection\(|create_default_context\(|\bcreate_connection\('
