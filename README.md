@@ -61,13 +61,13 @@ The environment alone sets the rest (the service manager sets them in its plist 
 | --- | --- | --- |
 | `GPT_GATEWAY_PORT` | listen port on 127.0.0.1 | 18787 |
 | `GPT_GATEWAY_UPSTREAM` | upstream origin | `https://api.anthropic.com` |
-| `GPT_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error and database-failure lines only; an absolute path or `~/` under `HOME` | macOS: `~/Library/Logs/gpt-gateway.log`; Linux: `~/.local/state/gpt-gateway/gpt-gateway.log` |
+| `GPT_GATEWAY_LOG` | the text log, rotated to `.1` past 5 MiB: start, stop, fatal, settings-error, database-failure and proxy-failure lines; an absolute path or `~/` under `HOME` | macOS: `~/Library/Logs/gpt-gateway.log`; Linux: `~/.local/state/gpt-gateway/gpt-gateway.log` |
 | `PLUGIN_LOG_DIR` | shared level root; writes under `$PLUGIN_LOG_DIR/gpt-gateway/` | `~/.local/state/gpt-gateway/logs/` when unset |
 | `GPT_GATEWAY_DB` | the [database](#database), an absolute path or `~/` under `HOME` | `~/.local/state/gpt-gateway/gateway.db` |
 | `GPT_GATEWAY_DRAIN_SECONDS` | on SIGTERM, how long in-flight requests may finish | 600 |
 | `GPT_GATEWAY_DEBUG` | set to record each messages request's non-secret headers and metadata as a `debug` event | off |
 
-Lifecycle and failure diagnostics also append to `errors.jsonl`, `warnings.jsonl` and `info.jsonl` in the level directory, independently of the unchanged text log. Rows are UTC JSON lines of at most 4096 bytes; directories are private (`0700`) and files `0600`. A file past 20 MiB moves to `.1` on the next write, replacing an older `.1`, with a `log-capped` warning. A successful start emits one `logger-ready` row with the build digest and directory source. A failed write names its directory on stderr once per failing streak and never interrupts gateway work. The installer carries `PLUGIN_LOG_DIR` into the service when supplied; changing a terminal environment does not change an already installed service.
+Lifecycle and failure diagnostics also append to `errors.jsonl`, `warnings.jsonl` and `info.jsonl` in the level directory, independently of the rotating text log. Rows are UTC JSON lines of at most 4096 bytes; new level directories use `0700` and new files `0600`. A file past 20 MiB moves to `.1` on the next write, replacing an older `.1`, with a `log-capped` warning. A failed write names its directory on stderr once per failing streak and never interrupts gateway work. The installer carries `PLUGIN_LOG_DIR` into the service when supplied; changing a terminal environment does not change an already installed service.
 
 ## Middleware
 

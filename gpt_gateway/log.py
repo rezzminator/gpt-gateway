@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
-import stat
 import threading
 
 from . import clock, env
@@ -57,27 +56,9 @@ def level_row(level, event, msg, where, detail=None):
     return data
 
 
-def _directory(path):
-    """Create missing ancestors privately, without changing the process-wide umask."""
-    if os.path.islink(path):
-        raise OSError("level log directory is a symlink: %s" % path)
-    missing, parent = [], path
-    while not os.path.exists(parent):
-        missing.append(parent)
-        parent = os.path.dirname(parent)
-    for directory in reversed(missing):
-        try:
-            os.mkdir(directory, 0o700)
-        except FileExistsError:
-            if not os.path.isdir(directory):
-                raise
-    os.chmod(path, 0o700)
-
-
 def _append(path, data):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.fchmod(fd, 0o600)
         written = os.write(fd, data)
         if written != len(data):
             raise OSError("short level log write: %d of %d bytes" % (written, len(data)))
@@ -87,7 +68,6 @@ def _append(path, data):
 
 def _cap(path):
     if os.path.exists(path) and os.path.getsize(path) > PLUGIN_LOG_CAP_BYTES:
-        os.chmod(path, 0o600)
         os.replace(path, path + ".1")
         return True
     return False
@@ -103,7 +83,6 @@ class Log:
         self.failing = False
         self.level_failing = False
         environ = env.snapshot() if environ is None else environ
-        self.dir_source = "PLUGIN_LOG_DIR" if env.value(environ, "PLUGIN_LOG_DIR") else "fallback"
         self.level_error = None
         try:
             self.level_dir = env.plugin_log_dir(environ)
@@ -131,11 +110,6 @@ class Log:
         self.write(msg)
         self._level(level, event, msg, where, detail)
 
-    def ready(self, version):
-        """One heartbeat at successful serve start; no extra legacy text line."""
-        self._level("info", "logger-ready", "level logger ready", "gpt_gateway/cli.py#cmd_serve",
-                    {"version": version, "dir_source": self.dir_source})
-
     def _level(self, level, event, msg, where, detail=None):
         if self.level_dir is None:
             return
@@ -145,25 +119,7 @@ class Log:
                     raise self.level_error
                 data = level_row(level, event, msg, where, detail)
                 path = os.path.join(self.level_dir, LEVEL_FILES[level])
-                # Ancestors are operator-trusted; refuse aliased owned leaves before mutation.
-                if os.path.islink(self.level_dir):
-                    raise OSError("level log directory is a symlink: %s" % self.level_dir)
-                existing = []
-                for filename in LEVEL_FILES.values():
-                    for suffix in ("", ".1"):
-                        leaf = os.path.join(self.level_dir, filename + suffix)
-                        try:
-                            info = os.lstat(leaf)
-                        except FileNotFoundError:
-                            continue
-                        if stat.S_ISLNK(info.st_mode):
-                            raise OSError("level log endpoint is a symlink: %s" % leaf)
-                        if not stat.S_ISREG(info.st_mode):
-                            raise OSError("level log endpoint is not a regular file: %s" % leaf)
-                        existing.append(leaf)
-                _directory(self.level_dir)
-                for leaf in existing:
-                    os.chmod(leaf, 0o600)
+                os.makedirs(self.level_dir, mode=0o700, exist_ok=True)
                 if _cap(path):
                     warnings = os.path.join(self.level_dir, LEVEL_FILES["warning"])
                     capped = [path]

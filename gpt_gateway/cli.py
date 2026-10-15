@@ -44,7 +44,6 @@ def cmd_serve(args, install_dir, environ):
     snap = rt.settings.current()
     names, python = [m.NAME for m in rt.settings.modules], sys.version.split()[0]
     code = build(os.path.dirname(os.path.abspath(__file__)))
-    rt.log.ready(code)
     rt.log.record("info", "started", "start port=%d %s settings=%s file=%s upstream=%s middleware=[%s] python=%s db=%s build=%s" % (
         rt.env.port, describe(snap), snap.state, rt.settings.path, rt.env.upstream, ", ".join(names), python,
         rt.db.path, code), "gpt_gateway/cli.py#cmd_serve")

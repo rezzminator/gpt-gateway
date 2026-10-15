@@ -176,28 +176,6 @@ class ServeTest(CliCase):
                 self.assertEqual((row["level"], row["event"], row["where"]),
                                  ("error", event, "gpt_gateway/cli.py#" + function))
 
-    def test_successful_start_emits_one_ready_and_started_without_extra_text(self):
-        from gpt_gateway.log import Log
-        from gpt_gateway.settings import Settings
-        from gpt_gateway import env
-        environ = jail.clean_env(self.tmp, PLUGIN_LOG_DIR=self.tmp)
-        with patch.object(env, "snapshot", return_value=environ):
-            log = Log(self.log)
-        settings = Settings(self.settings, environ, log.write)
-        settings.load()
-        rt = Mock(env=env.CoreEnv.parse(environ), log=log, settings=settings, db=Mock(path="test.db"))
-        with patch.object(cli, "Runtime", return_value=rt), patch.object(cli.handles, "raise_limit"), \
-                patch.object(cli.servermod, "bind"), patch.object(cli.servermod, "serve", return_value=0):
-            self.assertEqual(cli.cmd_serve([], self.app, environ), 0)
-        path = os.path.join(self.tmp, "gpt-gateway", "info.jsonl")
-        self.assertTrue(os.path.isfile(path), "successful start must emit ready and started rows")
-        with open(path) as source:
-            rows = [json.loads(line) for line in source]
-        self.assertEqual([r["event"] for r in rows], ["logger-ready", "started"])
-        self.assertEqual(rows[0]["detail"], {"version": cli.build(os.path.dirname(cli.__file__)),
-                                              "dir_source": "PLUGIN_LOG_DIR"})
-        self.assertEqual(len(self.logged().splitlines()), 1)
-
     def test_stderr_failures_also_emit_classified_rows(self):
         for args, changes, event, where in ((["serve"], {"GPT_GATEWAY_DRAIN_SECONDS": "soon"},
                                             "start-failed", "gpt_gateway/cli.py#start_error"),

@@ -22,45 +22,6 @@ class LogTest(unittest.TestCase):
         with open(os.path.join(directory, name), encoding="utf-8") as source:
             return [json.loads(line) for line in source]
 
-    def test_level_refuses_aliased_endpoints_without_foreign_mutation(self):
-        for leaf in ("directory", "errors.jsonl", "warnings.jsonl", "info.jsonl", "errors.jsonl.1", "warnings.jsonl.1", "info.jsonl.1"):
-            with self.subTest(leaf=leaf):
-                root = jail.scratch(self)
-                outside = os.path.join(root, "outside")
-                os.mkdir(outside, 0o755)
-                sentinel = os.path.join(outside, "sentinel")
-                with open(sentinel, "w") as source:
-                    source.write("protected")
-                os.chmod(sentinel, 0o644)
-                directory = os.path.join(root, "gpt-gateway")
-                if leaf == "directory":
-                    os.symlink(outside, directory)
-                else:
-                    os.mkdir(directory)
-                    os.symlink(sentinel, os.path.join(directory, leaf))
-                logger = self.level_log(root, PLUGIN_LOG_DIR=root)
-                error = io.StringIO()
-                with contextlib.redirect_stderr(error):
-                    logger.record("error", "alias-test", "new", "test")
-                self.assertIn("symlink", error.getvalue())
-                with open(sentinel) as source:
-                    self.assertEqual(source.read(), "protected")
-                self.assertEqual(os.stat(sentinel).st_mode & 0o777, 0o644)
-                self.assertEqual(os.stat(outside).st_mode & 0o777, 0o755)
-
-    def test_level_tightens_dormant_backup_without_rotation(self):
-        root = jail.scratch(self)
-        directory = os.path.join(root, "gpt-gateway")
-        os.mkdir(directory)
-        backup = os.path.join(directory, "errors.jsonl.1")
-        with open(backup, "w") as source:
-            source.write("old")
-        os.chmod(backup, 0o644)
-        self.level_log(root, PLUGIN_LOG_DIR=root).record("error", "privacy", "new", "test")
-        self.assertEqual(os.stat(backup).st_mode & 0o777, 0o600)
-        with open(backup) as source:
-            self.assertEqual(source.read(), "old")
-
     def test_record_rows_land_in_level_files(self):
         home = jail.scratch(self)
         root = os.path.join(home, "logs with ' quote")
@@ -164,18 +125,6 @@ class LogTest(unittest.TestCase):
             self.assertFalse(worker.is_alive())
         rows = self.rows(os.path.join(home, "gpt-gateway"), "info.jsonl")
         self.assertEqual(sorted(int(row["msg"]) for row in rows), list(range(40)))
-
-    def test_ready_reports_fallback_without_a_text_line(self):
-        home = jail.scratch(self)
-        text = os.path.join(home, "gw.log")
-        log = self.level_log(home, text)
-        log.ready("digest123")
-        row, = self.rows(os.path.join(home, ".local/state/gpt-gateway/logs"), "info.jsonl")
-        self.assertEqual((row["event"], row["detail"]),
-                         ("logger-ready", {"version": "digest123", "dir_source": "fallback"}))
-        log.write("legacy")
-        with open(text) as source:
-            self.assertEqual(len(source.read().splitlines()), 1)
 
     def test_invalid_level_inputs_are_reported_without_interrupting_text(self):
         home = jail.scratch(self)

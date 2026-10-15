@@ -233,6 +233,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.exchange(rt, snap, raw, body, selected, kind, seq, cap, started, row)
         except Exception as e:
+            rt.log.record("error", "gateway-error", "gateway request failed: %r" % e,
+                          "gpt_gateway/proxy.py#proxy", {"error": repr(e)})
             if "ended" not in row:  # the exchange broke before its row was queued: the request still gets one
                 self.record(rt, row, started, error_code="gateway_error", error_head=repr(e))
             raise
@@ -271,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             resp = rt.upstream.send(self.command, self.path, sent or None, headers, request_id=seq)
         except UpstreamError as e:
+            rt.log.record("error", "upstream-failed", "upstream request failed: %s" % e.message,
+                          "gpt_gateway/proxy.py#exchange", {"error": e.message, "error_class": e.error_class})
             row.update(zip(("reused", "stale"), rt.upstream.reuse()), attempts=rt.upstream.attempts())
             cap.gateway_error(502, e.message)
             data = json.dumps({"type": "error", "error": {"type": "api_error",

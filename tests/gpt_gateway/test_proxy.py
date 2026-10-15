@@ -169,13 +169,18 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual(rt.upstream.pool.idle, [])
 
     def test_a_request_whose_exchange_breaks_still_gets_its_row(self):
-        from unittest import mock
-        rt, port = fakes.start_gateway(self, self.up)
+        rt, port = fakes.start_gateway(self, self.up, env={"PLUGIN_LOG_DIR": jail.scratch(self)})
         rt.upstream.send = mock.Mock(side_effect=RuntimeError("invented"))
         with self.assertRaises((http.client.HTTPException, OSError)):
             fakes.request(port, "POST", "/v1/messages", ODD)
         self.assertEqual(rows(rt, "path", "status", "error_code", "error_head"), [
             {"path": "/v1/messages", "status": None, "error_code": "gateway_error", "error_head": "RuntimeError('invented')"}])
+        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "unexpected gateway failures must append an error level row")
+        with open(path) as source:
+            diagnostic, = [json.loads(line) for line in source]
+        self.assertEqual((diagnostic["plugin"], diagnostic["level"], diagnostic["event"], diagnostic["where"], diagnostic["detail"]),
+                         ("gpt-gateway", "error", "gateway-error", "gpt_gateway/proxy.py#proxy", {"error": "RuntimeError('invented')"}))
 
     def test_usage_is_read_off_a_messages_call_only(self):
         rt, port = fakes.start_gateway(self, self.up)
@@ -183,7 +188,7 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual(rows(rt, "path", "status", "input_tokens"), [{"path": "/v1/json", "status": 200, "input_tokens": None}])
 
     def test_answers_502_when_upstream_is_unreachable(self):
-        rt, port = fakes.start_gateway(self)
+        rt, port = fakes.start_gateway(self, env={"PLUGIN_LOG_DIR": jail.scratch(self)})
         resp, data = fakes.request(port, "POST", "/v1/messages", b"{}")
         body = json.loads(data)
         self.assertEqual((resp.status, body["type"]), (502, "error"))
@@ -191,6 +196,13 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"],
                            r.get("error_class"), r["reused"], r["stale"], r["attempts"]) for r in fakes.recorded(rt)],
                          [("POST", "/v1/messages", 502, "api_error", True, "connect", 0, 0, 1)])
+        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "upstream transport failures must append an error level row")
+        with open(path) as source:
+            diagnostic, = [json.loads(line) for line in source]
+        self.assertEqual((diagnostic["plugin"], diagnostic["level"], diagnostic["event"], diagnostic["where"], diagnostic["detail"]),
+                         ("gpt-gateway", "error", "upstream-failed", "gpt_gateway/proxy.py#exchange",
+                          {"error": body["error"]["message"][len("gpt-gateway: "):], "error_class": "connect"}))
 
     def test_a_header_sent_twice_goes_upstream_twice_in_order(self):
         rt, port = fakes.start_gateway(self, self.up)
