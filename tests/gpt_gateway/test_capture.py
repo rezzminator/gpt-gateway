@@ -3,6 +3,7 @@ import errno
 import http.client
 import json
 import os
+import stat
 import unittest
 from unittest import mock
 
@@ -67,13 +68,77 @@ class CaptureTest(unittest.TestCase):
                     self.assertNotIn(b"secret-token", f.read())
         self.assertNotIn("3-request.sent.body", os.listdir(os.path.join(self.cap, day, second)))
 
+    def test_capture_dirs_and_files_are_private_under_permissive_umask(self):
+        now = clock.now()
+        previous_umask = os.umask(0)
+        try:
+            for existing in (True, False):
+                with self.subTest(existing=existing):
+                    root = os.path.join(jail.scratch(self), "existing" if existing else "fresh")
+                    if existing:
+                        os.mkdir(root, 0o777)
+                        os.mkdir(os.path.join(root, clock.stamp("%Y-%m-%d", now)), 0o777)
+                    with mock.patch.object(clock, "now", return_value=now):
+                        exchange = capture.Capture(root, 1, "POST", "/v1/messages", {}, "main", lambda *a, **k: None)
+                    exchange.request_body(b"request")
+                    exchange.sent_body(b"sent")
+                    exchange.response(200, "OK", [])
+                    exchange.chunk(b"response")
+                    exchange.close()
+                    self.assertIsNotNone(exchange.dir)
+                    day = os.path.dirname(exchange.dir)
+                    for directory in (root, day, exchange.dir):
+                        self.assertEqual(stat.S_IMODE(os.stat(directory).st_mode), 0o700, directory)
+                    for name in (capture.REQUEST, capture.REQUEST_BODY, capture.SENT_BODY,
+                                 capture.RESPONSE, capture.RESPONSE_BODY):
+                        path = os.path.join(exchange.dir, name)
+                        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600, path)
+                    request_path = os.path.join(exchange.dir, capture.REQUEST_BODY)
+                    os.chmod(request_path, 0o666)
+                    exchange.request_body(b"replacement")
+                    self.assertEqual(stat.S_IMODE(os.stat(request_path).st_mode), 0o600, request_path)
+                    with open(request_path, "rb") as f:
+                        self.assertEqual(f.read(), b"replacement")
+        finally:
+            os.umask(previous_umask)
+
+    def test_a_symlinked_capture_root_is_used_without_changing_its_target(self):
+        base = jail.scratch(self)
+        target, root = os.path.join(base, "shared"), os.path.join(base, "capture")
+        os.mkdir(target)
+        os.chmod(target, 0o755)
+        os.symlink(target, root)
+        events = []
+        exchange = capture.Capture(root, 1, "POST", "/v1/messages", {}, "main", lambda *a, **k: events.append(a))
+        exchange.close()
+        self.assertEqual(events, [])
+        self.assertIsNotNone(exchange.dir)
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(exchange.dir)).st_mode), 0o700)
+
+    def test_capture_rejects_existing_symlink_without_touching_target(self):
+        root = os.path.join(jail.scratch(self), "private-capture")
+        events = []
+        exchange = capture.Capture(root, 1, "POST", "/v1/messages", {}, "main",
+                                   lambda name, **fields: events.append(name))
+        self.assertIsNotNone(exchange.dir)
+        target = os.path.join(jail.scratch(self), "other-file")
+        with open(target, "wb") as outside:
+            outside.write(b"keep this")
+        os.symlink(target, os.path.join(exchange.dir, capture.REQUEST_BODY))
+        exchange.request_body(b"private conversation")
+        with open(target, "rb") as outside:
+            self.assertEqual(outside.read(), b"keep this")
+        self.assertIsNone(exchange.dir)
+        self.assertIn("capture_error", events)
+
     def test_a_capture_that_cannot_write_is_recorded_and_the_request_goes_on(self):
         blocker = os.path.join(jail.scratch(self), "a-file")
         open(blocker, "w").close()
         rt, port = fakes.start_gateway(self, self.up, settings={"capture_dir": blocker})
         resp, _ = fakes.request(port, "POST", "/v1/messages", b'{"model":"m"}')
         self.assertEqual(resp.status, 200)
-        self.assertEqual([(e["request_id"], e["fields"]["error"].startswith("NotADirectoryError"))
+        self.assertEqual([(e["request_id"], e["fields"]["error"].startswith("FileExistsError"))
                           for e in fakes.events(rt, "capture_error")], [(1, True)])
 
 
@@ -89,10 +154,10 @@ class CaptureShortageTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def exchange(self, seq, **failing):
-        """One exchange, every step run, in which the named `os`/`open` call fails with EMFILE."""
+        """One exchange, every step run, in which the named `os` call fails with EMFILE."""
         short = OSError(errno.EMFILE, "Too many open files")
         with mock.patch("gpt_gateway.capture.os.makedirs", side_effect=short if "makedirs" in failing else os.makedirs), \
-                mock.patch("builtins.open", side_effect=short if "open" in failing else open):
+                mock.patch("gpt_gateway.capture.os.open", side_effect=short if "open" in failing else os.open):
             cap = capture.Capture(self.root, seq, "POST", "/v1/messages", {"x": "1"}, "main",
                                   lambda kind, **fields: self.events.append((kind, fields)))
             cap.request_body(b"{}")

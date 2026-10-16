@@ -4,12 +4,14 @@ import http.client
 from http.server import BaseHTTPRequestHandler
 import json
 import os
+import sqlite3
 import threading
 import time
 import unittest
 from unittest import mock
 
 from gpt_gateway import db
+from gpt_gateway.log import Log
 from tests import fakes, jail
 from tests.gpt_gateway.chatgpt import test_route as route_tests
 
@@ -26,6 +28,65 @@ def opened(test, path, **kw):
 
 
 class RowsTest(unittest.TestCase):
+    def test_database_diagnostic_sites_emit_their_declared_levels_and_events(self):
+        for event, level, function in (("queue-full-dropping", "error", "_put"),
+                                       ("db-rows-lost", "error", "_failed"),
+                                       ("close-after-error-failed", "error", "_discard"),
+                                       ("retention-unreadable", "warning", "_prune"),
+                                       ("close-failed", "error", "_run")):
+            with self.subTest(event=event):
+                home = jail.scratch(self)
+                with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+                    log = Log(os.path.join(home, "gw.log"))
+                store = db.Db(os.path.join(home, "gateway.db"), log.write, queue_size=1)
+                conn = mock.Mock()
+                conn.close.side_effect = sqlite3.OperationalError("close failed")
+                if event == "queue-full-dropping":
+                    store.event("first")
+                    store.event("lost")
+                elif event == "db-rows-lost":
+                    store._failed(2, RuntimeError("write failed"))
+                elif event == "close-after-error-failed":
+                    store._discard(conn)
+                elif event == "retention-unreadable":
+                    store.retention = mock.Mock(side_effect=RuntimeError("retention failed"))
+                    self.assertIsNone(store._prune(None))
+                else:
+                    store.queue.put_nowait(("stop", threading.Event()))
+                    with mock.patch.object(store, "_prune", return_value=conn):
+                        store._run()
+                filename = "warnings.jsonl" if level == "warning" else "errors.jsonl"
+                path = os.path.join(home, "gpt-gateway", filename)
+                self.assertTrue(os.path.isfile(path), "database diagnostic must also reach its level file")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["level"], row["event"], row["where"]),
+                                 (level, event, "gpt_gateway/db.py#" + function))
+                with open(log.path) as source:
+                    self.assertIn(row["msg"], source.read())
+
+    def test_writer_failure_records_level_row_and_existing_text(self):
+        home = jail.scratch(self)
+        text = os.path.join(home, "gw.log")
+        with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+            log = Log(text)
+        store = db.Db(os.path.join(home, "gateway.db"), log.write)
+        store.start()
+        self.addCleanup(store.close)
+        with mock.patch.object(store, "_write", side_effect=RuntimeError("boom")):
+            store.event("lost")
+            self.assertTrue(store.flush())
+        with open(text) as source:
+            self.assertIn("db error, rows are lost", source.read())
+        rows_path = os.path.join(home, "gpt-gateway", "errors.jsonl")
+        self.assertTrue(os.path.isfile(rows_path), "DB row loss must also reach errors.jsonl")
+        with open(rows_path) as source:
+            row, = [json.loads(line) for line in source]
+        self.assertEqual((row["level"], row["event"], row["where"]),
+                         ("error", "db-rows-lost", "gpt_gateway/db.py#_failed"))
+        self.assertIn("RuntimeError('boom')", row["msg"])
+        self.assertEqual(store.errors, 1)
+
     def setUp(self):
         self.path = os.path.join(jail.scratch(self), "state", "gateway.db")
 
@@ -152,6 +213,8 @@ class QueueTest(unittest.TestCase):
         self.addCleanup(store.close)
         self.assertTrue(store.flush())
         self.assertEqual((len(lines), store.drops, store.dropping), (1, 1, False))
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(self.path, "SELECT kind, fields FROM events")],
+                         [("a", {}), ("db_lost", {"drops": 1, "errors": 0})])  # the file itself says what it lacks
 
 
 class FailureTest(unittest.TestCase):
@@ -189,9 +252,87 @@ class WriterTest(unittest.TestCase):
             self.assertTrue(store.flush())
         store.event("kept")
         self.assertTrue(store.flush())
-        self.assertEqual([r["kind"] for r in db.query(path, "SELECT kind FROM events")], ["kept"])
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(path, "SELECT kind, fields FROM events")],
+                         [("kept", {}), ("db_lost", {"drops": 0, "errors": 1})])
+        store.event("later")
+        self.assertTrue(store.flush())
+        self.assertEqual(len(db.query(path, "SELECT 1 FROM events WHERE kind = 'db_lost'")), 1)  # one per loss
         self.assertEqual((store.errors, len(lines)), (1, 1))
         self.assertIn("RuntimeError('boom')", lines[0])
+
+    def test_a_db_lost_event_that_cannot_be_written_is_carried_by_the_next(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        store, _ = opened(self, path)
+        write = store._write
+
+        def refusing(conn, rows):
+            if any(table == "events" and value[1] == "db_lost" for table, value in rows):
+                raise RuntimeError("db_lost refused")
+            return write(conn, rows)
+        with mock.patch.object(store, "_write", side_effect=RuntimeError("boom")):
+            store.event("lost")
+            self.assertTrue(store.flush())
+        with mock.patch.object(store, "_write", side_effect=refusing):
+            store.event("kept")
+            self.assertTrue(store.flush())
+        store.event("later")
+        self.assertTrue(store.flush())
+        self.assertEqual([(r["kind"], json.loads(r["fields"])) for r in db.query(path, "SELECT kind, fields FROM events")],
+                         [("kept", {}), ("later", {}), ("db_lost", {"drops": 0, "errors": 2})])
+
+
+ADDED = ("error_class", "request_bytes")  # the requests columns a database made before them lacks
+
+
+class MigrationTest(unittest.TestCase):
+    def test_a_database_made_before_new_columns_gains_them_in_place_and_keeps_every_row(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        conn = sqlite3.connect(path)
+        conn.executescript(db.SCHEMA)
+        for name in ADDED:
+            if name in [c[1] for c in conn.execute("PRAGMA table_info(requests)")]:
+                conn.execute("ALTER TABLE requests DROP COLUMN %s" % name)
+        conn.executemany("INSERT INTO requests (started, pid, route, method, path, status) VALUES (?, 1, 'anthropic',"
+                         " 'POST', '/v1/messages', 200)", [(time.time() - n,) for n in range(5000)])  # inside the retention
+        conn.commit()
+        conn.close()
+        store, lines = opened(self, path)
+        store.request({"started": time.time(), "route": "anthropic", "method": "POST", "path": "/v1/messages",
+                       "status": 502, "error_class": "tls", "request_bytes": 12})
+        self.assertTrue(store.flush())
+        names = [c["name"] for c in db.query(path, "PRAGMA table_info(requests)")]
+        self.assertEqual([name for name in ADDED if name in names], list(ADDED))
+        self.assertEqual(names[-len(ADDED):], list(ADDED))  # appended, as a fresh database has them
+        self.assertEqual(db.query(path, "SELECT count(*) AS n, count(error_class) AS typed FROM requests"),
+                         [{"n": 5001, "typed": 1}])
+        self.assertEqual(db.query(path, "SELECT error_class, request_bytes FROM requests WHERE status = 502"),
+                         [{"error_class": "tls", "request_bytes": 12}])
+        self.assertEqual((store.errors, lines), (0, []))
+        store.close()
+        again, _ = opened(self, path)  # a second start finds nothing to add
+        again.event("start")
+        self.assertTrue(again.flush())
+        self.assertEqual(again.errors, 0)
+
+    def test_a_column_another_gateway_added_first_is_no_failure(self):
+        path = os.path.join(jail.scratch(self), "gateway.db")
+        store, _ = opened(self, path)
+        store.event("start")
+        self.assertTrue(store.flush())
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+
+        class Late:
+            """The listing this gateway read before the other one's ALTER TABLE: the new columns still missing."""
+
+            def execute(self, sql, *args):
+                rows = conn.execute(sql, *args)
+                return [r for r in rows if r[1] not in ADDED] if sql.startswith("PRAGMA table_info") else rows
+        try:
+            store._migrate(Late())
+        except sqlite3.OperationalError as error:
+            self.fail("a column the other gateway added first failed this one's start: %r" % error)
+        self.assertEqual([c[1] for c in conn.execute("PRAGMA table_info(requests)")][-len(ADDED):], list(ADDED))
 
 
 class RetentionTest(unittest.TestCase):
@@ -314,14 +455,14 @@ class EndToEndTest(unittest.TestCase):
         with mock.patch("gpt_gateway.chatgpt.errors.backoff", return_value=0):
             for body in (dict(claude, stream=True), dict(claude, stream=False), dict(gpt, stream=True),
                          dict(gpt, stream=False)):
-                resp, data = fakes.request(port, "POST", "/v1/messages", json.dumps(body).encode(), self.headers)
+                resp, data = fakes.request(port, "POST", "/" + self.route_secret + "/v1/messages", json.dumps(body).encode(), self.headers)
                 self.assertEqual((resp.status, SENTINEL.encode() in data), (200, True))
         names = ("route", "stream", "status", "model", "slug", "session_id", "input_tokens", "cache_read_tokens",
                  "cache_write_tokens", "output_tokens", "hit", "attempts", "transport", "completed")
         rows = [tuple(r[n] for n in names) for r in fakes.recorded(rt)]
         self.assertEqual(rows, [
-            ("anthropic", 1, 200, "claude-x", None, "s-1", 5110, 5000, 100, 7, 5000 / 5110, None, None, 1),
-            ("anthropic", 0, 200, "claude-x", None, "s-1", 5110, 5000, 100, 2, 5000 / 5110, None, None, 1),
+            ("anthropic", 1, 200, "claude-x", None, "s-1", 5110, 5000, 100, 7, 5000 / 5110, 1, None, 1),
+            ("anthropic", 0, 200, "claude-x", None, "s-1", 5110, 5000, 100, 2, 5000 / 5110, 1, None, 1),
             ("chatgpt", 1, 200, "gpt-test", "gpt-test", None, 100, 60, 0, 8, 0.6, 2, "http", 1),
             ("chatgpt", 0, 200, "gpt-test", "gpt-test", None, 100, 60, 0, 8, 0.6, 1, "http", 1)])
         retries = fakes.events(rt, "retry")

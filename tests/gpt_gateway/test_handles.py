@@ -2,6 +2,7 @@
 as that and recorded once per window, and a jailed gateway under a lowered limit that reaps what it holds."""
 import errno
 import http.client
+import json
 import os
 import re
 import resource
@@ -12,6 +13,7 @@ import unittest
 from unittest import mock
 
 from gpt_gateway import handles
+from gpt_gateway.log import Log
 from tests import fakes, jail
 
 INFINITY = resource.RLIM_INFINITY
@@ -19,6 +21,26 @@ FDS = re.compile(rb" fds=(\d+)/(\d+) ")
 
 
 class LimitTest(unittest.TestCase):
+    def test_limit_changes_and_refusals_emit_classified_rows(self):
+        for refusal, level, event, result in ((None, "info", "fd-limit-raised", handles.TARGET),
+                                             (ValueError("not permitted"), "warning", "fd-limit-unraised", 256)):
+            with self.subTest(event=event):
+                home = jail.scratch(self)
+                with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+                    log = Log(os.path.join(home, "gw.log"))
+                with mock.patch.object(handles.resource, "getrlimit", return_value=(256, INFINITY)), \
+                        mock.patch.object(handles.resource, "setrlimit", side_effect=refusal):
+                    self.assertEqual(handles.raise_limit(lambda *args, **kwargs: None, log.write), result)
+                name = "info.jsonl" if level == "info" else "warnings.jsonl"
+                path = os.path.join(home, "gpt-gateway", name)
+                self.assertTrue(os.path.isfile(path), "descriptor diagnostic must also reach its level file")
+                with open(path) as source:
+                    row, = [json.loads(line) for line in source]
+                self.assertEqual((row["level"], row["event"], row["where"]),
+                                 (level, event, "gpt_gateway/handles.py#raise_limit"))
+                with open(log.path) as source:
+                    self.assertIn(row["msg"], source.read())
+
     def raise_from(self, soft, hard, refuse=None):
         events, lines = [], []
         with mock.patch.object(handles.resource, "getrlimit", return_value=(soft, hard)), \

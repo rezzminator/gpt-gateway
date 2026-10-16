@@ -66,6 +66,7 @@ class Upstream(BaseHTTPRequestHandler):
         else:
             self.send_response(429)
             self.send_header("content-type", "application/json")
+            self.send_header("request-id", "req_limited")
             self.send_header("retry-after", "3")
             self.send_header("anthropic-ratelimit-requests-remaining", "0")
             self.send_header("content-length", str(len(ERROR_BODY)))

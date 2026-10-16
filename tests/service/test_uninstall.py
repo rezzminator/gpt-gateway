@@ -1,9 +1,9 @@
-"""Tests for launchd/uninstall.sh, with a scratch HOME and the stub launchctl."""
+"""Tests for service/uninstall.sh, with a scratch HOME and the stub launchctl."""
 import json
 import os
 import unittest
 
-from tests.launchd.stub import Host
+from tests.service.stub import Host
 
 
 class UninstallTest(unittest.TestCase):
@@ -35,6 +35,35 @@ class UninstallTest(unittest.TestCase):
             self.assertEqual(json.load(f), {"capture_dir": None, "middleware": [{"module": "status_label"}]})
         self.assertTrue(any(d.startswith("settings.json.pre-uninstall-") for d in os.listdir(backups)))
         self.assertTrue(os.path.exists(os.path.join(logs, "gpt-gateway.log")))
+
+    def test_the_link_with_the_route_secret_is_removed_and_the_secret_goes_with_the_copy(self):
+        h, _ = self.installed()
+        with open(os.path.join(h.dest, "route-secret")) as source:
+            link = "http://127.0.0.1:%d/%s" % (h.port, source.read().strip())
+        h.write_claude({"env": {"KEEP": "1", "ENABLE_TOOL_SEARCH": "true", "ANTHROPIC_BASE_URL": link}})
+        code, out = h.run("uninstall.sh")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
+        self.assertFalse(os.path.exists(h.dest))
+
+    def test_a_stale_secret_link_on_this_port_is_removed(self):
+        # Only this gateway listens on its port: a link holding an earlier install's secret is its own, and kept it
+        # would send Claude Code's every request to a gateway that no longer strips it.
+        h, _ = self.installed()
+        stale = "http://127.0.0.1:%d/%s" % (h.port, "d" * 64)
+        h.write_claude({"env": {"ANTHROPIC_BASE_URL": stale}})
+        code, out = h.run("uninstall.sh")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(h.read_claude()["env"], {})
+
+    def test_an_unreadable_route_secret_stops_the_uninstall_and_says_so(self):
+        h, _ = self.installed()
+        with open(os.path.join(h.dest, "route-secret"), "w") as target:
+            target.write("not hex\n")
+        code, out = h.run("uninstall.sh")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("cannot read the route secret", out)
+        self.assertTrue(os.path.isdir(h.dest))
 
     def test_a_tool_search_value_the_user_chose_stays(self):
         h, _ = self.installed()

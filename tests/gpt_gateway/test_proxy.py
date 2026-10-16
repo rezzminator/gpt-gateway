@@ -6,11 +6,16 @@ import json
 import os
 import socket
 import struct
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
+from unittest import mock
 
+from gpt_gateway import clock
 from tests import fakes, jail
-from tests.fakes import ERROR_BODY, JSON_BODY, RECORDER, SSE_BODY, Upstream, calls
+from tests.gpt_gateway.chatgpt import test_route as route_tests
+from tests.fakes import ERROR_BODY, JSON_BODY, RECORDER, SSE_BODY, SSE_EVENTS, Upstream, calls
 
 ODD = b'{"model":  "claude-x", "stream": true,\n "messages": [{"role": "user", "content": "hi"}]}'
 EDIT = 'NAME = "edit"\ndef on_request(ctx, req):\n    req.body["added"] = 1\n    req.mark_changed()\n'
@@ -29,6 +34,43 @@ ROW = ("method", "path", "status", "kind", "route", "model", "stream", "complete
 def rows(rt, *names):
     """The request rows, each cut to `names` (default ROW)."""
     return [{k: r[k] for k in names or ROW} for r in fakes.recorded(rt)]
+
+
+class Bare(BaseHTTPRequestHandler):
+    """Answers 404 with no body, no request id and no rate-limit header."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(404)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+
+class Resetting(BaseHTTPRequestHandler):
+    """Streams the first event, then resets the connection (RST, no FIN) once the client has it (`relayed`)."""
+
+    protocol_version = "HTTP/1.1"
+    relayed = threading.Event()
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("transfer-encoding", "chunked")
+        self.end_headers()
+        self.wfile.write(b"%x\r\n%s\r\n" % (len(SSE_EVENTS[0]), SSE_EVENTS[0]))
+        self.wfile.flush()
+        Resetting.relayed.wait(10)  # the gateway read the event and waits on the next
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.connection.close()
+        self.close_connection = True
 
 
 def ended(module, n):
@@ -68,16 +110,77 @@ class PassthroughTest(unittest.TestCase):
             {"method": "GET", "path": "/v1/models", "status": 429, "kind": "main", "error_code": "rate_limit_error",
              "error_head": ERROR_BODY.decode()}])
         self.assertEqual([e["fields"] for e in fakes.events(rt, "error_detail")],
-                         [{"ratelimit": {"retry-after": "3", "requests-remaining": "0"}}])
+                         [{"upstream_request_id": "req_limited",
+                           "ratelimit": {"retry-after": "3", "requests-remaining": "0"}}])
+
+    def test_an_error_reply_with_no_context_records_no_empty_detail(self):
+        rt, port = fakes.start_gateway(self, fakes.start_upstream(self, Bare))
+        self.assertEqual(fakes.request(port, "GET", "/")[0].status, 404)
+        self.assertEqual(rows(rt, "path", "status"), [{"path": "/", "status": 404}])
+        self.assertEqual(fakes.events(rt, "error_detail"), [])
+
+    def kept(self, port):
+        """A client connection Claude Code's way: kept alive, so its upstream connection stays with it."""
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(conn.close)
+        return conn
+
+    def ask(self, conn, method, path, body=None):
+        conn.request(method, path, body=body)
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status
+
+    def test_an_anthropic_row_carries_its_transport(self):
+        rt, port = fakes.start_gateway(self, self.up)
+        client = self.kept(port)
+        for _ in range(2):
+            self.assertEqual(self.ask(client, "POST", "/v1/json", b'{"model":"m"}'), 200)
+        recorded = fakes.recorded(rt)
+        self.assertEqual([(r["reused"], r["stale"], r["attempts"]) for r in recorded], [(0, 0, 1), (1, 0, 1)])
+        self.assertEqual([(r.get("request_bytes"), r.get("error_class")) for r in recorded], [(13, None)] * 2)
+
+    def test_an_upstream_that_resets_mid_stream_is_its_failure_never_the_client_leaving(self):
+        Resetting.relayed.clear()
+        rt, port = fakes.start_gateway(self, fakes.start_upstream(self, Resetting))
+        client = self.kept(port)
+        client.request("POST", "/v1/messages", body=b'{"model":"m","stream":true}')
+        resp, got = client.getresponse(), b""
+        while len(got) < len(SSE_EVENTS[0]):
+            got += resp.read1(65536) or self.fail("the stream ended before its first event: %r" % got)
+        Resetting.relayed.set()
+        with self.assertRaises((http.client.HTTPException, OSError)):
+            resp.read()
+        (row,) = fakes.recorded(rt)
+        self.assertEqual((row["status"], row["completed"], row["client_disconnected"], row["error_code"]),
+                         (200, 0, 0, "stream_error"))
+        self.assertEqual((row.get("error_class"), row["error_head"].startswith("ConnectionResetError")), ("reset", True))
+
+    def test_a_host_pause_is_recorded_and_closes_the_idle_upstream_connections(self):
+        rt, port = fakes.start_gateway(self, self.up)
+        client = self.kept(port)
+        self.assertEqual(self.ask(client, "POST", "/v1/json", b"{}"), 200)
+        self.assertEqual(len(rt.upstream.pool.idle), 1)
+        slept = clock.slept
+        with mock.patch.object(clock, "slept", lambda: slept() + 3600):  # the host slept an hour
+            self.assertEqual(self.ask(client, "GET", "/__gateway/health"), 200)
+        resumed = [e["fields"]["gap_s"] for e in fakes.events(rt, "host_resumed")]
+        self.assertEqual([gap >= 3599 for gap in resumed], [True])
+        self.assertEqual(rt.upstream.pool.idle, [])
 
     def test_a_request_whose_exchange_breaks_still_gets_its_row(self):
-        from unittest import mock
-        rt, port = fakes.start_gateway(self, self.up)
+        rt, port = fakes.start_gateway(self, self.up, env={"PLUGIN_LOG_DIR": jail.scratch(self)})
         rt.upstream.send = mock.Mock(side_effect=RuntimeError("invented"))
         with self.assertRaises((http.client.HTTPException, OSError)):
             fakes.request(port, "POST", "/v1/messages", ODD)
         self.assertEqual(rows(rt, "path", "status", "error_code", "error_head"), [
             {"path": "/v1/messages", "status": None, "error_code": "gateway_error", "error_head": "RuntimeError('invented')"}])
+        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "unexpected gateway failures must append an error level row")
+        with open(path) as source:
+            diagnostic, = [json.loads(line) for line in source]
+        self.assertEqual((diagnostic["plugin"], diagnostic["level"], diagnostic["event"], diagnostic["where"], diagnostic["detail"]),
+                         ("gpt-gateway", "error", "gateway-error", "gpt_gateway/proxy.py#proxy", {"error": "RuntimeError('invented')"}))
 
     def test_usage_is_read_off_a_messages_call_only(self):
         rt, port = fakes.start_gateway(self, self.up)
@@ -85,13 +188,21 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual(rows(rt, "path", "status", "input_tokens"), [{"path": "/v1/json", "status": 200, "input_tokens": None}])
 
     def test_answers_502_when_upstream_is_unreachable(self):
-        rt, port = fakes.start_gateway(self)
+        rt, port = fakes.start_gateway(self, env={"PLUGIN_LOG_DIR": jail.scratch(self)})
         resp, data = fakes.request(port, "POST", "/v1/messages", b"{}")
         body = json.loads(data)
         self.assertEqual((resp.status, body["type"]), (502, "error"))
         self.assertTrue(body["error"]["message"].startswith("gpt-gateway: upstream unreachable"))
-        self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"])
-                          for r in fakes.recorded(rt)], [("POST", "/v1/messages", 502, "api_error", True)])
+        self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"],
+                           r.get("error_class"), r["reused"], r["stale"], r["attempts"]) for r in fakes.recorded(rt)],
+                         [("POST", "/v1/messages", 502, "api_error", True, "connect", 0, 0, 1)])
+        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "upstream transport failures must append an error level row")
+        with open(path) as source:
+            diagnostic, = [json.loads(line) for line in source]
+        self.assertEqual((diagnostic["plugin"], diagnostic["level"], diagnostic["event"], diagnostic["where"], diagnostic["detail"]),
+                         ("gpt-gateway", "error", "upstream-failed", "gpt_gateway/proxy.py#exchange",
+                          {"error": body["error"]["message"][len("gpt-gateway: "):], "error_class": "connect"}))
 
     def test_a_header_sent_twice_goes_upstream_twice_in_order(self):
         rt, port = fakes.start_gateway(self, self.up)
@@ -292,7 +403,9 @@ class AnswerExchangeTest(unittest.TestCase):
         auth = os.path.join(home, "auth.json")
         jail.write_json(auth, dict(access_token="fixture.%s.signature" % claims, refresh_token="refresh-invented",
                                    id_token="id-invented", account_id="account-invented", last_refresh=clock.now()))
+        secret = jail.write_secret(os.path.join(home, "route-secret"), "a" * 64)
         env = jail.clean_env(home, GPT_GATEWAY_CHATGPT="1", GPT_GATEWAY_CHATGPT_AUTH_STORE="file",
+                             GPT_GATEWAY_ROUTE_SECRET_PATH=secret,
                              GPT_GATEWAY_CHATGPT_TRANSPORT="http", GPT_GATEWAY_CHATGPT_AUTH_PATH=auth,
                              GPT_GATEWAY_CHATGPT_ORIGIN=origin, GPT_GATEWAY_CHATGPT_AUTH_ORIGIN=origin,
                              GPT_GATEWAY_CHATGPT_MODELS_PATH=os.path.join(home, "models.json"))
@@ -429,6 +542,58 @@ class ClaudeRouteTimingTest(unittest.TestCase):
         self.assertEqual(fakes.request(port, "POST", "/v1/json", b'{"model":"m"}')[0].status, 502)
         (row,) = fakes.recorded(rt)
         self.assertEqual((row["ttfb_ms"], row["upstream_ms"]), (None, None))
+
+
+class RouteGateTest(unittest.TestCase):
+    """The proxy's gate on the ChatGPT route, through a served gateway with the route's fixtures."""
+    setUp = route_tests.RouteTest.setUp
+    jwt = route_tests.RouteTest.jwt
+    gateway = route_tests.RouteTest.gateway
+    send = route_tests.RouteTest.send
+    responses = route_tests.RouteTest.responses
+
+    def test_gpt_route_requires_install_secret(self):
+        _, port = self.gateway()
+        unsigned = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), self.headers)
+        self.assertEqual((unsigned[0].status, json.loads(unsigned[1])["error"]["message"],
+                          unsigned[0].getheader("x-should-retry")),
+                         (403, "chatgpt upstream: local client authentication required", "false"))
+        anonymous = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), {})
+        self.assertEqual(anonymous[0].status, 400)  # the sub-agent rule answers first
+        self.assertEqual((len(self.responses()), self.send(port)[0].status), (0, 200))
+
+    def test_an_image_turn_teaches_the_text_ratio_without_the_attachment_allowance(self):
+        rt, port = self.gateway()
+        image = dict(type="image", source=dict(type="base64", media_type="image/png", data="invented"))
+        self.body["messages"].append(dict(role="user", content=[image]))
+        self.assertEqual(self.send(port)[0].status, 200)
+        self.assertEqual([r["input_tokens"] for r in fakes.gpt_rows(rt)], [100])  # the upstream's total, image included
+        resp, data = self.send(port, path="/v1/messages/count_tokens")
+        # 100 total is under the allowance, so the turn teaches nothing: the text keeps the prior 0.25 ratio
+        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2154))
+
+
+class RouteSecretStripTest(unittest.TestCase):
+    def test_the_secret_segment_is_stripped_whatever_follows_it(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from gpt_gateway import proxy
+        secret = "a" * 64
+        for path, stripped, authorized in (("/%s/v1/messages" % secret, "/v1/messages", True),
+                                           ("/" + secret, "/", True), ("/%s?x=1" % secret, "/?x=1", True),
+                                           ("/%sb/v1" % secret, "/%sb/v1" % secret, False),
+                                           ("/v1/messages", "/v1/messages", False)):
+            with self.subTest(path=path):
+                handler = object.__new__(proxy.Handler)
+                handler.connection = mock.Mock()
+                handler.server = SimpleNamespace(runtime=SimpleNamespace(
+                    drain=mock.Mock(), settings=mock.Mock(), route_secret=secret,
+                    pause=mock.Mock(check=mock.Mock(return_value=False))))
+                handler.path = path
+                handler.proxy = mock.Mock()
+                handler.handle_any()
+                self.assertEqual(handler.path, stripped)
+                self.assertEqual(handler.proxy.call_args[0][2], authorized)
 
 
 if __name__ == "__main__":

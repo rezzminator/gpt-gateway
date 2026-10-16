@@ -1,6 +1,7 @@
 """Tests for gpt_gateway.server: real gateway processes; SIGTERM lets in-flight streams finish while a
 successor takes the port, and the drain gives up at its limit."""
 import errno
+import fcntl
 import http.client
 import json
 import os
@@ -11,15 +12,47 @@ import subprocess
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 
 from unittest import mock
 
-from gpt_gateway import clock, db, handles, proxy
+from gpt_gateway import cli, clock, db, handles, proxy
 from gpt_gateway.server import Drain, Server
+from gpt_gateway.log import Log
 from tests import fakes, jail
 
 
 class DrainTest(unittest.TestCase):
+    def test_accept_registers_the_connection_before_a_handler_can_run(self):
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            runtime = SimpleNamespace(env=SimpleNamespace(), drain=Drain())
+        server = Server(('127.0.0.1', jail.free_port()), runtime)
+        self.addCleanup(server.server_close)
+        client = socket.create_connection(server.server_address, timeout=2)
+        self.addCleanup(client.close)
+        accepted, _ = server.get_request()
+        self.addCleanup(accepted.close)
+        self.assertIn(accepted, runtime.drain.pending)
+
+    def test_a_server_adopts_an_inherited_listening_descriptor_and_refuses_any_other(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(5)
+        address = listener.getsockname()
+        descriptor = os.dup(listener.fileno())
+        runtime = SimpleNamespace(env=SimpleNamespace(listener_fd=descriptor), drain=Drain())
+        server = Server(address, runtime)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_address, address)
+        client = socket.create_connection(address, timeout=2)
+        self.addCleanup(client.close)
+        accepted, _ = server.get_request()
+        accepted.close()
+        connected = os.dup(client.fileno())
+        with self.assertRaisesRegex(OSError, 'not the configured listener'):
+            Server(address, SimpleNamespace(env=SimpleNamespace(listener_fd=connected), drain=Drain()))
+
     def setUp(self):
         self.tmp = jail.scratch(self)
         self.app = jail.stage_install(os.path.join(self.tmp, "app"))
@@ -87,8 +120,10 @@ class DrainTest(unittest.TestCase):
         self.assertIn("stop: drained, exiting", self.logged())
         self.assertEqual([(r["pid"], json.loads(r["fields"])["left"]) for r in self.recorded(
             "SELECT pid, fields FROM events WHERE kind = 'stop'")], [(old.pid, 0)])
-        self.assertEqual(sorted(r["pid"] for r in self.recorded("SELECT pid FROM events WHERE kind = 'start'")),
-                         sorted([old.pid, new.pid]))
+        build = cli.build(os.path.join(self.app, "gpt_gateway"))
+        self.assertEqual(sorted((r["pid"], json.loads(r["fields"]).get("build")) for r in self.recorded(
+            "SELECT pid, fields FROM events WHERE kind = 'start'")), sorted([(old.pid, build), (new.pid, build)]))
+        self.assertRegex(str(build), "^[0-9a-f]{12}$")  # each start names the code it runs
         self.assertIn({"pid": old.pid, "completed": 1}, self.recorded("SELECT pid, completed FROM requests"))
 
     def test_drain_gives_up_at_its_limit(self):
@@ -108,6 +143,152 @@ class DrainTest(unittest.TestCase):
 
 
 class DrainStateTest(unittest.TestCase):
+    def test_drain_states_emit_classified_rows_and_keep_their_result(self):
+        cases = (("empty", 0, {"info": ["draining", "drained"]}),
+                 ("busy", 1, {"info": ["draining"], "warning": ["in-flight-exit"]}),
+                 ("idle-error", 0, {"info": ["draining", "drained"], "warning": ["idle-shutdown-failed"]}))
+        for state, result, expected in cases:
+            with self.subTest(state=state):
+                home = jail.scratch(self)
+                with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+                    log = Log(os.path.join(home, "gw.log"))
+                drain = Drain()
+                if state == "busy":
+                    drain.inflight = 1
+                elif state == "idle-error":
+                    conn = mock.Mock()
+                    conn.shutdown.side_effect = OSError(errno.EBADF, "bad descriptor")
+                    drain.connected(conn)
+                    drain.begin(conn)
+                    drain.end(conn)
+                self.assertEqual(drain.wait(0, log.write), result)
+                for level, events in expected.items():
+                    name = "info.jsonl" if level == "info" else "warnings.jsonl"
+                    path = os.path.join(home, "gpt-gateway", name)
+                    self.assertTrue(os.path.isfile(path), "drain diagnostic must also reach its level file")
+                    with open(path) as source:
+                        rows = [json.loads(line) for line in source]
+                    self.assertEqual([(r["level"], r["event"], r["where"]) for r in rows],
+                                     [(level, event, "gpt_gateway/server.py#Drain.wait") for event in events])
+                    with open(log.path) as source:
+                        text = source.read()
+                    for row in rows:
+                        self.assertIn(row["msg"], text)
+
+    def test_unfinished_database_writer_emits_error_without_changing_exit_status(self):
+        from gpt_gateway import server
+        home = jail.scratch(self)
+        with mock.patch("gpt_gateway.env.snapshot", return_value={"HOME": home, "PLUGIN_LOG_DIR": home}):
+            log = Log(os.path.join(home, "gw.log"))
+        runtime = SimpleNamespace(log=log, env=SimpleNamespace(drain_seconds=0), drain=mock.Mock(),
+                                  db=mock.Mock(), chatgpt=None)
+        runtime.drain.wait.return_value = 0
+        runtime.db.close.return_value = False
+        with mock.patch.object(server.signal, "signal"):
+            self.assertEqual(server.serve(runtime, mock.Mock()), 0)
+        path = os.path.join(home, "gpt-gateway", "errors.jsonl")
+        self.assertTrue(os.path.isfile(path), "unfinished writer must also reach errors.jsonl")
+        with open(path) as source:
+            row, = [json.loads(line) for line in source]
+        self.assertEqual((row["level"], row["event"], row["where"]),
+                         ("error", "writer-unfinished-rows-lost", "gpt_gateway/server.py#serve"))
+        with open(log.path) as source:
+            self.assertIn(row["msg"], source.read())
+
+    def test_a_pending_request_above_the_select_descriptor_limit_is_preserved(self):
+        jail.raise_open_files(self, 1100)
+        client, original = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(original.close)
+        accepted = socket.socket(fileno=fcntl.fcntl(original.fileno(), fcntl.F_DUPFD, 1025))
+        self.addCleanup(accepted.close)
+        client.sendall(b'G')
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 1, 'readiness lost a valid high descriptor')
+
+    def test_a_first_request_byte_already_read_is_not_treated_as_a_silent_client(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = socket.SocketIO.readinto
+        rt, port = fakes.start_gateway(self)
+        rt.drain.preserve_pending = True  # the Linux drain these two tests exercise; macOS closes pending clients
+        def paused(reader, buffer):
+            count = original(reader, buffer)
+            if count and reader._sock.getsockname()[1] == port and not entered.is_set():
+                entered.set()
+                release.wait(5)
+            return count
+        with mock.patch.object(socket.SocketIO, 'readinto', new=paused):
+            client = socket.create_connection(('127.0.0.1', port), timeout=3)
+            self.addCleanup(client.close)
+            client.sendall(b'G')
+            try:
+                self.assertTrue(entered.wait(3), 'the first byte was not read')
+                rt.drain.stopping.set()
+                self.assertEqual(rt.drain.wait(0, lambda line: None), 1,
+                                 'request data consumed before a complete line was forgotten')
+                client.sendall(b'ET /__gateway/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n')
+                release.set()
+                reply = http.client.HTTPResponse(client)
+                reply.begin()
+                self.assertEqual(reply.status, 200)
+                self.assertTrue(reply.read().startswith(b'ok pid='))
+            finally:
+                release.set()
+
+    def test_a_request_line_already_read_keeps_its_connection_while_headers_arrive(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = http.client.parse_headers
+        def paused(stream, *args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                release.wait(5)
+            return original(stream, *args, **kwargs)
+        with mock.patch.object(http.client, 'parse_headers', side_effect=paused):
+            rt, port = fakes.start_gateway(self)
+            rt.drain.preserve_pending = True  # the Linux drain this test exercises; macOS closes pending clients
+            client = socket.create_connection(('127.0.0.1', port), timeout=3)
+            self.addCleanup(client.close)
+            client.sendall(b'GET /__gateway/health HTTP/1.1\r\n')
+            try:
+                self.assertTrue(entered.wait(3), 'the request line was not read')
+                rt.drain.stopping.set()
+                self.assertEqual(rt.drain.wait(0, lambda line: None), 1,
+                                 'a partially received request was mistaken for a silent client')
+                client.sendall(b'Host: localhost\r\nConnection: close\r\n\r\n')
+                release.set()
+                reply = http.client.HTTPResponse(client)
+                reply.begin()
+                self.assertEqual(reply.status, 200)
+                self.assertTrue(reply.read().startswith(b'ok pid='))
+            finally:
+                release.set()
+
+    def test_a_silent_accepted_client_does_not_hold_the_linux_drain(self):
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 0, 'a silent client was counted as a request')
+        client.settimeout(1)
+        self.assertEqual(client.recv(1), b'', 'the idle client was not closed')
+
+    def test_an_accepted_request_already_on_the_wire_survives_the_linux_drain(self):
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        client.sendall(b'GET /')
+        with mock.patch('gpt_gateway.server.sys.platform', 'linux'):
+            drain = Drain()
+        drain.connected(accepted)
+        self.assertEqual(drain.wait(0, lambda line: None), 1)
+        self.assertEqual(accepted.recv(5), b'GET /')
+
     def test_an_idle_gateway_drains_at_once(self):
         lines = []
         d = Drain()
@@ -129,8 +310,11 @@ class DrainStateTest(unittest.TestCase):
                 raise OSError(self.code, os.strerror(self.code))
         lines = []
         d = Drain()
-        d.connected(Conn(errno.ENOTCONN))
-        d.connected(Conn(errno.EBADF))
+        for code in (errno.ENOTCONN, errno.EBADF):
+            connection = Conn(code)
+            d.connected(connection)
+            d.begin(connection)
+            d.end(connection)
         self.assertEqual(d.wait(0, lines.append), 0)
         failed = [line for line in lines if "shutdown" in line]
         self.assertEqual(len(failed), 1, lines)
@@ -255,6 +439,11 @@ class AcceptBackoffTest(unittest.TestCase):
 
     def setUp(self):
         handles.THROTTLE.clear()
+
+    def test_a_shared_queue_consumed_by_the_successor_is_not_an_accept_failure(self):
+        waits, seen, events = self.accepts([BlockingIOError(errno.EAGAIN, 'queue consumed')])
+        self.assertEqual((waits, events), ([], []))
+        self.assertEqual(seen, [None])
 
     def accepts(self, outcomes, failures=0):
         """The waits and the events of a listener whose accepts end as `outcomes`, after `failures` in a row: an error is

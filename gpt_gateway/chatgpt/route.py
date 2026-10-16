@@ -11,6 +11,7 @@ import threading
 from typing import Optional
 
 from .. import clock, db
+from ..reach import error_class
 from ..response import Response
 from ..upstream import UpstreamError, is_stale
 from . import auth, errors, estimate, lane, request, signature, stream, turn
@@ -19,9 +20,11 @@ from .client import Client
 from .response import Reader
 
 
-def route_error(status, kind, message, headers=None):
-    return Response.json(status, {"type": "error", "error": {
-        "type": kind, "message": "chatgpt upstream: " + message}}, headers)
+def route_error(status, kind, message, headers=None, error_code=None):
+    error = {"type": kind, "message": "chatgpt upstream: " + message}
+    if error_code:
+        error["details"] = {"error_code": error_code}
+    return Response.json(status, {"type": "error", "error": error}, headers)
 
 
 def login_required(message="ChatGPT login required: run codex login, or gateway.py chatgpt-login"):
@@ -29,12 +32,20 @@ def login_required(message="ChatGPT login required: run codex login, or gateway.
                        {"x-should-retry": "false"})
 
 
-def decide(catalog, method, path, body, headers):
+def decide(catalog, method, path, body, headers, authorized=False):
     """(route, Model or None, answer or None); only candidates touch the catalog."""
     model = body.get("model") if body is not None else None
     if (method != "POST" or path.split("?", 1)[0] not in ("/v1/messages", "/v1/messages/count_tokens")
             or not isinstance(model, str) or model.startswith("claude-")):
         return "anthropic", None, None  # no model id to route on: Anthropic validates the body, as before
+    if not headers.get("x-claude-code-agent-id"):
+        return "chatgpt", None, route_error(400, "invalid_request_error", "GPT models run as sub-agents only")
+    if not authorized:  # the install's credential rides the base URL; a client without it never spends the subscription
+        return "chatgpt", None, route_error(403, "permission_error", "local client authentication required",
+                                            {"x-should-retry": "false"})
+    if "thread" in body:  # message threads (Claude Code 2.1.300): a continue carries only the new messages, the Responses route needs them all
+        return "chatgpt", None, route_error(400, "invalid_request_error", "message threads are not supported",
+                                            error_code="thread_unsupported_request")
     slug = model
     if slug.endswith("[1m]"):
         slug = slug[:-4]
@@ -49,8 +60,6 @@ def decide(catalog, method, path, body, headers):
     if slug not in models:
         return "chatgpt", None, route_error(400, "invalid_request_error",
                'unknown model "%s"; the ChatGPT catalog has: %s' % (model, ", ".join(models)))
-    if not headers.get("x-claude-code-agent-id"):
-        return "chatgpt", None, route_error(400, "invalid_request_error", "GPT models run as sub-agents only")
     return "chatgpt", models[slug], None
 
 
@@ -127,8 +136,8 @@ class Route:
         self.retention_settings = None  # the settings snapshot the last exchange ran under
         self.retention_rejected = False  # the backend refused it: no exchange sends it until the settings change
 
-    def decide(self, method, path, body, headers):
-        return decide(self.catalog, method, path, body, headers)
+    def decide(self, method, path, body, headers, authorized=False):
+        return decide(self.catalog, method, path, body, headers, authorized)
 
     def retention_sends(self, settings):
         """The cache retention to send under the settings snapshot `settings`: None when off or refused. Any change of
@@ -165,9 +174,13 @@ class Route:
                 self.lanes[key] = Lane()
             return self.lanes[key]
 
-    def _attempt_event(self, row, key, slug, status, attempt, action, head, credentials=None, delay=None):
+    def _attempt_event(self, row, key, slug, status, attempt, action, head, credentials=None, delay=None, failure=None):
         """A failed attempt as a `retry` event, or the last one as `final_error`: at most 300 bytes of its error,
-        secrets redacted."""
+        secrets redacted. `failure`: the exception of a transport failure, whose class the event and, when final, the
+        row carry."""
+        named = {} if failure is None else {"error_class": error_class(failure)}
+        if action == "final":
+            row.update(named)
         if not isinstance(head, bytes):
             head = json.dumps(head, ensure_ascii=False).encode()
         if credentials is not None:
@@ -175,21 +188,21 @@ class Route:
                 head = head.replace(secret.encode(), b"[redacted]")
         self.event("final_error" if action == "final" else "retry", request_id=row.get("request_id"), lane=key,
                    slug=slug, status=status, attempt=attempt, action=action, retry_after=delay,
-                   error_head=head[:300].decode("utf-8", "replace"))
+                   error_head=head[:300].decode("utf-8", "replace"), **named)
 
     def _terminal(self, key, model, translation, translator, estimator, attempt, status, reader, credentials, measure,
-                  row, ended=None):
+                  row, ended=None, attachments=0):
         """The answering attempt's fields into the request row. `ended`: when the client had the last byte, the
         stream's end before the reader's join; now when None."""
         if translator.error is not None:
             self._attempt_event(row, key, model.slug, "transport" if reader.transport_error else status,
                                 attempt, "final", translator.failure or reader.error_head, credentials,
-                                translator.error.delay)
+                                translator.error.delay, reader.transport_exception)
         row["attempts"] = attempt
         if translator.usage is not None:
             if translator.terminal == "response.completed":
                 with self.lock:
-                    estimator.observe(translation.estimate_chars, translator.input_tokens)
+                    estimator.observe(translation.estimate_chars, translator.input_tokens, attachments)
             row.update(
                 input_tokens=translator.input_tokens, cache_read_tokens=translator.usage["cache_read_input_tokens"],
                 cache_write_tokens=translator.usage["cache_creation_input_tokens"],
@@ -224,8 +237,9 @@ class Route:
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
+        attachments = attachment_count(body)
         with self.lock:
-            estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
+            estimated = estimator.estimate(translation.estimate_chars, attachments)
         if path.split("?", 1)[0] == "/v1/messages/count_tokens":
             return Response.json(200, {"input_tokens": estimated})
         with self.lock:
@@ -238,7 +252,7 @@ class Route:
         while True:
             attempt += 1
             translator = stream.Translator(model.slug, translation.tool_names, estimated)
-            reader = None
+            reader = failure = None
             try:
                 credentials = credentials or self.store.credentials()
                 measure.sent_at = clock.monotonic()
@@ -250,7 +264,8 @@ class Route:
                     with self.lock:
                         if state.turn_state.observe(where, issued):
                             measure.turn = "issued"
-                response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK)
+                response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK,
+                                                 row.get("request_id"))
                 reused, retried, measure.transport, measure.delta = self.client.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
@@ -268,18 +283,19 @@ class Route:
                         if body.get("stream"):
                             reader.on_end = lambda: self._terminal(key, model, translation, translator,
                                                                   estimator, attempt, 200, reader, credentials, measure,
-                                                                  row, reader.ended_at)
+                                                                  row, reader.ended_at, attachments)
                             return Response(200, first, reader=reader)
                         data = stream.accumulate(first + Response(200, reader=reader).read())
                         code = 502 if data.get("type") == "error" else 200
                         self._terminal(key, model, translation, translator, estimator, attempt, code, reader,
-                                       credentials, measure, row)
+                                       credentials, measure, row, attachments=attachments)
                         return Response.json(code, data)
                     decision, head = translator.error, translator.failure or reader.error_head
                     if reader.transport_error:
-                        status = "transport"
+                        status, failure = "transport", reader.transport_exception
             except (UpstreamError, OSError, http.client.HTTPException) as error:
                 self.client.drop()
+                failure = error
                 status, head = "transport", {"message": error.message if isinstance(error, UpstreamError) else str(error)}
                 decision = errors.classify(None, head, "before-output")
             except auth.LoginRequired as error:
@@ -303,7 +319,7 @@ class Route:
             action = ("refresh" if decision.refresh else "drop_reasoning" if decision.drop_reasoning
                       else "drop_retention" if strip else "retry")
             self._attempt_event(row, key, model.slug, status, attempt, action if can_retry else "final", head,
-                                credentials, decision.delay)
+                                credentials, decision.delay, failure)
             if not can_retry:
                 row["attempts"] = attempt
                 if decision.client_status == 401:
@@ -322,8 +338,9 @@ class Route:
                 if decision.drop_reasoning or strip:
                     translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
                     cap.sent_body(translation.body_bytes)
+                    attachments = attachment_count(body)
                     with self.lock:
-                        estimated = estimator.estimate(translation.estimate_chars, attachment_count(body))
+                        estimated = estimator.estimate(translation.estimate_chars, attachments)
                     if decision.drop_reasoning:
                         self.event("drop_reasoning", request_id=row.get("request_id"), lane=key, slug=model.slug)
             except auth.LoginRequired as error:

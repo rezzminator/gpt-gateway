@@ -22,13 +22,14 @@ class Clean(unittest.TestCase):
 """
 CHECKS_PASS = 'echo "CHECK stub-check PASS 0 new"\nexit 0\n'
 SC_PASS = "exit 0\n"
+SC_PINNED = "0.11.0"  # scripts/gate.sh SHELLCHECK_VERSION
 CLEAN_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 class Tree:
     """A scratch git work tree: this repository's gate.sh beside stub links."""
 
-    def __init__(self, test, *, checks=CHECKS_PASS, shellcheck=SC_PASS, tests=PASSING, source="x = 1\n"):
+    def __init__(self, test, *, checks=CHECKS_PASS, shellcheck=SC_PASS, sc_version=SC_PINNED, tests=PASSING, source="x = 1\n"):
         self.root = jail.scratch(test)
         os.makedirs(os.path.join(self.root, "scripts"))
         shutil.copy2(os.path.join(jail.ROOT, "scripts", "gate.sh"), os.path.join(self.root, "scripts", "gate.sh"))
@@ -37,13 +38,16 @@ class Tree:
         self.write("b.sh", "#!/bin/sh\n# A script.\n")
         self.write("tests/__init__.py", "")
         self.write("tests/test_one.py", tests)
-        self.bin = os.path.join(self.root, "bin")
+        self.bin = os.path.join(self.root, 'bin')
+        self.clean_path = test.clean_path
         if shellcheck is not None:
-            self.write("bin/shellcheck", "#!/bin/sh\n" + shellcheck)
+            version = ('[ "$1" = --version ] && { printf "ShellCheck - shell script analysis tool\\nversion: %s\\n"; exit 0; }\n'
+                       % sc_version)
+            self.write("bin/shellcheck", "#!/bin/sh\n" + version + shellcheck)
             os.chmod(os.path.join(self.bin, "shellcheck"), 0o755)
         self.write(".gitignore", "bin/\n")
-        subprocess.run(["git", "init", "-q"], cwd=self.root, env=jail.clean_env(self.root), check=True,
-                       capture_output=True)
+        subprocess.run(['git', 'init', '-q'], cwd=self.root, env=jail.clean_env(self.root),
+                       check=True, capture_output=True)
 
     def write(self, rel, text):
         path = os.path.join(self.root, rel)
@@ -52,7 +56,7 @@ class Tree:
             f.write(text)
 
     def gate(self, *args):
-        env = jail.clean_env(self.root, PATH=self.bin + ":" + CLEAN_PATH, GATE_TEST_PROBE="1")
+        env = jail.clean_env(self.root, PATH=self.bin + ':' + self.clean_path, GATE_TEST_PROBE="1")
         p = subprocess.run(["/bin/bash", os.path.join(self.root, "scripts", "gate.sh")] + list(args), env=env,
                            capture_output=True, text=True, timeout=120)
         lines = {}
@@ -66,7 +70,13 @@ class Tree:
 
 class GateTest(unittest.TestCase):
     def setUp(self):
-        self.assertIsNone(shutil.which("shellcheck", path=CLEAN_PATH), "a shellcheck outside the stub would hide it")
+        self.clean_path = os.path.join(jail.scratch(self), 'commands')
+        os.mkdir(self.clean_path)
+        for command in ('bash', 'dirname', 'mktemp', 'rm', 'mkdir', 'grep', 'wc', 'tr', 'sed',
+                        'sort', 'paste', 'awk', 'tail', 'cat', 'env', 'cut', 'git'):
+            os.symlink(shutil.which(command, path=CLEAN_PATH), os.path.join(self.clean_path, command))
+        self.assertIsNone(shutil.which('shellcheck', path=self.clean_path),
+                          'a shellcheck outside the stub would hide it')
 
     def test_every_link_passing_is_a_pass(self):
         tree = Tree(self, tests=CLEAN)
@@ -99,6 +109,8 @@ class GateTest(unittest.TestCase):
         cases = (
             ("shellcheck", dict(shellcheck=None), "shellcheck not found on PATH — brew install shellcheck"),
             ("shellcheck", dict(shellcheck="exit 3\n"), "shellcheck exited 3"),
+            ("shellcheck", dict(sc_version="0.9.0"),
+             "shellcheck 0.9.0 found, the gate pins 0.11.0 — install the v0.11.0 release from github.com/koalaman/shellcheck/releases"),
             ("checks", dict(checks="exit 0\n"), "no CHECK line printed (exit 0)"),
             ("checks", dict(checks='echo "CHECK facade-env ERROR baseline missing"\nexit 2\n'), "facade-env (exit 2)"),
             ("tests", dict(tests=EMPTY), "Ran 0 tests"),

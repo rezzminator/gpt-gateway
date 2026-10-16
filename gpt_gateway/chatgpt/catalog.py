@@ -130,6 +130,27 @@ class Catalog:
         finally:
             self.client.drop()
 
+    def _refresh_cached(self, result):
+        """Finish a stale-cache refresh on its own thread, so readers holding a copy never wait on the I/O."""
+        try:
+            self._fetch(result)
+            raw, error = result.get_nowait()
+            if error is not None:
+                raise error
+            models = parse(raw)
+            self._save(raw)
+        except Exception as error:
+            with self.lock:
+                self.cause, self.failure = str(error), error
+                self.event("catalog_refresh_failed", cause=self.cause)
+                self.next_refresh = clock.monotonic() + 60
+                self.pending = None
+        else:
+            with self.lock:
+                self.copy = models
+                self.next_refresh = clock.monotonic() + 300
+                self.pending = None
+
     def _save(self, raw):
         directory = os.path.dirname(self.path)
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -148,6 +169,17 @@ class Catalog:
     def models(self):
         with self.lock:
             if clock.monotonic() >= self.next_refresh:
+                if self.copy is not None:
+                    if self.pending is None:
+                        self.pending = queue.Queue(1)
+                        try:
+                            threading.Thread(target=self._refresh_cached, args=(self.pending,), daemon=True).start()
+                        except Exception as error:
+                            self.pending = None
+                            self.cause, self.failure = str(error), error
+                            self.event("catalog_refresh_failed", cause=self.cause)
+                            self.next_refresh = clock.monotonic() + 60
+                    return self.copy
                 try:
                     if self.pending is None:
                         self.pending = queue.Queue(1)

@@ -3,10 +3,13 @@
 One SQLite file in WAL mode, written by one thread off a bounded queue, so a request never waits on the disk:
 `request()` and `event()` put a row on the queue and return. A full queue drops the row and counts it; a write that
 fails counts its rows as errors. Either is written once to the text log when it starts (the database cannot record its
-own failure) and shows on the health line, and the gateway goes on. Rows older than the retention are pruned when the
-writer starts and hourly. No request or response body enters it: a row holds ids, counts, times, statuses and at most
+own failure) and shows on the health line, and the gateway goes on; once rows are written again, a `db_lost` event
+records how many went missing, so the file itself names its gap. Rows older than the retention are pruned when the
+writer starts and hourly. A file made before a column SCHEMA declares gains it in place at the writer's first
+connection, every row kept. No request or response body enters it: a row holds ids, counts, times, statuses and at most
 600 bytes of an error reply. This module is the only one that touches sqlite3; the readers live here too.
 """
+import functools
 import json
 import os
 import queue
@@ -15,6 +18,7 @@ import threading
 from urllib.parse import quote
 
 from . import clock
+from .log import record
 
 QUEUE_SIZE = 10000
 BATCH = 500  # rows per transaction
@@ -26,7 +30,8 @@ COLUMNS = ("started", "ended", "pid", "request_id", "route", "kind", "method", "
            "session_id", "agent_id", "lane", "status", "answered_by", "stream",
            "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens", "hit",
            "delta", "attempts", "ttfb_ms", "upstream_ms", "total_ms", "reused", "stale", "transport", "turn_state",
-           "translation_notes", "empty", "completed", "client_disconnected", "error_code", "error_head", "note")
+           "translation_notes", "empty", "completed", "client_disconnected", "error_code", "error_head", "note",
+           "error_class", "request_bytes")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -68,7 +73,9 @@ CREATE TABLE IF NOT EXISTS requests (
     client_disconnected INTEGER,
     error_code TEXT,               -- the error reply's error.type, stream_error, or gateway_error
     error_head TEXT,               -- at most 600 bytes of the error reply
-    note TEXT                      -- the middleware notes
+    note TEXT,                     -- the middleware notes
+    error_class TEXT,              -- a failed upstream exchange: dns | tls | connect | reset | timeout | fd | protocol | other
+    request_bytes INTEGER          -- the body bytes the client sent
 );
 CREATE INDEX IF NOT EXISTS requests_started ON requests (started);
 CREATE TABLE IF NOT EXISTS events (
@@ -93,6 +100,18 @@ CREATE VIEW IF NOT EXISTS daily AS
 """
 INSERT_REQUEST = "INSERT INTO requests (%s) VALUES (%s)" % (", ".join(COLUMNS), ", ".join("?" * len(COLUMNS)))
 INSERT_EVENT = "INSERT INTO events (at, pid, kind, request_id, lane, fields) VALUES (?, ?, ?, ?, ?, ?)"
+
+
+@functools.lru_cache(maxsize=1)
+def schema_columns():
+    """((table, ((column, type), ...)), ...) as SCHEMA declares them, read off a database made from it in memory."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(SCHEMA)
+        return tuple((table, tuple((row[1], row[2]) for row in conn.execute("PRAGMA table_info(%s)" % table)))
+                     for table in ("requests", "events"))
+    finally:
+        conn.close()
 
 
 class DbError(Exception):
@@ -132,6 +151,7 @@ class Db:
         self.lock = threading.Lock()
         self.rows = self.drops = self.errors = 0
         self.dropping = self.failing = False
+        self.reported = (0, 0)  # (drops, errors) a db_lost event already recorded
         self.pid = os.getpid()
         self.thread = None
 
@@ -181,16 +201,16 @@ class Db:
                 self.drops += 1
                 first, self.dropping = not self.dropping, True
             if first:
-                self.log("db queue full at %d rows: dropping rows, counted as db_drops on the health line (%s)" % (
-                    self.queue.maxsize, self.path))
+                record(self.log, "error", "queue-full-dropping", "db queue full at %d rows: dropping rows, counted as db_drops on the health line (%s)" % (
+                    self.queue.maxsize, self.path), "gpt_gateway/db.py#_put")
 
     def _failed(self, rows, error):
         with self.lock:
             self.errors += rows
             first, self.failing = not self.failing, True
         if first:
-            self.log("db error, rows are lost and counted as db_errors until a write succeeds (%s): %r" % (
-                self.path, error))
+            record(self.log, "error", "db-rows-lost", "db error, rows are lost and counted as db_errors until a write succeeds (%s): %r" % (
+                self.path, error), "gpt_gateway/db.py#_failed")
 
     def _connect(self):
         directory = os.path.dirname(self.path)
@@ -202,10 +222,25 @@ class Db:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(SCHEMA)
+            self._migrate(conn)
         except BaseException:
             conn.close()
             raise
         return conn
+
+    def _migrate(self, conn):
+        """Add each column SCHEMA declares that the file's tables lack, at their end: ALTER TABLE ADD COLUMN rewrites
+        no row. Another gateway adding the same column first is no failure."""
+        for table, columns in schema_columns():
+            present = {row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+            for name, kind in columns:
+                if name in present:
+                    continue
+                try:
+                    conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, kind))
+                except sqlite3.OperationalError as error:
+                    if "duplicate column name" not in str(error):
+                        raise
 
     def _transaction(self, conn, statements):
         """(connection, None) after running `statements` [(sql, args)] in one transaction; (None, error) once it
@@ -228,7 +263,7 @@ class Db:
             try:
                 conn.close()
             except sqlite3.Error as error:
-                self.log("db close after an error failed (%s): %r" % (self.path, error))
+                record(self.log, "error", "close-after-error-failed", "db close after an error failed (%s): %r" % (self.path, error), "gpt_gateway/db.py#_discard")
 
     def _write(self, conn, items):
         statements = []
@@ -258,13 +293,25 @@ class Db:
         try:
             cutoff = clock.now() - float(self.retention()) * 86400
         except Exception as error:  # a retention source that fails keeps every row until it answers
-            self.log("db retention unreadable, nothing pruned (%s): %r" % (self.path, error))
+            record(self.log, "warning", "retention-unreadable", "db retention unreadable, nothing pruned (%s): %r" % (self.path, error), "gpt_gateway/db.py#_prune")
             return conn
         conn, error = self._transaction(conn, [("DELETE FROM requests WHERE started < ?", (cutoff,)),
                                                ("DELETE FROM events WHERE at < ?", (cutoff,))])
         if error is not None:
             self._failed(0, error)
         return conn
+
+    def _loss(self):
+        """([the `db_lost` event row], the (drops, errors) it covers) once the queue has room and the last write
+        succeeded after rows were dropped or failed since the last such event was written; else ([], None)."""
+        with self.lock:
+            if self.dropping and self.queue.empty():
+                self.dropping = False
+            seen = (self.drops, self.errors)
+            if self.dropping or self.failing or seen == self.reported:
+                return [], None
+            lost = {"drops": seen[0] - self.reported[0], "errors": seen[1] - self.reported[1]}
+        return [("events", (clock.now(), "db_lost", None, None, lost))], seen
 
     def _run(self):
         conn, due = None, clock.monotonic()  # the first prune runs at start
@@ -285,19 +332,22 @@ class Db:
                     conn = self._write(conn, rows)
                 if clock.monotonic() >= due:
                     conn, due = self._prune(conn), clock.monotonic() + PRUNE_SECONDS
+                rows, seen = self._loss()
+                if rows:
+                    conn = self._write(conn, rows)
+                    with self.lock:
+                        if not self.failing:  # written: a db_lost that failed is carried by the next one
+                            self.reported = seen
             except Exception as error:  # the one writer never dies: its rows are counted lost and it goes on
                 self._discard(conn)
                 conn = None
                 self._failed(len(rows), error)
-            with self.lock:
-                if self.dropping and self.queue.empty():
-                    self.dropping = False
             stop = any(kind == "stop" for kind, _ in markers)
             if stop and conn is not None:
                 try:
                     conn.close()
                 except sqlite3.Error as error:
-                    self.log("db close failed (%s): %r" % (self.path, error))
+                    record(self.log, "error", "close-failed", "db close failed (%s): %r" % (self.path, error), "gpt_gateway/db.py#_run")
             for _, done in markers:
                 done.set()
             if stop:
@@ -333,3 +383,10 @@ def anthropic_timings(path, since=0.0):
     return query(path, "SELECT model, ttfb_ms, upstream_ms, total_ms FROM requests WHERE route = 'anthropic'"
                        " AND ttfb_ms IS NOT NULL AND upstream_ms IS NOT NULL AND total_ms IS NOT NULL"
                        " AND started >= ? ORDER BY id", (since,))
+
+
+def anthropic_transport(path, since=0.0):
+    """Each Anthropic-route request that went upstream since `since` (epoch seconds), oldest first: reused, stale,
+    attempts and error_class."""
+    return query(path, "SELECT reused, stale, attempts, error_class FROM requests WHERE route = 'anthropic'"
+                       " AND attempts IS NOT NULL AND started >= ? ORDER BY id", (since,))

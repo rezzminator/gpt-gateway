@@ -11,6 +11,7 @@ import socket
 import threading
 
 from . import clock
+from .log import record
 
 TARGET = 10240  # the soft limit a start asks for, or the hard limit when that is lower
 NEAR = 16  # a name lookup that fails within this many handles of the limit failed for want of one
@@ -80,9 +81,9 @@ def raise_limit(event, log):
     except (ValueError, OSError) as error:
         event("fd_limit", soft=soft, hard=None if hard == resource.RLIM_INFINITY else hard, target=target,
               error=repr(error))
-        log("start: cannot raise the open-file limit from %d to %d: %r" % (soft, target, error))
+        record(log, "warning", "fd-limit-unraised", "start: cannot raise the open-file limit from %d to %d: %r" % (soft, target, error), "gpt_gateway/handles.py#raise_limit")
         return soft
-    log("start: open-file limit raised from %d to %d" % (soft, target))
+    record(log, "info", "fd-limit-raised", "start: open-file limit raised from %d to %d" % (soft, target), "gpt_gateway/handles.py#raise_limit")
     return target
 
 

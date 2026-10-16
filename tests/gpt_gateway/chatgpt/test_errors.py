@@ -218,3 +218,18 @@ class ErrorsRouteTest(unittest.TestCase):
         # a stream failure records its failing event, never the stream's opening bytes or the response it carries
         self.assertIn('{"type": "response.failed", "status": "failed", "error": {"code": "rate_limit_exceeded", '
                       '"message": "Please try again in 0.04s."}}', [x[4] for x in failed])
+
+    def test_a_thread_field_is_refused_so_claude_code_resends_the_whole_conversation(self):
+        rt, port = self.gateway()
+        for thread in (dict(type="create"), dict(type="continue", previous_message_id="msg_invented")):
+            with self.subTest(thread=thread["type"]):
+                resp, data = self.send(port, dict(self.body, thread=thread))
+                self.assertEqual(resp.status, 400)
+                error = json.loads(data)["error"]
+                self.assertEqual((error["type"], error["details"]["error_code"]), ("invalid_request_error", "thread_unsupported_request"))
+                self.assertEqual(error["message"], "chatgpt upstream: message threads are not supported")
+        self.assertEqual(self.responses(), [])
+        self.assertEqual(self.send(port)[0].status, 200)  # the resend, without the field
+        self.assertIn("Look up Harbor", self.responses()[-1]["body"].decode())
+        unauthenticated = {k: v for k, v in self.headers.items() if k != "x-claude-code-agent-id"}
+        self.assertEqual(self.send(port, dict(self.body, thread=dict(type="create")), unauthenticated)[0].status, 400)

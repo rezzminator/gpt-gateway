@@ -94,6 +94,7 @@ class CatalogStoreTest(unittest.TestCase):
         import os
         import stat
         from unittest.mock import patch
+        from tests import jail
         with patch("gpt_gateway.clock.monotonic", return_value=100) as timer:
             cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.client.models.assert_not_called()
@@ -107,17 +108,55 @@ class CatalogStoreTest(unittest.TestCase):
             timer.return_value = 400
             self.client.models.side_effect = ValueError("invented unavailable")
             self.assertIn("gpt-test", cache.models())
+            self.assertTrue(jail.wait_for(lambda: cache.pending is None), "refresh never completed")
             timer.return_value = 459
             cache.models()
             self.assertEqual(self.client.models.call_count, 2)
             timer.return_value = 460
             cache.models()
+            self.assertTrue(jail.wait_for(lambda: cache.pending is None), "retry never completed")
             self.assertEqual(self.client.models.call_count, 3)
             self.assertEqual(self.events, [("catalog_refresh_failed", {"cause": "invented unavailable"})] * 2)
             loaded = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.assertEqual(loaded.count(), 1)
             self.assertIn("gpt-test", loaded.models())
             self.assertEqual(self.client.models.call_count, 3)
+
+    def test_cached_models_return_during_one_refresh(self):
+        import concurrent.futures
+        import threading
+        from unittest.mock import patch
+        from tests import jail
+
+        entered, release = threading.Event(), threading.Event()
+        replacement = {"models": [dict(self.raw["models"][0], slug="gpt-new")]}
+
+        def slow_models(_credentials):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("fake refresh was not released")
+            return replacement
+
+        with patch("gpt_gateway.clock.monotonic", return_value=100) as timer:
+            cache = catalog.Catalog(self.knobs, self.client, self.store, self.record)
+            self.assertIn("gpt-test", cache.models())
+            timer.return_value = 400
+            self.client.models.side_effect = slow_models
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                first = pool.submit(cache.models)
+                try:
+                    self.assertTrue(entered.wait(1), "fake refresh never started")
+                    other = [pool.submit(cache.models) for _ in range(5)]
+                    done, _ = concurrent.futures.wait([first] + other, timeout=0.5)
+                    self.assertEqual(len(done), 6, "cached models blocked on the refresh")
+                    for result in done:
+                        self.assertIn("gpt-test", result.result())
+                    self.assertEqual(self.client.models.call_count, 2)
+                finally:
+                    release.set()
+            self.assertTrue(jail.wait_for(lambda: cache.pending is None), "refresh never completed")
+            self.assertIn("gpt-new", cache.models())
+            self.assertEqual(self.client.models.call_count, 2)
 
     def test_single_flight_and_no_copy_failure(self):
         import concurrent.futures

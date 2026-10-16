@@ -1,9 +1,12 @@
 """Tests for gpt_gateway.settings: env > file > default, hot reload with last-good, the middleware list
 fixed until a restart, and each module's settings validated from each source."""
 import os
+import json
+from unittest.mock import patch
 import unittest
 
 from gpt_gateway.middleware import MiddlewareError
+from gpt_gateway.log import Log
 from gpt_gateway.settings import Settings, SettingsError
 from tests import jail
 
@@ -46,6 +49,24 @@ class SettingsCase(unittest.TestCase):
 
 
 class CoreSettingsTest(SettingsCase):
+    def test_last_good_reload_emits_one_warning_and_keeps_the_snapshot(self):
+        self.write({"capture_dir": "/a"})
+        with patch("gpt_gateway.env.snapshot", return_value={"HOME": self.tmp, "PLUGIN_LOG_DIR": self.tmp}):
+            log = Log(self.log)
+        settings = Settings(self.path, {}, log.write)
+        settings.load()
+        self.write({"capture_dir": "relative"}, bump=1)
+        self.assertEqual(settings.current().capture_dir, "/a")
+        settings.current()
+        path = os.path.join(self.tmp, "gpt-gateway", "warnings.jsonl")
+        self.assertTrue(os.path.isfile(path), "last-good reload must also reach warnings.jsonl")
+        with open(path) as source:
+            row, = [json.loads(line) for line in source]
+        self.assertEqual((row["level"], row["event"], row["where"]),
+                         ("warning", "settings-kept-last-good", "gpt_gateway/settings.py#reload"))
+        with open(self.log) as source:
+            self.assertIn(row["msg"], source.read())
+
     def test_chatgpt_precedence_validation_and_restart(self):
         for raw in ("1", "true", "on", "TRUE"):
             with self.subTest(raw=raw):

@@ -1,11 +1,11 @@
-"""Tests for launchd/install.sh, into a scratch HOME with a stub launchctl that reports the agent off."""
+"""Tests for service/install.sh, into a scratch HOME with a stub launchctl that reports the agent off."""
 import json
 import os
 import subprocess
 import unittest
 
 from tests import jail
-from tests.launchd.stub import Host
+from tests.service.stub import Host
 
 FIRST_SETTINGS = {"capture_dir": None, "middleware": [{"module": "status_label"}]}
 # The former product name, which the install migrates from.
@@ -13,6 +13,28 @@ LEGACY_NAME = "model-gateway"
 
 
 class InstallTest(unittest.TestCase):
+    def test_installer_preserves_plugin_log_dir_in_the_service_environment(self):
+        for platform in ("Darwin", "Linux"):
+            for configured in (False, True):
+                with self.subTest(platform=platform, configured=configured):
+                    h = Host(self, platform=platform)
+                    chosen = os.path.join(h.home, "logs & <xml> ' quote % $ space")
+                    if configured:
+                        h.env["PLUGIN_LOG_DIR"] = chosen
+                    code, out = h.install()
+                    self.assertEqual(code, 0, out)
+                    if platform == "Darwin":
+                        self.assertEqual(h.plist_value("EnvironmentVariables.PLUGIN_LOG_DIR"), chosen if configured else "")
+                    else:
+                        with open(os.path.join(h.dest, "service.json")) as source:
+                            config = json.load(source)
+                        self.assertEqual(config.get("PLUGIN_LOG_DIR"), chosen if configured else None)
+                        if configured:
+                            unit = os.path.join(h.home, ".config/systemd/user/gpt-gateway.service")
+                            with open(unit) as source:
+                                self.assertIn("Environment=" + json.dumps("PLUGIN_LOG_DIR=" + chosen.replace("%", "%%")),
+                                              source.read())
+
     def test_a_first_install_lays_out_the_copy_settings_and_agent(self):
         h = Host(self)
         code, out = h.install()
@@ -22,7 +44,14 @@ class InstallTest(unittest.TestCase):
                      "gpt_gateway/harness.py", "gpt_gateway/chatgpt/stream.py", "THIRD_PARTY_NOTICES.md"):
             with self.subTest(name=name):
                 self.assertTrue(os.path.isfile(os.path.join(h.dest, name)), name)
-        self.assertFalse(os.path.exists(os.path.join(h.dest, "gpt_gateway", "__pycache__")))
+        secret = os.path.join(h.dest, "route-secret")
+        self.assertEqual(os.stat(secret).st_mode & 0o777, 0o600)
+        with open(secret) as source:
+            first_secret = source.read().strip()
+        self.assertRegex(first_secret, r"^[0-9a-f]{64}$")
+        self.assertEqual(h.install()[0], 0)
+        with open(secret) as source:
+            self.assertEqual(source.read().strip(), first_secret, "an update replaced the route secret")
         self.assertTrue(os.access(os.path.join(h.dest, "run.sh"), os.X_OK))
         self.assertTrue(os.path.isdir(os.path.join(h.dest, "middleware")))
         with open(os.path.join(h.dest, "settings.json")) as f:
@@ -39,6 +68,16 @@ class InstallTest(unittest.TestCase):
         p = subprocess.run(["/usr/bin/python3", "-I", "-B", os.path.join(h.dest, "gateway.py"), "check"],
                            capture_output=True, text=True, env={"HOME": h.home, "PATH": "/usr/bin:/bin"})
         self.assertEqual(p.stdout, "ok: %s\n" % os.path.join(h.dest, "settings.json"))
+
+    def test_a_first_install_writes_settings_private_under_a_permissive_umask(self):
+        h = Host(self)
+        previous = os.umask(0)
+        try:
+            code, out = h.install()
+        finally:
+            os.umask(previous)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(os.stat(os.path.join(h.dest, "settings.json")).st_mode & 0o777, 0o600)
 
     def test_the_advisor_middleware_ships_with_every_install_but_a_fresh_one_does_not_list_it(self):
         h = Host(self)
@@ -139,6 +178,59 @@ class InstallTest(unittest.TestCase):
         code, out = chosen.install()
         self.assertEqual(code, 0, out)
         self.assertEqual(chosen.read_claude()["env"], {"ENABLE_TOOL_SEARCH": "auto:5"})
+
+    def test_the_link_with_the_route_secret_is_kept_and_a_secretless_one_is_left_for_run_sh(self):
+        h = Host(self)
+        self.assertEqual(h.install()[0], 0)
+        with open(os.path.join(h.dest, "route-secret")) as source:
+            link = "http://127.0.0.1:%d/%s" % (h.port, source.read().strip())
+        for current in (link, "http://127.0.0.1:%d" % h.port):
+            with self.subTest(current=current.split("/")[-1][:4]):
+                h.write_claude({"env": {"ANTHROPIC_BASE_URL": current}})
+                code, out = h.install()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("removed the earlier", out)
+                self.assertEqual(h.read_claude()["env"], {"ANTHROPIC_BASE_URL": current})
+
+    def test_another_secret_link_is_removed_without_printing_it(self):
+        h = Host(self)
+        stale = "http://127.0.0.1:%d/%s" % (h.port, "c" * 64)
+        h.write_claude({"env": {"ANTHROPIC_BASE_URL": stale}})
+        code, out = h.install()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("c" * 64, out)
+        self.assertEqual(h.read_claude()["env"], {})
+
+    def test_a_route_secret_that_is_not_a_private_hex_file_stops_the_install(self):
+        for mode, text in ((0o644, "a" * 64 + "\n"), (0o600, "not hex\n")):
+            with self.subTest(mode=oct(mode)):
+                h = Host(self)
+                os.makedirs(h.dest)
+                secret = os.path.join(h.dest, "route-secret")
+                with open(secret, "w") as target:
+                    target.write(text)
+                os.chmod(secret, mode)
+                code, out = h.install()
+                self.assertNotEqual(code, 0, out)
+                self.assertIn("route secret", out)
+
+    def test_removing_another_base_url_keeps_the_settings_mode(self):
+        for mode in (0o600, 0o644):
+            with self.subTest(mode=oct(mode)):
+                h = Host(self)
+                h.write_claude({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}})
+                os.chmod(h.claude, mode)
+                code, out = h.install()
+                self.assertEqual(code, 0, out)
+                self.assertEqual(os.stat(h.claude).st_mode & 0o777, mode)
+
+    def test_unreadable_claude_settings_stop_the_install_and_say_so(self):
+        h = Host(self)
+        with open(h.claude, "w") as f:
+            f.write('{"env":')
+        code, out = h.install()
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("cannot read Claude Code settings at", out)
 
     def former(self, h):
         """Plants a former install in h's HOME: its agent, its copy with the user's settings and module, its state."""

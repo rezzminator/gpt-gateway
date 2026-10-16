@@ -8,6 +8,13 @@ from tests import jail
 
 
 class CoreEnvTest(unittest.TestCase):
+    def test_the_inherited_listener_descriptor_is_validated(self):
+        core = env.CoreEnv.parse({'HOME': '/jail', 'GPT_GATEWAY_LISTENER_FD': '3'})
+        self.assertEqual(core.listener_fd, 3)
+        for value in ('0', '2', '-1', 'word'):
+            with self.subTest(value=value), self.assertRaisesRegex(env.EnvError, 'GPT_GATEWAY_LISTENER_FD'):
+                env.CoreEnv.parse({'HOME': '/jail', 'GPT_GATEWAY_LISTENER_FD': value})
+
     def test_chatgpt_origins_store_and_paths_are_validated(self):
         for name, value in (("GPT_GATEWAY_CHATGPT_ORIGIN", "ftp://invalid"),
                             ("GPT_GATEWAY_CHATGPT_ORIGIN", "http://host/path"),
@@ -45,11 +52,19 @@ class CoreEnvTest(unittest.TestCase):
         self.assertEqual(knobs.codex_auth, os.path.join(home, "chosen"))
 
     def test_defaults(self):
-        core = env.CoreEnv.parse({"HOME": "/jail"})
+        with patch('sys.platform', 'darwin'):
+            core = env.CoreEnv.parse({"HOME": "/jail"})
         self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug),
                          (18787, "https://api.anthropic.com", 600.0, False))
         self.assertEqual(core.log_path, "/jail/Library/Logs/gpt-gateway.log")
         self.assertEqual(core.db_path, "/jail/.local/state/gpt-gateway/gateway.db")
+
+    def test_linux_logs_default_to_the_state_directory_and_allow_an_override(self):
+        with patch('sys.platform', 'linux'):
+            self.assertEqual(env.CoreEnv.parse({'HOME': '/jail'}).log_path,
+                             '/jail/.local/state/gpt-gateway/gpt-gateway.log')
+            self.assertEqual(env.CoreEnv.parse({'HOME': '/jail', 'GPT_GATEWAY_LOG': '~/chosen.log'}).log_path,
+                             '/jail/chosen.log')
 
     def test_the_database_resolves_against_the_mappings_home_never_the_process_home(self):
         with patch.dict(os.environ, {"HOME": "/process-home"}):

@@ -1,4 +1,6 @@
 """The gateway's commands — serve (the default), check [FILE], mw NAME [ARGS...] — and the usage built from them."""
+import hashlib
+import os
 import re
 import sys
 
@@ -16,7 +18,7 @@ from .settings import FILE_NAME, Settings, SettingsError, default_path, describe
 
 def start_error(log, kind, error):
     if log is not None:
-        log.write("start failed: %s: %s" % (kind, error))
+        log.record("error", "start-failed", "start failed: %s: %s" % (kind, error), "gpt_gateway/cli.py#start_error")
     print("gpt-gateway: %s: %s" % (kind, error), file=sys.stderr)
     return 1
 
@@ -27,7 +29,7 @@ def cmd_serve(args, install_dir, environ):
     try:
         rt = Runtime(environ, default_path(install_dir))
     except envmod.EnvError as e:
-        return start_error(None, "env error", e)
+        return start_error(Log(None, environ=environ), "env error", e)
     try:
         rt.load()
     except (SettingsError, envmod.EnvError) as e:
@@ -41,11 +43,12 @@ def cmd_serve(args, install_dir, environ):
         return start_error(rt.log, "cannot listen on 127.0.0.1:%d" % rt.env.port, repr(e))
     snap = rt.settings.current()
     names, python = [m.NAME for m in rt.settings.modules], sys.version.split()[0]
-    rt.log.write("start port=%d %s settings=%s file=%s upstream=%s middleware=[%s] python=%s db=%s" % (
+    code = build(os.path.dirname(os.path.abspath(__file__)))
+    rt.log.record("info", "started", "start port=%d %s settings=%s file=%s upstream=%s middleware=[%s] python=%s db=%s build=%s" % (
         rt.env.port, describe(snap), snap.state, rt.settings.path, rt.env.upstream, ", ".join(names), python,
-        rt.db.path))
+        rt.db.path, code), "gpt_gateway/cli.py#cmd_serve")
     rt.db.event("start", port=rt.env.port, settings=describe(snap), state=snap.state, file=rt.settings.path,
-                upstream=rt.env.upstream, middleware=names, python=python)
+                upstream=rt.env.upstream, middleware=names, python=python, build=code)
     return servermod.serve(rt, server)
 
 
@@ -53,20 +56,24 @@ def cmd_check(args, install_dir, environ):
     if len(args) > 1:
         return usage_error()
     path = args[0] if args else default_path(install_dir)
-    settings = Settings(path, environ, Log(None).write)
+    log = Log(None, environ=environ)
+    settings = Settings(path, environ, log.write)
     try:
         settings.load()
     except (SettingsError, MiddlewareError) as e:
+        log.record("error", "check-failed", "invalid: %s" % e, "gpt_gateway/cli.py#cmd_check")
         print("invalid: %s" % e, file=sys.stderr)
         return 1
     print("ok: %s" % path if settings.snapshot.state == "ok" else "ok: %s missing, defaults apply" % path)
     return 0
 
 
-def invoke(module, argv, ctx, event):
+def invoke(module, argv, ctx, event, log=None):
     """`module.cli(argv, ctx)` as `gateway.py mw` runs it; its int return value (None: 0) is the exit status.
     A cli that raises is a `middleware_failed` event, its line printed on stderr too."""
+    log = log if log is not None else Log(None, environ={})
     if module.cli is None:
+        log.record("warning", "middleware-cli-unavailable", "middleware %s has no cli" % module.NAME, "gpt_gateway/cli.py#invoke")
         print("gpt-gateway: middleware %s has no cli" % module.NAME, file=sys.stderr)
         return 2
     ctx._module = module.module
@@ -75,11 +82,13 @@ def invoke(module, argv, ctx, event):
     except SystemExit as e:
         code = e.code
         if isinstance(code, str):
+            log.record("error", "middleware-cli-exit", code, "gpt_gateway/cli.py#invoke")
             print(code, file=sys.stderr)
             code = 1
     except Exception as e:
         def failed(kind, request_id=None, lane=None, **fields):
             event(kind, request_id=request_id, lane=lane, **fields)
+            log.record("error", "middleware-cli-failed", "middleware %s cli failed: %s" % (module.NAME, fields["error"]), "gpt_gateway/cli.py#invoke")
             print("middleware %s cli failed: %s%s" % (module.NAME, fields["error"],
                                                        " at " + fields["where"] if fields["where"] else ""),
                   file=sys.stderr)
@@ -91,27 +100,32 @@ def invoke(module, argv, ctx, event):
         return 0
     if isinstance(code, int):
         return int(code)
+    log.record("error", "middleware-cli-invalid-result", "middleware %s cli returned %r, not an int" % (module.NAME, code), "gpt_gateway/cli.py#invoke")
     print("gpt-gateway: middleware %s cli returned %r, not an int" % (module.NAME, code), file=sys.stderr)
     return 1
 
 
 def cmd_mw(args, install_dir, environ):
+    diagnostics = Log(None, environ=environ)
     if not args:
         return usage_error()
     try:
         core = envmod.CoreEnv.parse(environ)
     except envmod.EnvError as e:
+        diagnostics.record("error", "env-invalid", "env error: %s" % e, "gpt_gateway/cli.py#cmd_mw")
         print("gpt-gateway: env error: %s" % e, file=sys.stderr)
         return 1
-    log = Log(core.log_path)
+    log = Log(core.log_path, environ=environ)
     settings = Settings(default_path(install_dir), environ, log.write)
     try:
         settings.load()
     except (SettingsError, MiddlewareError) as e:
+        diagnostics.record("error", "settings-invalid", "settings error: %s" % e, "gpt_gateway/cli.py#cmd_mw")
         print("gpt-gateway: settings error: %s" % e, file=sys.stderr)
         return 1
     module = next((m for m in settings.modules if m.NAME == args[0]), None)
     if module is None:
+        diagnostics.record("warning", "middleware-unknown", "unknown middleware %r" % args[0], "gpt_gateway/cli.py#cmd_mw")
         print("gpt-gateway: unknown middleware %r; loaded: %s" % (
             args[0], ", ".join(m.NAME for m in settings.modules) or "none"), file=sys.stderr)
         return 2
@@ -120,7 +134,7 @@ def cmd_mw(args, install_dir, environ):
     try:
         ctx = Context(log=lambda line: db.event("middleware_log", line=line), log_path=log.path,
                       settings=settings.snapshot.module_settings)
-        return invoke(module, list(args[1:]), ctx, db.event)
+        return invoke(module, list(args[1:]), ctx, db.event, diagnostics)
     finally:
         db.close()
 
@@ -138,7 +152,7 @@ def cmd_chatgpt_login(args, install_dir, environ):
         store = auth.Store(knobs)
         (login.device_login if args else login.browser_login)(store)
     except (envmod.EnvError, auth.AuthError, OSError) as error:
-        return start_error(None, "ChatGPT login failed", error)
+        return start_error(Log(None, environ=environ), "ChatGPT login failed", error)
     print("ChatGPT: logged in")
     return 0
 
@@ -150,7 +164,7 @@ def cmd_chatgpt_status(args, install_dir, environ):
     try:
         print(auth.source(envmod.ChatGPTEnv.parse(environ)).status())
     except (envmod.EnvError, auth.AuthError, OSError) as error:
-        return start_error(None, "ChatGPT status failed", error)
+        return start_error(Log(None, environ=environ), "ChatGPT status failed", error)
     return 0
 
 
@@ -158,6 +172,23 @@ def percentile(values, percent):
     """The nearest-rank percentile of a non-empty list."""
     ordered = sorted(values)
     return ordered[max(1, -(-len(ordered) * percent // 100)) - 1]
+
+
+def build(directory):
+    """The code a gateway runs, named: 12 hex digits of a SHA-256 over each .py file under `directory`, its path
+    relative to it and its bytes, in path order; the same sources give the same name on any install."""
+    digest, found = hashlib.sha256(), []
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [name for name in dirs if name != "__pycache__"]
+        found += [os.path.relpath(os.path.join(root, name), directory) for name in files if name.endswith(".py")]
+    try:
+        for relative in sorted(name.replace(os.sep, "/") for name in found):
+            with open(os.path.join(directory, relative), "rb") as f:
+                data = f.read()
+            digest.update(b"%d:%s%d:" % (len(relative), relative.encode(), len(data)) + data)
+    except OSError as error:
+        return "unreadable: %r" % error
+    return digest.hexdigest()[:12]
 
 
 WINDOW = re.compile(r"^([1-9][0-9]*)([mhd])$")
@@ -174,8 +205,13 @@ def cmd_chatgpt_stats(args, install_dir, environ):
         responses = dbmod.chatgpt_responses(path, since)
         claude = dbmod.anthropic_timings(path, since)
     except (dbmod.DbError, envmod.EnvError) as error:
+        Log(None, environ=environ).record("error", "stats-unreadable", "chatgpt-stats: %s" % error, "gpt_gateway/cli.py#cmd_chatgpt_stats")
         print("gpt-gateway: chatgpt-stats: %s" % error, file=sys.stderr)
         return 1
+    try:  # a file no gateway of this version has written to yet lacks the transport columns; the rest still reads
+        transport, unread = dbmod.anthropic_transport(path, since), None
+    except dbmod.DbError as error:
+        transport, unread = [], error
     lanes, timed = {}, {}
     for response in responses:
         row = lanes.setdefault(response["lane"], [0, 0, 0])
@@ -208,6 +244,16 @@ def cmd_chatgpt_stats(args, install_dir, environ):
         print("anthropic model=%s timed=%d %s" % (model, len(columns[0]), " ".join(
             "%s p50=%d p95=%d" % (name, percentile(values, 50), percentile(values, 95))
             for name, values in zip(("ttfb_ms", "upstream_ms", "total_ms"), columns))))
+    if transport:
+        classes = {}
+        for row in transport:
+            if row["error_class"] is not None:
+                classes[row["error_class"]] = classes.get(row["error_class"], 0) + 1
+        print("anthropic transport sent=%d reused=%d retried=%d failed=%d classes=%s" % (
+            len(transport), sum(bool(row["reused"]) for row in transport), sum(row["attempts"] == 2 for row in transport),
+            sum(classes.values()), ",".join("%s:%d" % pair for pair in sorted(classes.items())) or "-"))
+    if unread is not None:
+        print("anthropic transport unread: %s" % unread)
     return 0
 
 

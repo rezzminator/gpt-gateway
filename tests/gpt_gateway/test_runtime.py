@@ -47,8 +47,22 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(EnvError, "GPT_GATEWAY_CHATGPT_ORIGIN"):
             Runtime(env, os.path.join(d, "settings.json")).load()
         env["GPT_GATEWAY_CHATGPT_ORIGIN"] = "http://127.0.0.1:1"
+        with self.assertRaisesRegex(EnvError, "GPT_GATEWAY_ROUTE_SECRET_PATH"):
+            Runtime(env, os.path.join(d, "settings.json")).load()
+        secret = jail.write_secret(os.path.join(d, "route-secret"), "a" * 64)
+        env["GPT_GATEWAY_ROUTE_SECRET_PATH"] = secret
+        for mode, text, message in ((0o644, "a" * 64, "regular 0600"), (0o600, "A" * 64, "64 lowercase hex"),
+                                    (0o600, "a" * 63, "64 lowercase hex")):
+            with self.subTest(mode=oct(mode), text=text):
+                jail.write_json(secret, text)
+                os.chmod(secret, mode)
+                with self.assertRaisesRegex(EnvError, message):
+                    Runtime(env, os.path.join(d, "settings.json")).load()
+        jail.write_json(secret, "a" * 64)
+        os.chmod(secret, 0o600)
         rt = Runtime(env, os.path.join(d, "settings.json"))
         rt.load()
+        self.assertEqual(rt.route_secret, "a" * 64)
         self.assertIsNotNone(rt.chatgpt)
         self.assertIsNone(rt.chatgpt.catalog.count())
         from gpt_gateway.chatgpt.auth import AuthError
