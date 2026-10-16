@@ -20,9 +20,11 @@ from .client import Client
 from .response import Reader
 
 
-def route_error(status, kind, message, headers=None):
-    return Response.json(status, {"type": "error", "error": {
-        "type": kind, "message": "chatgpt upstream: " + message}}, headers)
+def route_error(status, kind, message, headers=None, error_code=None):
+    error = {"type": kind, "message": "chatgpt upstream: " + message}
+    if error_code:
+        error["details"] = {"error_code": error_code}
+    return Response.json(status, {"type": "error", "error": error}, headers)
 
 
 def login_required(message="ChatGPT login required: run codex login, or gateway.py chatgpt-login"):
@@ -41,6 +43,9 @@ def decide(catalog, method, path, body, headers, authorized=False):
     if not authorized:  # the install's credential rides the base URL; a client without it never spends the subscription
         return "chatgpt", None, route_error(403, "permission_error", "local client authentication required",
                                             {"x-should-retry": "false"})
+    if "thread" in body:  # message threads (Claude Code 2.1.300): a continue carries only the new messages, the Responses route needs them all
+        return "chatgpt", None, route_error(400, "invalid_request_error", "message threads are not supported",
+                                            error_code="thread_unsupported_request")
     slug = model
     if slug.endswith("[1m]"):
         slug = slug[:-4]
