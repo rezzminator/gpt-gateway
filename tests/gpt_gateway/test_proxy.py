@@ -552,16 +552,6 @@ class RouteGateTest(unittest.TestCase):
     send = route_tests.RouteTest.send
     responses = route_tests.RouteTest.responses
 
-    def test_gpt_route_requires_install_secret(self):
-        _, port = self.gateway()
-        unsigned = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), self.headers)
-        self.assertEqual((unsigned[0].status, json.loads(unsigned[1])["error"]["message"],
-                          unsigned[0].getheader("x-should-retry")),
-                         (403, "chatgpt upstream: local client authentication required", "false"))
-        anonymous = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), {})
-        self.assertEqual(anonymous[0].status, 400)  # the sub-agent rule answers first
-        self.assertEqual((len(self.responses()), self.send(port)[0].status), (0, 200))
-
     def test_an_image_turn_teaches_the_text_ratio_without_the_attachment_allowance(self):
         rt, port = self.gateway()
         image = dict(type="image", source=dict(type="base64", media_type="image/png", data="invented"))

@@ -8,7 +8,9 @@ import dataclasses
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
 
+from tests import fakes
 from gpt_gateway.chatgpt import catalog, request, signature, tools
 from tests.gpt_gateway.chatgpt import test_route as route_tests
 
@@ -402,11 +404,26 @@ class AgentContractRouteTest(unittest.TestCase):
     send = route_tests.RouteTest.send
     responses = route_tests.RouteTest.responses
 
-    def test_the_route_sends_the_agent_contract_as_its_knob_says(self):
-        for knob, parts in [(None, ['Review it.', request.AGENT_CONTRACT]), ('off', ['Review it.'])]:
-            with self.subTest(knob=knob):
-                _, port = self.gateway(**({'GPT_GATEWAY_CHATGPT_AGENT_CONTRACT': knob} if knob else {}))
-                self.assertEqual(self.send(port, dict(self.body, system='Review it.'))[0].status, 200)
-                sent = next(x for x in json.loads(self.responses()[-1]['body'])['input']
-                            if x['type'] == 'message' and x['role'] == 'developer')
-                self.assertEqual([part['text'] for part in sent['content']], parts)
+    def test_the_route_sends_the_agent_contract_only_for_sub_agents_as_its_knob_says(self):
+        for knob in ('on', 'off'):
+            for subagent in (False, True):
+                with self.subTest(knob=knob, subagent=subagent):
+                    rt, _ = self.gateway(GPT_GATEWAY_CHATGPT_AGENT_CONTRACT=knob)
+                    headers = self.headers if subagent else {'x-claude-code-session-id': 'session-invented'}
+                    model = rt.chatgpt.catalog.models()['gpt-test']
+                    self.fake.script = [(400, {'error': {'code': 'invalid_encrypted_content'}}),
+                                        (200, fakes.responses_turn())]
+                    before = len(self.responses())
+                    # Exercise the translation owner directly: routing must not mask a main-session contract bug.
+                    with patch('gpt_gateway.chatgpt.errors.backoff', return_value=0):
+                        answer = rt.chatgpt.exchange(dict(self.body, system='Review it.', stream=False), model,
+                                                    headers, '/v1/messages', Mock())
+                    self.assertEqual(answer.status, 200)
+                    answer.read()
+                    attempts = self.responses()[before:]
+                    self.assertEqual(len(attempts), 2)
+                    for attempt in attempts:
+                        sent = next(x for x in json.loads(attempt['body'])['input']
+                                    if x['type'] == 'message' and x['role'] == 'developer')
+                        parts = ['Review it.'] + ([request.AGENT_CONTRACT] if subagent and knob == 'on' else [])
+                        self.assertEqual([part['text'] for part in sent['content']], parts)

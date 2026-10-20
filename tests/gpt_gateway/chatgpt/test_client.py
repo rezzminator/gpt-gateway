@@ -29,6 +29,20 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(client.models(creds), fakes.CHATGPT_MODELS)
         self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
 
+    def test_main_lane_omits_subagent_identity_on_both_transports(self):
+        for transport in ('http', 'websocket'):
+            with self.subTest(transport=transport):
+                fake = type('MainClientFake', (fakes.ChatGPTUpstream,), {'seen': [], 'script': [], 'upgrades': []})
+                client = Client(SimpleNamespace(origin=fakes.start_upstream(self, fake), transport=transport), lambda kind, **fields: None)
+                self.addCleanup(client.close)
+                response = client.responses(Translation(b'{"model":"gpt-test","input":[]}', False, {}, (), 2),
+                                            'main-lane', Credentials('invented-bearer', 'invented-account'))
+                self.assertEqual(response.status, 200)
+                response.read()
+                response.close()
+                headers = fake.upgrades[-1] if transport == 'websocket' else fake.seen[-1]['headers']
+                self.assertNotIn('x-openai-subagent', headers)
+
     def test_responses_name_the_request_to_the_upstream_for_its_retry_event(self):
         client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
         client.upstream = Mock()

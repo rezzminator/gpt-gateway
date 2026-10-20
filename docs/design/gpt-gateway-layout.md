@@ -49,20 +49,20 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt login | browser PKCE and device-code login | `gpt_gateway/chatgpt/login.py` | assumed: OAuth flow changes together |
 | chatgpt keychain | macOS Keychain token storage | `gpt_gateway/chatgpt/keychain.py` | assumed: platform storage changes alone |
 | chatgpt catalog | model parsing, fetch and last-good cache | `gpt_gateway/chatgpt/catalog.py` | assumed: refresh and model fields co-change |
-| chatgpt request | Anthropic to Responses body translation | `gpt_gateway/chatgpt/request.py` | assumed: request mapping changes together |
+| chatgpt request | Anthropic to Responses body translation, the sub-agent delivery contract appended only to a request carrying `x-claude-code-agent-id` when the knob is on | `gpt_gateway/chatgpt/request.py` | assumed: request mapping changes together |
 | chatgpt tools | tool definitions, choice and name mapping | `gpt_gateway/chatgpt/tools.py` | assumed: tool request and response names agree |
 | chatgpt schema | pure JSON schema sanitization | `gpt_gateway/chatgpt/schema.py` | assumed: schema rules change alone |
-| chatgpt lane | per-session, per-agent cache key | `gpt_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
+| chatgpt lane | per-session, per-agent cache key: UUIDv5 of the compact JSON array `[session_id, agent_id]`, never a colon join | `gpt_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
 | chatgpt turn | a request's turn position and the lane's `x-codex-turn-state` token | `gpt_gateway/chatgpt/turn.py` | assumed: Codex's turn contract changes alone |
 | chatgpt stream | Responses SSE translation and accumulation | `gpt_gateway/chatgpt/stream.py` | assumed: event mapping and accumulation agree |
 | chatgpt errors | error decisions and retry backoff | `gpt_gateway/chatgpt/errors.py` | assumed: status and retry policy co-change |
 | chatgpt estimate | per-lane token estimate calibration | `gpt_gateway/chatgpt/estimate.py` | assumed: measurement and estimate co-change |
 | chatgpt identity | Codex client version and identity headers | `gpt_gateway/chatgpt/identity.py` | assumed: OAuth and backend share identity |
-| chatgpt client | Responses over the WebSocket or HTTP, and models requests | `gpt_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
+| chatgpt client | Responses over the WebSocket or HTTP, and models requests; `x-openai-subagent: collab_spawn` on sub-agent lanes only | `gpt_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
 | chatgpt websocket | the Responses WebSocket: per-lane socket pool, response.create, the answer the route reads | `gpt_gateway/chatgpt/websocket.py` | assumed: socket lifecycle and Codex's WebSocket contract co-change |
 | chatgpt keeper | the thread that answers and pings the idle pooled WebSockets, and takes a dead one out of the pool | `gpt_gateway/chatgpt/keeper.py` | assumed: pool lifecycle and the server's idle behaviour co-change |
 | chatgpt continuation | Codex's incremental request: a socket's last completed response, what the next request sends, output-item identity | `gpt_gateway/chatgpt/continuation.py` | assumed: Codex's continuation rule and the translator's round trip co-change |
-| chatgpt route | routing decision, authenticated candidates, attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
+| chatgpt route | routing decision: a non-`claude-` string model without the secret prefix gets 403 before the catalog, a prefixed one (main session or sub-agent) routes; attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
 | chatgpt response | the reader thread behind a translated SSE body, read through the core's `Response` | `gpt_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
 | example | the minimal middleware, the contract's executable documentation | `examples/middleware/model_note.py` | assumed: changes with the contract |
 | shipped middleware | the middleware an install copies into its `middleware/`, each file its own, and a fresh `settings.json` lists | `middleware/` | assumed: each module changes alone, against the contract |
@@ -152,7 +152,7 @@ tests/gpt_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,hea
 tests/gpt_gateway/chatgpt/__init__.py
 tests/gpt_gateway/chatgpt/test_codex_login.py
 tests/gpt_gateway/chatgpt/test_response.py
-tests/gpt_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,websocket,keeper,retention,continuation}.py
+tests/gpt_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,route_main,websocket,keeper,retention,continuation}.py
 tests/gpt_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py

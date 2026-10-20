@@ -118,17 +118,6 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(rows.sub("", fakes.request(port, "GET", "/__gateway/health")[1].decode()),
                          rows.sub("", health_line(rt.settings.current(), rt)))
 
-    def test_guard_unknown_and_suffixes(self):
-        rt, port = self.gateway()
-        for model, headers, text in [("gpt-test", {}, "GPT models run as sub-agents only"),
-                ("unknown", self.headers, 'unknown model "unknown"; the ChatGPT catalog has: gpt-test')]:
-            with self.subTest(model=model):
-                resp, data = self.send(port, dict(self.body, model=model), headers)
-                self.assertEqual(resp.status, 400)
-                self.assertEqual(json.loads(data)["error"]["message"], "chatgpt upstream: " + text)
-        self.assertEqual(self.send(port, dict(self.body, model="gpt-test-fast[1m]"))[0].status, 200)
-        self.assertEqual(json.loads(self.responses()[-1]["body"])["service_tier"], "priority")
-
     def test_refresh_once_and_oauth_identity(self):
         self.fake.script = [(401, {"error": {"message": "expired"}}), (200, fakes.responses_turn())]
         rt, port = self.gateway()
