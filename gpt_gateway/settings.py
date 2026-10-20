@@ -18,7 +18,9 @@ from . import middleware
 from .log import record
 
 FILE_NAME = "settings.json"
-KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention")
+KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention",
+        "model_picker_models")
+DEFAULT_PICKER_MODELS = ("gpt-6.1-sol", "gpt-6-astra")
 CACHE_RETENTIONS = ("off", "24h")
 ENTRY_KEYS = ("module", "settings")
 MODULE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\Z")
@@ -86,6 +88,20 @@ def middleware_entries(value, where):
     return tuple(out)
 
 
+def model_picker_models(models, where):
+    """Validate the install-time ordered GPT id list; availability is the installer's catalog concern."""
+    if not isinstance(models, list):
+        raise SettingsError("%s: model_picker_models must be an array of GPT model ids" % where)
+    seen = set()
+    for model in models:
+        if not isinstance(model, str) or not re.fullmatch(r"gpt-[a-z0-9]+(?:[.-][a-z0-9]+)*", model):
+            raise SettingsError("%s: model_picker_models: malformed GPT model id %r" % (where, model))
+        if model in seen:
+            raise SettingsError("%s: model_picker_models: duplicate model %s" % (where, model))
+        seen.add(model)
+    return list(models)
+
+
 def read_file(path):
     """The file's validated values {key: value}; None when the file does not exist."""
     try:
@@ -105,6 +121,8 @@ def read_file(path):
     if unknown:
         raise SettingsError("%s: unknown key(s) %s; known: %s" % (path, ", ".join(unknown), ", ".join(KEYS)))
     out = {}
+    if "model_picker_models" in data:
+        out["model_picker_models"] = model_picker_models(data["model_picker_models"], path)
     if "chatgpt" in data:
         if data["chatgpt"] is not None and type(data["chatgpt"]) is not bool:
             raise SettingsError("%s: chatgpt must be a boolean or null" % path)

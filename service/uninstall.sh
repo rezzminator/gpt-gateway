@@ -52,6 +52,8 @@ if settings_ours; then
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-uninstall-$(date +%Y%m%d-%H%M%S)"
 fi
 settings_unlink "${GPT_GATEWAY_STOP_SECONDS:-630}" || exit 1
+# The helper follows settings symlinks and backs up before removing only description-marked rows.
+"${GPT_GATEWAY_PYTHON:-/usr/bin/python3}" -I -B "$DIR/picker.py" uninstall "$DEST" "$SETTINGS" "$BACKUPS" || exit 1
 echo "Claude Code talks to the API directly ($SETTINGS)"
 
 if [ -f "$DEST/settings.json" ] || [ -d "$DEST/middleware" ]; then

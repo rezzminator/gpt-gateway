@@ -3,6 +3,7 @@
 `snapshot()` is the only reader of the process environment; every other module receives that
 mapping (or a test's own) and reads it through `value()`.
 """
+import json
 import os
 import re
 import stat
@@ -19,6 +20,20 @@ DEBUG = "GPT_GATEWAY_DEBUG"
 LISTENER_FD = "GPT_GATEWAY_LISTENER_FD"
 MIDDLEWARE_DIR = "GPT_GATEWAY_MIDDLEWARE_DIR"
 CHATGPT = "GPT_GATEWAY_CHATGPT"
+MODEL_PICKER_MODELS = "GPT_GATEWAY_MODEL_PICKER_MODELS"
+
+
+def model_picker_override(environ):
+    """Installation-only JSON override; unlike legacy knobs, an explicitly empty value is invalid."""
+    if MODEL_PICKER_MODELS not in environ:
+        return None
+    try:
+        models = json.loads(environ[MODEL_PICKER_MODELS])
+    except (TypeError, ValueError) as error:
+        raise EnvError("env %s: must be a JSON array of model ids: %s" % (MODEL_PICKER_MODELS, error)) from error
+    if not isinstance(models, list):
+        raise EnvError("env %s: must be a JSON array of model ids" % MODEL_PICKER_MODELS)
+    return models
 
 DEFAULT_PORT = 18787
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
