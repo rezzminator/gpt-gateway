@@ -6,6 +6,7 @@ Permission notices: THIRD_PARTY_NOTICES.md.
 """
 from dataclasses import dataclass
 import json
+import re
 from typing import Optional
 
 from ..hooks import last_turn_message
@@ -25,7 +26,12 @@ AGENT_CONTRACT = (
     'while you work. SendMessage wakes its recipient and costs it a full turn: send one only when your instructions '
     'explicitly require it, or when you are blocked on a decision only the recipient can make. Never send one for '
     'progress, interim findings, corrections, or a preview of your final message. An agent you spawn answers you '
-    'through its own final message.')
+    'through its own final message. Write a report file only when your instructions name one: a save step, a run '
+    'directory or a report path names a file, and you write it.')
+
+# Claude Code's sub-agent note against report files. A GPT model obeys it over the agent's own save step, so a
+# sub-agent's system text drops it and AGENT_CONTRACT carries the rule that defers to a file the instructions name.
+_HARNESS_NO_REPORT_NOTE = re.compile(r'^- Do NOT Write report/summary/findings/analysis \.md files\..*(?:\n|$)', re.M)
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,9 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     registered, deferred, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
     instructions = _system_text(body.get('system', []))
+    if agent_contract:
+        stripped, count = _HARNESS_NO_REPORT_NOTE.subn('', instructions)
+        instructions = stripped.rstrip('\n') if count else instructions
     known = {tool['name'] for tool in registered + list(deferred.values()) if tool['type'] == 'function'}
     added = tools.added_tools(body, known, names)
     lite = model.responses_lite

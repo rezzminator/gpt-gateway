@@ -116,6 +116,20 @@ class RequestTest(unittest.TestCase):
                                                  'lane-example', agent_contract=True).body_bytes)
         self.assertNotIn(request.AGENT_CONTRACT, json.dumps(no_system, ensure_ascii=False))
 
+    def test_agent_contract_drops_the_harness_no_report_note_and_defers_to_named_files(self):
+        note = ('- Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final '
+                'assistant message \u2014 the parent agent reads your text output, not files you create. (Files written '
+                'as input to another tool are fine; this note is about report files.)')
+        system = 'Agent manual: save the run to its directory.\n- Keep it short.\n' + note + '\n- Use absolute paths.'
+        body = {'system': system, 'messages': [{'role': 'user', 'content': 'Go.'}]}
+        agent = json.loads(request.translate(body, self.model, 'lane-example', agent_contract=True).body_bytes)
+        text = agent['input'][0]['content'][0]['text']
+        self.assertNotIn('Do NOT Write report', text)
+        self.assertEqual(text, 'Agent manual: save the run to its directory.\n- Keep it short.\n- Use absolute paths.')
+        self.assertIn('names a file', request.AGENT_CONTRACT)
+        main = json.loads(request.translate(body, self.model, 'lane-example').body_bytes)
+        self.assertIn(note, main['input'][0]['content'][0]['text'])
+
     def test_prefix_survives_empty_thinking_and_later_tool_history(self):
         body = {'system': [{'type': 'text', 'text': 'Stable instructions.'}], 'messages': [
             {'role': 'user', 'content': 'First question.'}, {'role': 'assistant', 'content': [
