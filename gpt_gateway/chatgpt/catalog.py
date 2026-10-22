@@ -22,9 +22,27 @@ class Model:
     default_verbosity: Optional[str]
     reasoning_summary: Optional[str]  # the summary a request names; None sends none
     service_tiers: Tuple[str, ...]
+    supports_reasoning_effort_updates: bool = False
+    support_verbosity: bool = False
+    effective_context_window_percent: int = 95
+
+    @property
+    def effective_context_window(self) -> Optional[int]:
+        # codex-rs/protocol/src/openai_models.rs:521-527: reserve model-owned headroom.
+        if self.context_window is None:
+            return None
+        return self.context_window * self.effective_context_window_percent // 100
+
+    def service_tier_for_request(self, requested: Optional[str]) -> Optional[str]:
+        # config_types.rs:539-552 normalizes fast; openai_models.rs:1007-1022 filters tiers.
+        if requested == 'fast':
+            requested = 'priority'
+        if requested is None or requested == 'default':
+            return None
+        return requested if requested == 'flex' or requested in self.service_tiers else None
 
 
-# codex-rs/protocol/src/openai_models.rs:195-202,228-232,406-489,846-851.
+# codex-rs/protocol/src/openai_models.rs:195-202,228-232,406-491,846-851.
 def parse(models_json) -> dict:
     """Read a decoded /codex/models response or Codex cache envelope.
 
@@ -48,13 +66,19 @@ def parse(models_json) -> dict:
         tiers = _catalog_options(entry.get('service_tiers', []), 'service_tiers', 'id')
         default = _catalog_string(entry.get('default_reasoning_level'), 'default_reasoning_level', nullable=True)
         verbosity = _catalog_string(entry.get('default_verbosity'), 'default_verbosity', nullable=True)
+        updates = _catalog_bool(entry, 'supports_reasoning_effort_updates', False)
+        support_verbosity = _catalog_bool(entry, 'support_verbosity', False)
+        percent = entry.get('effective_context_window_percent', 95)
+        if type(percent) is not int or not 1 <= percent <= 100:
+            raise ValueError('effective_context_window_percent must be an integer from 1 to 100')
         summaries = _catalog_bool(entry, 'supports_reasoning_summaries', True)
         summary_parameter = _catalog_bool(entry, 'supports_reasoning_summary_parameter', True)
         summary = _catalog_string(entry.get('default_reasoning_summary', 'auto'), 'default_reasoning_summary')
         if summary not in _SUMMARIES:
             raise ValueError('default_reasoning_summary must be one of ' + ', '.join(_SUMMARIES))
         sent = summary if summaries and summary_parameter and summary != 'none' else None
-        models[slug] = Model(slug, window, levels, default, verbosity, sent, tiers)
+        models[slug] = Model(slug, window, levels, default, verbosity, sent, tiers,
+                             updates, support_verbosity, percent)
     return models
 
 

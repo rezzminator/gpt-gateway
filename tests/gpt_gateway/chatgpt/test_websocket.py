@@ -4,11 +4,12 @@ from pathlib import Path
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from gpt_gateway.capture import SENT_BODY
 from gpt_gateway.chatgpt import stream, websocket
 from gpt_gateway.chatgpt.auth import Credentials
+from gpt_gateway.upstream import UpstreamError
 from tests import fakes
 from tests.gpt_gateway.chatgpt import test_errors as errors_tests
 from tests.gpt_gateway.chatgpt import test_route as route_tests
@@ -32,6 +33,12 @@ class MessageTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 websocket.message(bad)
 
+    def test_turn_state_merges_metadata_without_duplicate_json_keys(self):
+        body = b'{"model":"m","client_metadata":{"thread_id":"thread"}}'
+        framed = websocket.message(body, "token")
+        self.assertEqual(framed.count(b'"client_metadata"'), 1)
+        self.assertEqual(json.loads(framed)['client_metadata'], {'thread_id':'thread','x-codex-turn-state':'token'})
+
     def test_a_socket_serves_one_lane_and_one_login(self):
         one, other = Credentials("token-a", "account-a"), Credentials("token-b", "account-a")
         self.assertEqual(websocket.socket_key("lane", one), websocket.socket_key("lane", Credentials("token-a", "account-a")))
@@ -46,6 +53,22 @@ class MessageTest(unittest.TestCase):
 
 
 class PauseTest(unittest.TestCase):
+    def test_invalid_compression_upgrade_closes_socket_and_releases_reservation(self):
+        sock, upstream = Mock(), Mock()
+        upstream.websocket.return_value = websocket.Upgrade(
+            101, [("Sec-WebSocket-Extensions", "permessage-deflate; unknown")], socket=sock)
+        sockets = websocket.Sockets(upstream, lambda kind, **fields: None)
+        key = ("lane", "login")
+        self.assertIsNone(sockets.checkout(key))
+        with self.assertRaises(Exception) as raised:
+            sockets.open(key, [])
+        with self.subTest(check="protocol error"):
+            self.assertIsInstance(raised.exception, UpstreamError)
+        with self.subTest(check="socket closed"):
+            sock.close.assert_called_once_with()
+        with self.subTest(check="reservation released"):
+            self.assertNotIn(key, sockets.busy)
+
     def test_five_transport_failures_in_a_row_pause_the_socket_for_http_and_a_success_resets_the_count(self):
         events = []
         sockets = websocket.Sockets(None, lambda kind, **fields: events.append((kind, fields)))
@@ -106,8 +129,8 @@ class WebSocketRouteTest(unittest.TestCase):
         self.send(port)
         self.send(port, dict(self.body, messages=self.body["messages"] + [CALL, RESULT]))
         first, second = (json.loads(x["body"]) for x in self.responses())
-        self.assertNotIn("client_metadata", first)
-        self.assertEqual(second["client_metadata"], {"x-codex-turn-state": "ts-ws"})
+        self.assertNotIn("x-codex-turn-state", first["client_metadata"])
+        self.assertEqual(second["client_metadata"], dict(first["client_metadata"], **{"x-codex-turn-state": "ts-ws"}))
         self.assertNotIn("x-codex-turn-state", self.fake.upgrades[0])
         self.assertEqual([(r["turn_state"], r["stale"], r["transport"], r["delta"]) for r in fakes.gpt_rows(rt)],
                          [("issued", 0, "ws", FULL), ("sent", 0, "ws", FULL)])
@@ -269,6 +292,20 @@ class WebSocketRouteTest(unittest.TestCase):
         self.assertEqual(len(self.fake.upgrades), 1)
         n = len(json.loads(Path(sorted(Path(self.capture).rglob(SENT_BODY))[1]).read_bytes())["input"])
         self.assertEqual(self.endings(rt), [(0, 0, "ws", FULL), (1, 0, "ws", "1/%d" % n)])
+
+    def test_contradictory_completion_output_cannot_prove_a_continuation(self):
+        events = [json.loads(text) for text in fakes.sse_data(fakes.responses_turn(True, response_id='resp_one'))]
+        events[-1]['response']['output'] = []  # Item.done delivered calls, but completion contradicts them.
+        script = b''.join(fakes.responses_event(event.pop('type'), **event) for event in events)
+        self.fake.script = [(200, script), (200, fakes.responses_turn())]
+        rt, port = self.gateway()
+        resp, data = self.send(port)
+        self.assertEqual(resp.status, 200)
+        self.body['messages'] += [dict(role='assistant', content=stream.accumulate(data)['content']), RESULT]
+        self.assertEqual(self.send(port)[0].status, 200)
+        second = json.loads(self.responses()[1]['body'])
+        self.assertNotIn('previous_response_id', second)
+        self.assertEqual(self.endings(rt)[-1][-1], FULL)
 
     def test_a_continuation_the_backend_no_longer_holds_goes_again_whole_on_a_fresh_socket(self):
         gone = {"error": {"code": "previous_response_not_found", "message": "Previous response not found."}}

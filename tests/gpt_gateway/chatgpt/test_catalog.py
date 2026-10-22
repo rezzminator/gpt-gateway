@@ -19,6 +19,63 @@ class CatalogTest(unittest.TestCase):
                 self.assertEqual(catalog.parse(envelope), {'gpt-example': catalog.Model(
                     'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', ('priority',))})
 
+    def test_backward_compatible_model_capability_defaults(self):
+        for model in (catalog.Model('gpt-example', 272000, (), None, None, None, ()),
+                      catalog.parse({'models': [self.entry()]})['gpt-example']):
+            with self.subTest(model=model):
+                self.assertIs(getattr(model, 'supports_reasoning_effort_updates', None), False)
+                self.assertIs(getattr(model, 'support_verbosity', None), False)
+                self.assertEqual(getattr(model, 'effective_context_window_percent', None), 95)
+                self.assertEqual(getattr(model, 'effective_context_window', None), 258400)
+                self.assertEqual(model.context_window, 272000)
+
+    def test_explicit_capabilities_and_effective_context_window(self):
+        entry = self.entry(supports_reasoning_effort_updates=True, support_verbosity=True,
+                           effective_context_window_percent=80)
+        entry['context_window'] = 101
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        self.assertIs(getattr(model, 'supports_reasoning_effort_updates', None), True)
+        self.assertIs(getattr(model, 'support_verbosity', None), True)
+        self.assertEqual(getattr(model, 'effective_context_window_percent', None), 80)
+        self.assertEqual(getattr(model, 'effective_context_window', None), 80)
+        self.assertEqual(model.context_window, 101)
+        entry['context_window'] = None
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        self.assertIsNone(getattr(model, 'effective_context_window', 'missing'))
+
+    def test_service_tier_resolver(self):
+        # Codex normalizes the fast alias to priority before filtering advertised tiers.
+        for tiers, requested, expected in (
+                (('priority',), 'fast', 'priority'), (('priority',), 'priority', 'priority'),
+                (('fast',), 'fast', None), (('fast', 'priority'), 'fast', 'priority'),
+                (('future',), 'future', 'future'), (('priority',), 'unsupported', None),
+                (('default', 'priority'), 'default', None), (('priority',), None, None),
+                ((), 'fast', None), ((), 'priority', None), ((), 'flex', 'flex'),
+                (('priority',), 'flex', 'flex')):
+            with self.subTest(tiers=tiers, requested=requested):
+                entry = self.entry(service_tiers=[{'id': tier} for tier in tiers],
+                                   default_service_tier='priority')
+                model = catalog.parse({'models': [entry]})['gpt-example']
+                self.assertEqual(model.service_tiers, tiers)
+                resolver = getattr(model, 'service_tier_for_request', None)
+                self.assertTrue(callable(resolver), 'model must resolve request service tiers')
+                self.assertEqual(resolver(requested), expected)
+        entry = self.entry(additional_speed_tiers=['fast'])
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        resolver = getattr(model, 'service_tier_for_request', None)
+        self.assertTrue(callable(resolver), 'model must resolve request service tiers')
+        self.assertIsNone(resolver('fast'), 'picker-only speed tiers must not authorize wire tiers')
+
+    def test_capability_metadata_validated_at_entry(self):
+        for field, values in (
+                ('supports_reasoning_effort_updates', (None, 0, 1, 'true', [], {})),
+                ('support_verbosity', (None, 0, 1, 'false', [], {})),
+                ('effective_context_window_percent', (None, True, False, 0, -1, 101, 95.0, '95'))):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, field):
+                        catalog.parse({'models': [self.entry(**{field: value})]})
+
     def test_summary_flags(self):
         entry = self.entry(supports_reasoning_summaries=False)
         self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)

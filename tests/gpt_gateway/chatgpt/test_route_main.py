@@ -24,7 +24,7 @@ class MainRouteTest(unittest.TestCase):
                 self.assertNotIn("x-openai-subagent", self.responses()[-1]["headers"])
                 sent = json.loads(self.responses()[-1]["body"])
                 self.assertEqual(sent["model"], "gpt-test")
-                self.assertEqual(sent.get("service_tier"), "priority" if "-fast" in model else None)
+                self.assertIsNone(sent.get("service_tier"))  # This catalog advertises no priority tier.
         response, data = self.send(port, dict(self.body, model="unknown"), headers)
         self.assertEqual(response.status, 400)
         self.assertEqual(json.loads(data)["error"]["message"],

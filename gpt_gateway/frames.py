@@ -1,12 +1,13 @@
 """RFC 6455 frames over a socket `gpt_gateway/upstream.py` upgraded: masked frames out, whole text messages in.
 
-The client masks every frame it sends (§ 5.3); a server never masks its own. No extension is negotiated, so a frame
-with a reserved bit set is a protocol error.
+The client masks every frame it sends (§ 5.3); a server never masks its own. RFC 7692 permessage-deflate is used
+only after negotiation; inflation and fragmented messages share the same bounded message limit.
 """
 import os
 import socket
 import ssl
 import struct
+import zlib
 
 from .upstream import UpstreamError
 
@@ -23,12 +24,32 @@ def mask(data, key):
     return (int.from_bytes(data, "big") ^ int.from_bytes((key * (n // 4 + 1))[:n], "big")).to_bytes(n, "big")
 
 
-def parse_frame(buffer):
+def deflate_options(value):
+    """Validate the response to our fixed RFC 7692 offer; return (enabled, server_no_context_takeover)."""
+    if value is None:
+        return False, False
+    fields = [part.strip().lower() for part in value.split(";")]
+    parameters = [tuple(part.strip() for part in field.partition("=")) for field in fields[1:]]
+    names = [name for name, _, _ in parameters]
+    valid = fields[0] == "permessage-deflate" and len(names) == len(set(names))
+    for name, equals, argument in parameters:
+        if name == "server_max_window_bits":
+            # RFC 7692 §7.1.2.1 permits this even without an offer. Our -15 inflater accepts every smaller window.
+            valid = valid and bool(equals) and argument in tuple(
+                spelling for bits in range(8, 16) for spelling in (str(bits), '"%d"' % bits))
+        else:
+            valid = valid and not equals and name in {"client_no_context_takeover", "server_no_context_takeover"}
+    if not valid:
+        raise UpstreamError("websocket protocol error: unsupported deflate extension %r" % value[:200], "protocol")
+    return True, "server_no_context_takeover" in names
+
+
+def parse_frame(buffer, compression=False):
     """(fin, opcode, payload, size) of the whole frame at the start of `buffer`, or None while it is incomplete."""
     if len(buffer) < 2:
         return None
     first, second = buffer[0], buffer[1]
-    if first & 0x70:
+    if first & 0x30 or first & 0x40 and (not compression or first & 0x0F not in (TEXT, BINARY)):
         raise UpstreamError("websocket protocol error: reserved bits %#x without a negotiated extension" % first,
                             "protocol")
     if second & 0x80:
@@ -46,20 +67,27 @@ def parse_frame(buffer):
         raise UpstreamError("websocket protocol error: a %d-byte frame exceeds the limit" % length, "protocol")
     if len(buffer) < start + length:
         return None
-    return bool(first & 0x80), first & 0x0F, bytes(buffer[start:start + length]), start + length
+    return bool(first & 0x80), first & 0x4F, bytes(buffer[start:start + length]), start + length
 
 
 class WebSocket:
     """One upgraded connection, driven by one thread at a time: masked frames out, whole text messages in, pings
     answered. A close frame, EOF or a reset raises ConnectionResetError; a frame the protocol forbids, UpstreamError."""
 
-    def __init__(self, sock, pending=b"", event=None):
+    def __init__(self, sock, pending=b"", event=None, extension=None):
         self.sock, self.pending = sock, bytearray(pending)
         self.event = event if event is not None else (lambda kind, **fields: None)
         self.closed = False
+        self.compression, self.server_no_context_takeover = deflate_options(extension)
+        self.inflater = None
 
     def send(self, data, opcode=TEXT):
+        compressed = self.compression and opcode == TEXT and bool(data)
+        if compressed:
+            compressor = zlib.compressobj(wbits=-15)
+            data = (compressor.compress(data) + compressor.flush(zlib.Z_SYNC_FLUSH))[:-4]
         key = os.urandom(4)
+        opcode |= 0x40 if compressed else 0
         n = len(data)
         if n < 126:
             head = struct.pack("!BB", 0x80 | opcode, 0x80 | n)
@@ -71,7 +99,7 @@ class WebSocket:
 
     def _frame(self, block=True):
         while True:
-            frame = parse_frame(self.pending)
+            frame = parse_frame(self.pending, self.compression)
             if frame is not None:
                 del self.pending[:frame[3]]
                 return frame[:3]
@@ -85,9 +113,10 @@ class WebSocket:
 
     def receive(self):
         """The next text message's bytes; ping, pong and fragmentation stay inside."""
-        parts, kind = [], None
+        parts, kind, compressed, size, wire_size = [], None, False, 0, 0
         while True:
             fin, opcode, payload = self._frame()
+            flagged, opcode = bool(opcode & 0x40), opcode & 0x0F
             if opcode == PING:
                 self.send(payload, PONG)
                 continue
@@ -99,9 +128,25 @@ class WebSocket:
                 raise ConnectionResetError("websocket closed by the server: %d %s" % (
                     code, payload[2:202].decode("utf-8", "replace")))
             if opcode in (TEXT, BINARY) and kind is None:
-                kind = opcode
+                kind, compressed = opcode, flagged
+                if compressed and (self.inflater is None or self.server_no_context_takeover):
+                    self.inflater = zlib.decompressobj(-15)
             elif opcode != CONTINUATION or kind is None:
                 raise UpstreamError("websocket protocol error: opcode %#x out of sequence" % opcode, "protocol")
+            wire_size += len(payload)
+            if wire_size > MESSAGE_LIMIT:
+                raise UpstreamError("websocket protocol error: message exceeds the wire limit", "protocol")
+            if compressed:
+                try:
+                    payload = self.inflater.decompress(payload + (b"\x00\x00\xff\xff" if fin else b""),
+                                                       MESSAGE_LIMIT - size + 1)
+                except zlib.error as error:
+                    raise UpstreamError("websocket protocol error: invalid deflate payload: %s" % error, "protocol") from error
+                if self.inflater.unused_data:
+                    raise UpstreamError("websocket protocol error: unexpected end of deflate stream", "protocol")
+            size += len(payload)
+            if size > MESSAGE_LIMIT:
+                raise UpstreamError("websocket protocol error: message exceeds the limit", "protocol")
             parts.append(payload)
             if fin:
                 if kind == BINARY:

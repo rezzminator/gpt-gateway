@@ -27,6 +27,29 @@ class Client:
             headers["x-openai-subagent"] = "collab_spawn"
         return headers
 
+    def _response_headers(self, translation, lane_key, credentials, subagent):
+        # responses_metadata.rs:335-413: only owned, bounded compatibility fields become headers.
+        body = json.loads(translation.body_bytes)
+        metadata = body.get("client_metadata") or {}
+        headers = self._headers(credentials, subagent)
+        model, tier = body.get("model"), body.get("service_tier")
+        values = [model] + ([] if tier is None else [tier])
+        if all(isinstance(value, str) and 0 < len(value) <= 200 and
+               all(c.isascii() and (c.isalnum() or c in "._-") for c in value) for value in values):
+            # client.rs:1280-1296: a routing hint, never an authorization or entitlement claim.
+            headers["x-codex-routing-hint"] = "model=" + model + (";tier=" + tier if tier is not None else "")
+        for field, name in (("session_id", "session-id"), ("thread_id", "thread-id"),
+                            ("x-codex-window-id", "x-codex-window-id"),
+                            ("x-codex-parent-thread-id", "x-codex-parent-thread-id"),
+                            ("x-codex-turn-metadata", "x-codex-turn-metadata")):
+            value = metadata.get(field)
+            if isinstance(value, str) and 0 < len(value) <= 1024 and all(32 <= ord(c) < 127 for c in value):
+                headers[name] = value
+        headers.setdefault("session-id", lane_key)
+        headers.setdefault("thread-id", lane_key)
+        headers["x-client-request-id"] = headers["thread-id"]
+        return headers
+
     # codex-rs/core/src/client.rs:652-660,947-1071; no ingress headers cross this boundary.
     def responses(self, translation, lane_key, credentials, turn_state=None, observe=None, fork=False, request_id=None,
                   subagent=False):
@@ -39,9 +62,8 @@ class Client:
             answer = self._over_websocket(translation, lane_key, credentials, turn_state, observe, fork, subagent)
             if answer is not None:
                 return answer
-        headers = self._headers(credentials, subagent)
+        headers = self._response_headers(translation, lane_key, credentials, subagent)
         headers.update({"Accept": "text/event-stream", "Content-Type": "application/json",
-                        "session-id": lane_key, "x-client-request-id": lane_key,
                         "content-length": str(len(translation.body_bytes))})
         if turn_state:
             headers[turn.HEADER] = turn_state  # codex-rs/core/src/client.rs:2119-2140
@@ -49,16 +71,17 @@ class Client:
                                   request_id=request_id)
 
     # codex-rs/core/src/client.rs:2336-2354: the upgrade carries the HTTP request's headers and the beta.
-    def _upgrade_headers(self, lane_key, credentials, subagent):
-        headers = self._headers(credentials, subagent)
-        headers.update({"OpenAI-Beta": websocket.BETA, "session-id": lane_key, "thread-id": lane_key,
-                        "x-client-request-id": lane_key})
+    def _upgrade_headers(self, lane_key, credentials, subagent, translation):
+        headers = self._response_headers(translation, lane_key, credentials, subagent)
+        headers["OpenAI-Beta"] = websocket.BETA
+        headers["Sec-WebSocket-Extensions"] = "permessage-deflate; client_no_context_takeover; server_no_context_takeover"
         return headers.items()
 
     def _over_websocket(self, translation, lane_key, credentials, turn_state, observe, fork=False, subagent=False):
         """The started Answer or a Refusal; None when the upgrade showed the endpoint serves no WebSocket. A kept socket
         that fails before its first message, or that the backend asks to replace, gives way once to a fresh one."""
         request = continuation.Request(translation.body_bytes, turn_state)
+        request.supports_effort_updates = translation.supports_effort_updates
         pool_key = websocket.socket_key(lane_key, credentials)
         self.local.transport, self.local.reused, self.local.stale, self.local.delta = "ws", False, False, ""
         for attempt in (1, 2):
@@ -66,7 +89,7 @@ class Client:
             kept = self.sockets.checkout(pool_key, wait if attempt == 1 else 0)
             if kept is None:
                 try:
-                    kept = self.sockets.open(pool_key, self._upgrade_headers(lane_key, credentials, subagent))
+                    kept = self.sockets.open(pool_key, self._upgrade_headers(lane_key, credentials, subagent, translation))
                 except UpstreamError as error:
                     self.sockets.failed(error.message)
                     raise

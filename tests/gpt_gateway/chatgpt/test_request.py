@@ -16,7 +16,7 @@ FIXTURES = Path(__file__).parent / 'fixtures'
 class RequestTest(unittest.TestCase):
     def setUp(self):
         self.model = catalog.Model('gpt-example', 272000, ('minimal', 'low', 'medium', 'high', 'xhigh'),
-                                   'medium', 'low', 'auto', ('priority',))
+                                   'medium', 'low', 'auto', ('priority',), support_verbosity=True)
 
     def result(self, body, **model_changes):
         translation = request.translate(body, dataclasses.replace(self.model, **model_changes), 'lane-example')
@@ -44,6 +44,25 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(kept['prompt_cache_retention'], '24h')
         del kept['prompt_cache_retention']
         self.assertEqual(kept, json.loads(plain.body_bytes))  # the cache key included
+
+    def test_developer_identity_metadata_and_optional_delivery_controls(self):
+        body = {'system': 'Stable instructions.', 'messages': [{'role': 'user', 'content': 'Hi'}]}
+        value, _ = self.result(body)
+        developer = value['input'][0]
+        self.assertTrue(developer.get('id', '').startswith('msg_'))
+        self.assertEqual(value.get('client_metadata', {}).get('thread_id'), 'lane-example')
+        self.assertEqual(value.get('stream_options'), {'reasoning_summary_delivery': 'sequential_cutoff'})
+        later, _ = self.result(dict(body, messages=body['messages'] + [{'role':'assistant','content':'Hello'}]))
+        self.assertEqual(developer, later['input'][0])
+        other = json.loads(request.translate(body, self.model, 'other-lane').body_bytes)
+        self.assertNotEqual(developer['id'], other['input'][0]['id'])
+        changed, _ = self.result(dict(body, system='Different instructions.'))
+        self.assertNotEqual(developer['id'], changed['input'][0]['id'])
+        unsupported, _ = self.result({}, support_verbosity=False, reasoning_summary=None)
+        self.assertNotIn('text', unsupported)
+        self.assertNotIn('stream_options', unsupported)
+        unsupported, _ = self.result({'model':'gpt-example-fast'}, service_tiers=())
+        self.assertNotIn('service_tier', unsupported)
 
     def test_empty_tools_still_allows_parallel_calls(self):
         value, _ = self.result({'tools': []}, slug='gpt-6-sol')
@@ -147,7 +166,7 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(value.get('reasoning'), {'effort': 'medium', 'summary': 'concise'})
         value, _ = self.result({}, reasoning_summary=None, default_verbosity=None, default_reasoning=None)
         self.assertEqual(value.get('reasoning'), {})
-        self.assertEqual(value['text'], {})
+        self.assertNotIn('text', value)
 
     def test_a_pinned_effort_replaces_the_asked_one_within_the_catalog(self):
         # The route pins an activity-summary fork to its lane's effort; Translation.effort is what the body sends.

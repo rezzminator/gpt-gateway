@@ -23,9 +23,27 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(headers["authorization"], "Bearer invented-bearer")
         self.assertEqual(headers["chatgpt-account-id"], "invented-account")
         self.assertEqual(headers["session-id"], "invented-lane")
+        self.assertEqual(headers.get("thread-id"), "invented-lane")
         self.assertEqual(headers["content-length"], "2")
         self.assertEqual(client.models(creds), fakes.CHATGPT_MODELS)
         self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
+
+    def test_both_transports_use_only_owned_compatibility_metadata(self):
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
+        self.addCleanup(client.close)
+        client.upstream = Mock()
+        metadata = {"session_id":"session", "thread_id":"child", "x-codex-window-id":"window",
+                    "x-codex-parent-thread-id":"parent", "x-codex-turn-metadata":'{"request_kind":"turn"}',
+                    "Authorization":"must-not-cross", "x-oai-attestation":"must-not-cross"}
+        body = json.dumps({"client_metadata": metadata}).encode()
+        client.responses(Translation(body, {}, (), len(body)), "lane", Credentials("token", "account"), subagent=True)
+        headers = dict(client.upstream.send.call_args.args[3])
+        self.assertEqual(headers.get("thread-id"), "child")
+        self.assertEqual(headers.get("session-id"), "session")
+        self.assertEqual(headers.get("x-codex-parent-thread-id"), "parent")
+        self.assertEqual(headers.get("x-codex-window-id"), "window")
+        self.assertEqual(headers.get("Authorization"), "Bearer token")
+        self.assertNotIn("x-oai-attestation", headers)
 
     def test_main_lane_omits_subagent_identity_on_both_transports(self):
         for transport in ('http', 'websocket'):
@@ -40,6 +58,18 @@ class ClientTest(unittest.TestCase):
                 response.close()
                 headers = fake.upgrades[-1] if transport == 'websocket' else fake.seen[-1]['headers']
                 self.assertNotIn('x-openai-subagent', headers)
+                self.assertEqual(headers.get('x-codex-routing-hint'), 'model=gpt-test')
+
+    def test_routing_hint_uses_only_bounded_model_and_tier(self):
+        client = Client(SimpleNamespace(origin='http://127.0.0.1:1', transport='http'), lambda kind, **fields: None)
+        self.addCleanup(client.close)
+        for model, tier, expected in [('gpt-test', 'priority', 'model=gpt-test;tier=priority'),
+                                      ('gpt-test;other=x', None, None), ('gpt-test', 'bad\r\nheader', None),
+                                      ('g' * 1025, None, None)]:
+            body = json.dumps({'model':model, 'service_tier':tier,
+                               'client_metadata':{'x-codex-routing-hint':'forged'}}).encode()
+            headers = client._response_headers(Translation(body, {}, (), len(body)), 'lane', Credentials('token','account'), False)
+            self.assertEqual(headers.get('x-codex-routing-hint'), expected)
 
     def test_responses_name_the_request_to_the_upstream_for_its_retry_event(self):
         client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)

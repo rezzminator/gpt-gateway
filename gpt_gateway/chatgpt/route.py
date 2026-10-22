@@ -223,7 +223,9 @@ class Route:
         agent_id = headers.get("x-claude-code-agent-id", "")
         subagent = bool(agent_id)
         agent_contract = self.agent_contract and subagent
-        key = lane.key(headers.get("x-claude-code-session-id", ""), agent_id)
+        session_id = headers.get("x-claude-code-session-id", "")
+        key = lane.key(session_id, agent_id)
+        parent_key = lane.key(session_id, "") if subagent else None
         row = {} if row is None else row
         row.update(lane=key, slug=model.slug)
         state = self.lane_state(key)
@@ -234,7 +236,7 @@ class Route:
             with self.lock:
                 pinned = state.effort if summary else None
             sending = None if settings is None else self.retention_sends(settings)
-            translation = request.translate(body, model, key, pinned, agent_contract, sending)
+            translation = request.translate(body, model, key, pinned, agent_contract, sending, parent_key)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
@@ -337,7 +339,7 @@ class Route:
                     dropped = True
                     body = without_reasoning(body)
                 if decision.drop_reasoning or strip:
-                    translation = request.translate(body, model, key, pinned, agent_contract, sending)
+                    translation = request.translate(body, model, key, pinned, agent_contract, sending, parent_key)
                     cap.sent_body(translation.body_bytes)
                     attachments = attachment_count(body)
                     with self.lock:

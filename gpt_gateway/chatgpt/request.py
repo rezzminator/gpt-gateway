@@ -7,6 +7,7 @@ Permission notices: THIRD_PARTY_NOTICES.md.
 from dataclasses import dataclass
 import json
 import re
+import uuid
 from typing import Optional
 
 from ..hooks import last_turn_message
@@ -41,6 +42,7 @@ class Translation:
     notes: tuple
     estimate_chars: int
     effort: Optional[str] = None  # the reasoning effort the body sends, None when it names none
+    supports_effort_updates: bool = False
 
 
 def _compact_json(value):
@@ -50,7 +52,8 @@ def _compact_json(value):
 # codex-rs/codex-api/src/common.rs:278-304; core/src/client.rs:947-1071.
 # claude-code-proxy/src/providers/codex/translate/request.rs:480-549.
 def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = None,
-              agent_contract: bool = False, retention: Optional[str] = None) -> Translation:
+              agent_contract: bool = False, retention: Optional[str] = None,
+              parent_key: Optional[str] = None) -> Translation:
     """Translate without I/O or mutation; estimate_chars counts serialized Unicode characters, image and file data excluded.
 
     effort, when given, replaces the effort the body asks for: the route's pin of an activity-summary fork or a compaction
@@ -71,7 +74,10 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
         parts = [{'type': 'input_text', 'text': instructions}]
         if agent_contract:
             parts.append({'type': 'input_text', 'text': AGENT_CONTRACT})
-        items.insert(0, _response_message('developer', parts))
+        developer = _response_message('developer', parts)
+        namespace = uuid.uuid5(uuid.NAMESPACE_OID, lane_key)
+        developer['id'] = 'msg_' + str(uuid.uuid5(namespace, '\n\n'.join(part['text'] for part in parts)))
+        items.insert(0, developer)
     reasoning = {}
     effort = _request_effort(body, model, notes, effort)
     if effort is not None:
@@ -84,8 +90,9 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     raw_model = body.get('model', model.slug)
     if raw_model.endswith('[1m]'):
         raw_model = raw_model[:-4]
-    if raw_model.endswith('-fast'):
-        result['service_tier'] = 'priority'
+    tier = model.service_tier_for_request('fast' if raw_model.endswith('-fast') else None)
+    if tier is not None:
+        result['service_tier'] = tier
     result['input'] = _normalize_calls(items)
     result['tools'] = registered
     result['tool_choice'] = tools.tool_choice(body, names)
@@ -93,20 +100,31 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     result['reasoning'] = reasoning
     result['store'] = False
     result['include'] = ['reasoning.encrypted_content']
+    if model.reasoning_summary is not None:
+        result['stream_options'] = {'reasoning_summary_delivery': 'sequential_cutoff'}
     result['prompt_cache_key'] = lane_key
     if retention is not None:
         result['prompt_cache_retention'] = retention
     text = {}
-    if model.default_verbosity is not None:
+    if model.support_verbosity and model.default_verbosity is not None:
         text['verbosity'] = model.default_verbosity
     output_format = body.get('output_config', {}).get('format')
     if isinstance(output_format, dict) and output_format.get('type') == 'json_schema':
         text['format'] = {'type': 'json_schema', 'name': output_format.get('name', 'response'),
                           'strict': True, 'schema': output_format['schema']}
-    result['text'] = text
+    if text:
+        result['text'] = text
+    metadata = {'session_id': lane_key, 'thread_id': lane_key, 'x-codex-window-id': parent_key or lane_key}
+    turn_metadata = {'session_id': lane_key, 'thread_id': lane_key, 'window_id': parent_key or lane_key,
+                     'request_kind': 'compaction' if compaction(body) else 'turn'}
+    if parent_key:
+        metadata.update({'x-codex-parent-thread-id': parent_key, 'x-openai-subagent': 'collab_spawn'})
+        turn_metadata['parent_thread_id'] = parent_key
+    metadata['x-codex-turn-metadata'] = json.dumps(turn_metadata, separators=(',', ':'), ensure_ascii=True)
+    result['client_metadata'] = metadata
     serialized = _compact_json(result)
     return Translation(serialized.encode('utf-8'), names, tuple(notes),
-                       len(serialized) - _attachment_chars(result['input']), effort)
+                       len(serialized) - _attachment_chars(result['input']), effort, model.supports_reasoning_effort_updates)
 
 
 def activity_summary(body: dict) -> bool:

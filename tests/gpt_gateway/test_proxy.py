@@ -560,7 +560,7 @@ class RouteGateTest(unittest.TestCase):
         self.assertEqual([r["input_tokens"] for r in fakes.gpt_rows(rt)], [100])  # the upstream's total, image included
         resp, data = self.send(port, path="/v1/messages/count_tokens")
         # 100 total is under the allowance, so the turn teaches nothing: the text keeps the prior 0.25 ratio
-        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2137))
+        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2293))
 
 
 class RouteSecretStripTest(unittest.TestCase):

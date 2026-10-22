@@ -19,7 +19,7 @@ import threading
 
 from .. import clock
 from ..frames import WebSocket
-from ..upstream import Upgrade, header
+from ..upstream import Upgrade, UpstreamError, header
 from . import keeper, turn
 
 PATH = "/backend-api/codex/responses"
@@ -55,8 +55,9 @@ def message(body, turn_state=None):
         raise ValueError("a Responses body is a JSON object")
     out = b'{"type":"response.create"' + (b"," + body[1:] if body[1:-1].strip() else b"}")
     if turn_state:
-        metadata = json.dumps({turn.HEADER: turn_state}, ensure_ascii=False, separators=(",", ":")).encode()
-        out = out[:-1] + b',"client_metadata":' + metadata + b"}"
+        value = json.loads(out)
+        value.setdefault("client_metadata", {})[turn.HEADER] = turn_state
+        out = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
     return out
 
 
@@ -205,7 +206,13 @@ class Sockets:
             self.release(pool_key)
             return answer
         self.event("websocket_open", lane=pool_key[0], handshake_ms=clock.milliseconds(clock.monotonic() - started))
-        kept = Kept(WebSocket(answer.socket, answer.pending, self.event), pool_key, answer.headers)
+        try:
+            ws = WebSocket(answer.socket, answer.pending, self.event, header(answer.headers, "sec-websocket-extensions"))
+        except UpstreamError:
+            answer.socket.close()
+            self.release(pool_key)
+            raise
+        kept = Kept(ws, pool_key, answer.headers)
         kept.out = True
         return kept
 
@@ -343,6 +350,11 @@ class Answer(Refusal):
                     self.output.append(event["item"])
                 elif kind == "response.completed" and isinstance(event.get("response"), dict):
                     self.response_id = event["response"].get("id")
+                    output = event["response"].get("output")
+                    if isinstance(output, list):
+                        if self.output and self.output != output:
+                            self.response_id = None  # Contradictory event inventories cannot prove the server's context.
+                        self.output = output
                 if kind in ENDED:
                     self.ended = kind
                 if b"\n" in text:  # SSE frames one data line; a message's JSON may span lines
