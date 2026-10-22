@@ -24,8 +24,8 @@ _PLACEHOLDER = 'DeferredToolPlaceholder'
 def translate_tools(body):
     """(tools, deferred tools by original name, short-to-original names, notes), retaining the client's order.
 
-    A tool marked defer_loading stays out of tools and is returned in deferred: it reaches the model only after a
-    tool_reference names it. Its short name is in the name map like any other."""
+    A tool marked defer_loading is returned separately in deferred; the request translator merges it into the
+    top-level tools list regardless of tool_reference history. Its short name is in the name map like any other."""
     converted, deferred, names, notes = [], {}, {}, []
     registered = set()
     for tool in body.get('tools', []):

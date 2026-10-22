@@ -17,20 +17,11 @@ class CatalogTest(unittest.TestCase):
         for envelope in ({'models': [entry]}, {'models': [entry], 'etag': 'synthetic', 'identity': {}}):
             with self.subTest(envelope=envelope):
                 self.assertEqual(catalog.parse(envelope), {'gpt-example': catalog.Model(
-                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', False, ('priority',))})
+                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', ('priority',))})
 
-    def test_lite_fallback_and_explicit_false_and_summary_flags(self):
-        for slug in ('gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.5'):
-            for override in (None, False, True):
-                entry = self.entry(supports_reasoning_summaries=False)
-                entry['slug'] = slug
-                if override is not None:
-                    entry['use_responses_lite'] = override
-                result = catalog.parse({'models': [entry]})
-                self.assertIn(slug, result)
-                model = result[slug]
-                self.assertEqual(model.responses_lite, slug != 'gpt-5.5' if override is None else override)
-                self.assertIsNone(model.reasoning_summary)
+    def test_summary_flags(self):
+        entry = self.entry(supports_reasoning_summaries=False)
+        self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)
         entry = self.entry(supports_reasoning_summaries=True, supports_reasoning_summary_parameter=False)
         self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)
 
@@ -62,7 +53,7 @@ class CatalogTest(unittest.TestCase):
         for field, value in [('context_window', 'big'), ('context_window', True),
                              ('supported_reasoning_levels', ['high']), ('supported_reasoning_levels', [{}]),
                              ('service_tiers', ['priority']), ('service_tiers', [{'name': 'Fast'}]),
-                             ('use_responses_lite', 'false'), ('supports_reasoning_summary_parameter', None),
+                             ('supports_reasoning_summary_parameter', None),
                              ('default_reasoning_level', 5), ('default_verbosity', {}), ('slug', None)]:
             with self.subTest(field=field, value=value):
                 entry = self.entry()

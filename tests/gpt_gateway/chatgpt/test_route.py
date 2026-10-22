@@ -86,7 +86,6 @@ class RouteTest(unittest.TestCase):
             h = req["headers"]
             self.assertEqual(h["session-id"], h["x-client-request-id"])
             self.assertEqual(h["x-openai-subagent"], "collab_spawn")
-            self.assertEqual(h["x-openai-internal-codex-responses-lite"], "true")
         folders = sorted(Path(self.capture).rglob(SENT_BODY))
         self.assertEqual(len(folders), 3)
         for path, req in zip(folders, seen):

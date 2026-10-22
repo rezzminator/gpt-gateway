@@ -37,7 +37,6 @@ _HARNESS_NO_REPORT_NOTE = re.compile(r'^- Do NOT Write report/summary/findings/a
 @dataclass(frozen=True)
 class Translation:
     body_bytes: bytes
-    lite: bool
     tool_names: dict
     notes: tuple
     estimate_chars: int
@@ -66,26 +65,19 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
         instructions = stripped.rstrip('\n') if count else instructions
     known = {tool['name'] for tool in registered + list(deferred.values()) if tool['type'] == 'function'}
     added = tools.added_tools(body, known, names)
-    lite = model.responses_lite
-    items = _request_items(body.get('messages', []), model.slug, instructions, notes,
-                           deferred if lite else {}, added if lite else {})
-    if not lite:
-        registered = registered + list(deferred.values()) + list(added.values())
+    items = _request_items(body.get('messages', []), model.slug, instructions, notes)
+    registered = registered + list(deferred.values()) + list(added.values())
     if instructions:
         parts = [{'type': 'input_text', 'text': instructions}]
         if agent_contract:
             parts.append({'type': 'input_text', 'text': AGENT_CONTRACT})
         items.insert(0, _response_message('developer', parts))
-    if model.responses_lite and registered:
-        items.insert(0, {'type': 'additional_tools', 'role': 'developer', 'tools': registered})
     reasoning = {}
     effort = _request_effort(body, model, notes, effort)
     if effort is not None:
         reasoning['effort'] = effort
     if model.reasoning_summary is not None:  # codex-rs/core/src/client.rs:880-882
         reasoning['summary'] = model.reasoning_summary
-    if model.responses_lite:
-        reasoning['context'] = 'all_turns'
     choice = body.get('tool_choice', {})
     disable_parallel = choice.get('disable_parallel_tool_use', False) if isinstance(choice, dict) else False
     result = {'model': model.slug, 'stream': True}
@@ -95,10 +87,9 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     if raw_model.endswith('-fast'):
         result['service_tier'] = 'priority'
     result['input'] = _normalize_calls(items)
-    if not model.responses_lite:
-        result['tools'] = registered
+    result['tools'] = registered
     result['tool_choice'] = tools.tool_choice(body, names)
-    result['parallel_tool_calls'] = not (disable_parallel or model.responses_lite)
+    result['parallel_tool_calls'] = not disable_parallel
     result['reasoning'] = reasoning
     result['store'] = False
     result['include'] = ['reasoning.encrypted_content']
@@ -114,7 +105,7 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
                           'strict': True, 'schema': output_format['schema']}
     result['text'] = text
     serialized = _compact_json(result)
-    return Translation(serialized.encode('utf-8'), model.responses_lite, names, tuple(notes),
+    return Translation(serialized.encode('utf-8'), names, tuple(notes),
                        len(serialized) - _attachment_chars(result['input']), effort)
 
 
@@ -170,14 +161,10 @@ def _response_message(role, parts):
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:865-980.
 # codex-rs/core/src/context/model_switch_instructions.rs:17-40.
-def _request_items(messages, slug, instructions, notes, deferred, added):
-    """deferred: tool name to lowered tool, each delivered once, as an additional_tools item right after the first
-    tool result that holds a tool_reference to it, so the first item, and the prompt prefix behind it, never changes.
-    added: tool name to lowered tool for each tool a role-system tool_addition block adds, delivered once as an item at
-    the block's position; a well-formed block leaves no text, and a model without additional_tools has them in its tools."""
+def _request_items(messages, slug, instructions, notes):
+    """Lower history; tool definitions live in the request's top-level tools."""
     items = []
     switch_after = None
-    delivered = set()
     for message in messages:
         role = 'developer' if message['role'] == 'system' else message['role']
         parts = []
@@ -185,14 +172,7 @@ def _request_items(messages, slug, instructions, notes, deferred, added):
         for block in _content_blocks(message.get('content', [])):
             kind = block.get('type', 'unknown')
             item = None
-            tool = tools.added_name(block) if message['role'] == 'system' else None
-            if tool is not None:
-                if tool in added and tool not in delivered:
-                    delivered.add(tool)
-                    if parts:
-                        items.append(_response_message(role, parts))
-                        parts = []
-                    items.append({'type': 'additional_tools', 'role': 'developer', 'tools': [added[tool]]})
+            if message['role'] == 'system' and tools.added_name(block) is not None:
                 continue
             if role == 'assistant' and kind == 'thinking':
                 try:
@@ -219,12 +199,6 @@ def _request_items(messages, slug, instructions, notes, deferred, added):
                     items.append(_response_message(role, parts))
                     parts = []
                 items.append(item)
-                if kind == 'tool_result':
-                    loaded = [tool for tool in _referenced(block) if tool in deferred and tool not in delivered]
-                    delivered.update(loaded)
-                    if loaded:
-                        items.append({'type': 'additional_tools', 'role': 'developer',
-                                      'tools': [deferred[tool] for tool in loaded]})
             else:
                 parts.append(_content_part(block, role))
         if parts:
@@ -260,14 +234,6 @@ def _content_part(block, role='user'):
     if kind == 'tool_reference' and isinstance(block.get('tool_name'), str):
         return {'type': text_type, 'text': 'Tool loaded: ' + block['tool_name']}
     return {'type': text_type, 'text': '[unsupported ' + kind + ']'}
-
-
-def _referenced(block):
-    """The tool names a tool result's tool_reference blocks load, in order, each once."""
-    content = block.get('content')
-    names = [part['tool_name'] for part in content if isinstance(part, dict) and part.get('type') == 'tool_reference'
-             and isinstance(part.get('tool_name'), str)] if isinstance(content, list) else []
-    return list(dict.fromkeys(names))
 
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:877-908.

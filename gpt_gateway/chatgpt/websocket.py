@@ -60,10 +60,10 @@ def message(body, turn_state=None):
     return out
 
 
-def socket_key(lane_key, lite, credentials):
-    """The pool key: one lane, one handshake shape, one login. A socket authenticated as another login serves no lane."""
+def socket_key(lane_key, credentials):
+    """The pool key: one lane, one login. A socket authenticated as another login serves no lane."""
     login = hashlib.sha256((credentials.access_token + "\0" + credentials.account_id).encode()).hexdigest()
-    return (lane_key, bool(lite), login)
+    return (lane_key, login)
 
 
 def json_headers(value):

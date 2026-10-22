@@ -51,14 +51,17 @@ class ContinuationTest(unittest.TestCase):
                                  (dict(body, type="response.create", client_metadata={"x-codex-turn-state": "ts-invented"}),
                                   "full:" + why))
 
-    def test_a_tool_delivered_after_a_result_is_in_the_new_tail_and_the_prefix_stays(self):
-        added = {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "later"}]}
-        output = {"type": "function_call_output", "call_id": "call_invented", "output": "Tool loaded: later"}
-        baseline = continuation.Baseline(continuation.Request(json.dumps(self.body([self.USER])).encode()), "resp_invented",
-                                      self.PRODUCED)
-        sent, delta = self.frame(self.body([self.USER] + self.RETURNED + [output, added, self.NEW]), baseline)
-        self.assertEqual(sent["input"], [output, added, self.NEW])
-        self.assertEqual(sent["previous_response_id"], "resp_invented")
+    def test_a_changed_top_level_tool_list_sends_the_whole_request(self):
+        added = [{'type': 'function', 'name': 'later'}]
+        output = {'type': 'function_call_output', 'call_id': 'call_invented', 'output': 'Tool loaded: later'}
+        baseline = continuation.Baseline(continuation.Request(json.dumps(self.body([self.USER], tools=[])).encode()),
+                                        'resp_invented', self.PRODUCED)
+        body = self.body([self.USER] + self.RETURNED + [output, self.NEW], tools=added)
+        sent, delta = self.frame(body, baseline)
+        self.assertEqual(sent['input'], body['input'])
+        self.assertEqual(sent['tools'], added)
+        self.assertNotIn('previous_response_id', sent)
+        self.assertEqual(delta, 'full:fields')
 
     def test_an_output_item_of_another_kind_is_its_input_item_but_for_its_id_and_status(self):
         produced = {"type": "web_search_call", "id": "ws_invented", "status": "completed", "action": {"query": "Harbor"}}

@@ -32,12 +32,12 @@ class MessageTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 websocket.message(bad)
 
-    def test_a_socket_serves_one_lane_one_handshake_shape_and_one_login(self):
+    def test_a_socket_serves_one_lane_and_one_login(self):
         one, other = Credentials("token-a", "account-a"), Credentials("token-b", "account-a")
-        self.assertEqual(websocket.socket_key("lane", True, one), websocket.socket_key("lane", True, Credentials("token-a", "account-a")))
-        for changed in (websocket.socket_key("other", True, one), websocket.socket_key("lane", False, one), websocket.socket_key("lane", True, other)):
-            self.assertNotEqual(websocket.socket_key("lane", True, one), changed)
-        self.assertNotIn("token-a", repr(websocket.socket_key("lane", True, one)))
+        self.assertEqual(websocket.socket_key("lane", one), websocket.socket_key("lane", Credentials("token-a", "account-a")))
+        for changed in (websocket.socket_key("other", one), websocket.socket_key("lane", Credentials("token-a", "account-b")), websocket.socket_key("lane", other)):
+            self.assertNotEqual(websocket.socket_key("lane", one), changed)
+        self.assertNotIn("token-a", repr(websocket.socket_key("lane", one)))
 
     def test_unserved_statuses(self):
         self.assertEqual([s for s in (101, 200, 301, 400, 401, 403, 404, 405, 426, 429, 500) if websocket.unserved(s)],
@@ -92,7 +92,7 @@ class WebSocketRouteTest(unittest.TestCase):
         for h in self.fake.upgrades:
             self.assertEqual(h["openai-beta"], "responses_websockets=2026-02-06")
             self.assertEqual({h["session-id"], h["thread-id"], h["x-client-request-id"]}, {h["session-id"]})
-            self.assertEqual((h["x-openai-subagent"], h["x-openai-internal-codex-responses-lite"]), ("collab_spawn", "true"))
+            self.assertEqual(h["x-openai-subagent"], "collab_spawn")
             self.assertEqual((h["authorization"], h["originator"]), ("Bearer " + self.token, "codex_cli_rs"))
             self.assertFalse({"x-api-key", "anthropic-version", "anthropic-beta"} & set(h))
         sent = sorted(Path(self.capture).rglob(SENT_BODY))

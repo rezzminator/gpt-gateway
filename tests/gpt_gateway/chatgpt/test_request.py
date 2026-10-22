@@ -1,8 +1,4 @@
-"""Invented Claude Code requests pin wire bytes, all blocks, and lane prefix stability.
-
-Lite layout projections: codex-lb/tests/fixtures/codex_bodies, changed;
-Copyright (c) 2025 Soju06 (MIT), permission notice in THIRD_PARTY_NOTICES.md.
-"""
+"""Invented Claude Code requests pin wire bytes, all blocks, and lane prefix stability."""
 import copy
 import dataclasses
 import json
@@ -20,7 +16,7 @@ FIXTURES = Path(__file__).parent / 'fixtures'
 class RequestTest(unittest.TestCase):
     def setUp(self):
         self.model = catalog.Model('gpt-example', 272000, ('minimal', 'low', 'medium', 'high', 'xhigh'),
-                                   'medium', 'low', 'auto', False, ('priority',))
+                                   'medium', 'low', 'auto', ('priority',))
 
     def result(self, body, **model_changes):
         translation = request.translate(body, dataclasses.replace(self.model, **model_changes), 'lane-example')
@@ -35,9 +31,8 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(body, before)
         self.assertEqual(translated.estimate_chars,
                          len(expected.decode('utf-8')) - len('data:image/png;base64,AA=='))
-        self.assertFalse(translated.lite)
         with self.assertRaises(dataclasses.FrozenInstanceError):
-            translated.lite = True
+            translated.body_bytes = b"changed"
 
     def test_cache_retention_rides_right_after_the_cache_key_and_changes_nothing_else(self):
         body = json.loads((FIXTURES / 'request_all_blocks.json').read_text())
@@ -50,22 +45,10 @@ class RequestTest(unittest.TestCase):
         del kept['prompt_cache_retention']
         self.assertEqual(kept, json.loads(plain.body_bytes))  # the cache key included
 
-    def test_lite_golden_and_empty_tools(self):
-        body = json.loads((FIXTURES / 'request_lite.json').read_text())
-        value, translated = self.result(body, slug='gpt-6-sol', responses_lite=True)
-        self.assertEqual(translated.body_bytes, (FIXTURES / 'responses_lite.json').read_bytes().rstrip(b'\n'))
-        self.assertTrue(translated.lite)
-        observed = {'prefix': [{k: item[k] for k in ('type', 'role')} for item in value['input'][:2]],
-                    'top_level_tools': 'tools' in value, 'parallel_tool_calls': value['parallel_tool_calls'],
-                    'reasoning_context': value['reasoning']['context']}
-        for fixture in json.loads((FIXTURES / 'lite_layouts.json').read_text()):
-            with self.subTest(source=fixture['source']):
-                self.assertEqual(observed, fixture['layout'])
-        body['tools'] = []
-        value, _ = self.result(body, slug='gpt-6-sol', responses_lite=True)
-        self.assertEqual(value['input'][0]['role'], 'developer')
-        self.assertEqual(value['input'][0]['type'], 'message')
-        self.assertFalse(value['parallel_tool_calls'])
+    def test_empty_tools_still_allows_parallel_calls(self):
+        value, _ = self.result({'tools': []}, slug='gpt-6-sol')
+        self.assertEqual(value['tools'], [])
+        self.assertTrue(value['parallel_tool_calls'])
 
     def test_reasoning_replay_foreign_damage_switch_and_prefix(self):
         for sig, expected, note in [
@@ -105,10 +88,6 @@ class RequestTest(unittest.TestCase):
         switch = [x for x in value['input'] if '<model_switch>' in json.dumps(x)][0]
         self.assertNotIn(request.AGENT_CONTRACT, json.dumps(switch, ensure_ascii=False))
         self.assertIn('SendMessage', request.AGENT_CONTRACT)
-        lite = json.loads(request.translate(dict(body, tools=[{'name': 'Read', 'input_schema': {'type': 'object'}}]),
-                                            dataclasses.replace(self.model, slug='gpt-6-sol', responses_lite=True),
-                                            'lane-example', agent_contract=True).body_bytes)
-        self.assertEqual(lite['input'][1]['content'][-1]['text'], request.AGENT_CONTRACT)
         body['messages'] += [{'role': 'assistant', 'content': 'New reply.'}, {'role': 'user', 'content': 'More.'}]
         later = json.loads(request.translate(body, self.model, 'lane-example', agent_contract=True).body_bytes)
         self.assertEqual(later['input'][:len(value['input'])], value['input'])
@@ -136,17 +115,16 @@ class RequestTest(unittest.TestCase):
                 {'type': 'thinking', 'thinking': 'Reasoned once.',
                  'signature': signature.encode('gpt-example', 'rs_1', 'opaque')},
                 {'type': 'text', 'text': 'First answer.'}]}, {'role': 'user', 'content': 'Inspect.'}]}
-        for lite in (False, True):
-            first, _ = self.result(body, responses_lite=lite)
-            self.assertIn('input', first)
-            later = copy.deepcopy(body)
-            later['messages'][1]['content'][0]['thinking'] = ''
-            later['messages'] += [
-                {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'call_1', 'name': 'inspect', 'input': {'x': 1}}]},
-                {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'call_1', 'content': 'Done.'}]}]
-            second, _ = self.result(later, responses_lite=lite)
-            prefix = json.dumps(first['input'], ensure_ascii=False, separators=(',', ':')).encode()[:-1]
-            self.assertTrue(json.dumps(second['input'], ensure_ascii=False, separators=(',', ':')).encode().startswith(prefix))
+        first, _ = self.result(body)
+        self.assertIn('input', first)
+        later = copy.deepcopy(body)
+        later['messages'][1]['content'][0]['thinking'] = ''
+        later['messages'] += [
+            {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'call_1', 'name': 'inspect', 'input': {'x': 1}}]},
+            {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'call_1', 'content': 'Done.'}]}]
+        second, _ = self.result(later)
+        prefix = json.dumps(first['input'], ensure_ascii=False, separators=(',', ':')).encode()[:-1]
+        self.assertTrue(json.dumps(second['input'], ensure_ascii=False, separators=(',', ':')).encode().startswith(prefix))
 
     def test_effort_thresholds_caps_summary_verbosity_and_suffixes(self):
         cases = [({'output_config': {'effort': 'max'}}, 'xhigh'),
@@ -204,6 +182,19 @@ class RequestTest(unittest.TestCase):
                          [{'role': 'user', 'content': 'Please ' + ask}], [{'role': 'assistant', 'content': ask}], []):
             with self.subTest(messages=messages[-1:]):
                 self.assertFalse(request.activity_summary({'messages': messages}))
+
+    def test_every_model_supports_parallel_tools_unless_explicitly_disabled(self):
+        for slug in ('gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-terra', 'gpt-5.5'):
+            model = catalog.parse({'models': [{'slug': slug, 'supported_reasoning_levels': []}]})[slug]
+            for disabled in (False, True):
+                with self.subTest(model=slug, disabled=disabled):
+                    body = {'tools': [{'name': 'inspect', 'input_schema': {'type': 'object'}}],
+                            'tool_choice': {'type': 'auto', 'disable_parallel_tool_use': disabled}}
+                    value = json.loads(request.translate(body, model, 'lane-example').body_bytes)
+                    self.assertEqual(value['parallel_tool_calls'], not disabled)
+                    self.assertEqual([tool['name'] for tool in value['tools']], ['inspect'])
+                    self.assertNotIn('context', value['reasoning'])
+                    self.assertTrue(all(item['type'] == 'message' for item in value['input']))
 
     def test_tool_names_arguments_results_and_parallel(self):
         long = 'tool_' + 'a' * 90
@@ -297,51 +288,39 @@ class RequestTest(unittest.TestCase):
         return {'tools': [bash, search, placeholder, server] + ([fetch, monitor] if loaded else []) + list(tools_extra),
                 'messages': messages, 'system': 'Help.'}
 
-    def test_deferred_tools_reach_the_model_after_the_result_that_names_them(self):
-        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
-        value, translated = self.result(self.deferred_body(), **lite)
-        names = lambda item: [t['name'] for t in item['tools']]
+    def test_deferred_tools_join_top_level_tools_and_results_keep_references(self):
+        value, translated = self.result(self.deferred_body(), slug='gpt-6-sol')
+        self.assertEqual([t['name'] for t in value['tools']], ['Bash', 'ToolSearch', 'WebFetch', 'Monitor'])
         self.assertEqual([x['type'] for x in value['input']],
-                         ['additional_tools', 'message', 'message', 'function_call', 'function_call_output',
-                          'additional_tools', 'message'])
-        self.assertEqual(names(value['input'][0]), ['Bash', 'ToolSearch'])
-        self.assertEqual(value['input'][4]['output'], 'Tool loaded: WebFetch')
-        self.assertEqual(names(value['input'][5]), ['WebFetch'])
-        self.assertEqual(value['input'][5]['role'], 'developer')
-        self.assertEqual(value['input'][6]['content'], [{'type': 'input_text', 'text': 'Tool loaded.'}])
+                         ['message', 'message', 'function_call', 'function_call_output', 'message'])
+        self.assertEqual(value['input'][3]['output'], 'Tool loaded: WebFetch')
+        self.assertEqual(value['input'][4]['content'], [{'type': 'input_text', 'text': 'Tool loaded.'}])
         self.assertNotIn('[unsupported', translated.body_bytes.decode())
-        self.assertNotIn('Monitor', translated.body_bytes.decode())
 
-    def test_the_first_item_is_the_same_before_and_after_a_discovery(self):
-        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+    def test_history_prefix_stays_the_same_before_and_after_discovery(self):
         before = self.deferred_body(loaded=False)
         before['messages'] = before['messages'][:1]
-        after = self.deferred_body(referenced=('WebFetch', 'Monitor'))
-        first, _ = self.result(before, **lite)
-        later, _ = self.result(after, **lite)
-        self.assertEqual(first['input'][0], later['input'][0])
-        self.assertEqual([t['name'] for t in later['input'][5]['tools']], ['WebFetch', 'Monitor'])
-        self.assertEqual(later['input'][4]['output'], 'Tool loaded: WebFetch\nTool loaded: Monitor')
-        self.assertEqual(first['input'][1:], later['input'][1:3])
+        first, _ = self.result(before, slug='gpt-6-sol')
+        later, _ = self.result(self.deferred_body(referenced=('WebFetch', 'Monitor')), slug='gpt-6-sol')
+        self.assertEqual(first['input'], later['input'][:2])
+        self.assertEqual(later['input'][3]['output'], 'Tool loaded: WebFetch\nTool loaded: Monitor')
 
-    def test_a_tool_is_delivered_once_and_an_unlisted_or_inline_name_adds_nothing(self):
-        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+    def test_repeated_unlisted_and_inline_references_do_not_duplicate_tools(self):
         body = self.deferred_body(referenced=('WebFetch', 'Bash', 'Gone'))
         body['messages'] += [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_2', 'name': 'ToolSearch',
                                                                 'input': {}}]},
                              {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': [
                                  {'type': 'tool_reference', 'tool_name': 'WebFetch'}]}]}]
-        value, _ = self.result(body, **lite)
-        added = [x for x in value['input'] if x['type'] == 'additional_tools'][1:]
-        self.assertEqual([[t['name'] for t in x['tools']] for x in added], [['WebFetch']])
+        value, _ = self.result(body, slug='gpt-6-sol')
+        self.assertEqual([t['name'] for t in value['tools']], ['Bash', 'ToolSearch', 'WebFetch', 'Monitor'])
         outputs = [x['output'] for x in value['input'] if x['type'] == 'function_call_output']
         self.assertEqual(outputs, ['Tool loaded: WebFetch\nTool loaded: Bash\nTool loaded: Gone', 'Tool loaded: WebFetch'])
 
-    def test_a_deferred_tool_names_stay_reversible_and_a_model_without_lite_gets_them_in_tools(self):
+    def test_deferred_tool_names_stay_reversible_in_top_level_tools(self):
         long = 'mcp__' + 'y' * 85
         extra = [{'name': long, 'description': 'Long.', 'input_schema': {'type': 'object'}, 'defer_loading': True}]
         body = self.deferred_body(referenced=(long,), tools_extra=extra)
-        _, translated = self.result(body, slug='gpt-6-sol', responses_lite=True)
+        _, translated = self.result(body, slug='gpt-6-sol')
         self.assertEqual(translated.tool_names, {tools.short_name(long): long})
         value, _ = self.result(body)
         self.assertEqual([t['name'] for t in value['tools']],
@@ -360,26 +339,22 @@ class RequestTest(unittest.TestCase):
                 'messages': [{'role': 'user', 'content': 'Start.'}, {'role': 'system', 'content': blocks},
                              {'role': 'user', 'content': 'Go on.'}]}
 
-    def test_tool_additions_become_additional_tools_items_at_their_position(self):
-        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
+    def test_tool_additions_join_top_level_tools_and_preserve_system_text(self):
         schema = {'type': 'object', 'properties': {'id': {'type': 'string'}}, 'required': ['id']}
         body = self.addition_body(('docs_batch', schema), 'docs_guide')
-        value, translated = self.result(body, **lite)
-        self.assertEqual([x['type'] for x in value['input']],
-                         ['additional_tools', 'message', 'message', 'message', 'additional_tools', 'additional_tools',
-                          'message'])
-        self.assertEqual(value['input'][3]['content'], [{'type': 'input_text', 'text': 'Docs connected.'}])
-        self.assertEqual(value['input'][4], {'type': 'additional_tools', 'role': 'developer', 'tools': [
-            {'type': 'function', 'name': 'docs_batch', 'description': 'Does docs_batch.', 'strict': False,
-             'parameters': schema}]})
-        self.assertEqual([t['name'] for t in value['input'][5]['tools']], ['docs_guide'])
+        value, translated = self.result(body, slug='gpt-6-sol')
+        self.assertEqual([x['type'] for x in value['input']], ['message'] * 4)
+        self.assertEqual(value['input'][2]['content'], [{'type': 'input_text', 'text': 'Docs connected.'}])
+        self.assertEqual(value['tools'][1],
+                         {'type': 'function', 'name': 'docs_batch', 'description': 'Does docs_batch.', 'strict': False,
+                          'parameters': schema})
+        self.assertEqual([t['name'] for t in value['tools']], ['Bash', 'docs_batch', 'docs_guide'])
         self.assertNotIn('[unsupported', translated.body_bytes.decode())
         before = dict(body, messages=body['messages'][:1])
-        first, _ = self.result(before, **lite)
-        self.assertEqual(first['input'][:2], value['input'][:2])
-        self.assertEqual(first['input'][0]['tools'], value['input'][0]['tools'])
+        first, _ = self.result(before, slug='gpt-6-sol')
+        self.assertEqual(first['input'], value['input'][:2])
 
-    def test_tool_additions_in_a_model_without_lite_join_its_tools_and_leave_no_text(self):
+    def test_tool_additions_without_system_text_leave_no_message(self):
         body = self.addition_body('docs_batch', 'docs_guide')
         body['messages'][1]['content'] = body['messages'][1]['content'][1:]
         value, translated = self.result(body)
@@ -389,24 +364,22 @@ class RequestTest(unittest.TestCase):
 
     def test_a_tool_addition_is_delivered_once_stays_reversible_and_collides_loudly(self):
         long = 'mcp__' + 'z' * 85
-        lite = {'slug': 'gpt-6-sol', 'responses_lite': True}
         body = self.addition_body(long, 'Bash', 'docs_batch')
         body['messages'].append(dict(body['messages'][1]))
-        value, translated = self.result(body, **lite)
-        added = [t['name'] for x in value['input'][1:] if x['type'] == 'additional_tools' for t in x['tools']]
-        self.assertEqual(added, [tools.short_name(long), 'docs_batch'])
+        value, translated = self.result(body, slug='gpt-6-sol')
+        self.assertEqual([t['name'] for t in value['tools']], ['Bash', tools.short_name(long), 'docs_batch'])
         self.assertEqual(translated.tool_names, {tools.short_name(long): long})
         clash = self.addition_body(long)
         clash['tools'].append({'name': tools.short_name(long), 'input_schema': {'type': 'object'}})
         with self.assertRaises(ValueError):
-            self.result(clash, **lite)
+            self.result(clash, slug='gpt-6-sol')
 
     def test_a_malformed_tool_addition_stays_a_placeholder(self):
         for block in [{'type': 'tool_addition'}, {'type': 'tool_addition', 'tool': {'type': 'tool_definition',
                                                                                     'definition': {'name': ''}}}]:
             with self.subTest(block=block):
                 body = {'messages': [{'role': 'system', 'content': [block]}]}
-                value, _ = self.result(body, slug='gpt-6-sol', responses_lite=True)
+                value, _ = self.result(body, slug='gpt-6-sol')
                 self.assertEqual(value['input'], [{'type': 'message', 'role': 'developer', 'content': [
                     {'type': 'input_text', 'text': '[unsupported tool_addition]'}]}])
 

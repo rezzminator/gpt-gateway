@@ -303,8 +303,7 @@ def events(rt, kind=None, settle=0.1):
     return [r for r in rows if kind is None or r["kind"] == kind]
 
 
-CHATGPT_MODELS = {"models": [{"slug": "gpt-test", "supported_reasoning_levels": [],
-                             "use_responses_lite": True}]}
+CHATGPT_MODELS = {"models": [{"slug": "gpt-test", "supported_reasoning_levels": []}]}
 
 
 def responses_event(kind, **fields):

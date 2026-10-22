@@ -43,34 +43,30 @@ class Client:
         headers.update({"Accept": "text/event-stream", "Content-Type": "application/json",
                         "session-id": lane_key, "x-client-request-id": lane_key,
                         "content-length": str(len(translation.body_bytes))})
-        if translation.lite:
-            headers["x-openai-internal-codex-responses-lite"] = "true"
         if turn_state:
             headers[turn.HEADER] = turn_state  # codex-rs/core/src/client.rs:2119-2140
         return self.upstream.send("POST", "/backend-api/codex/responses", translation.body_bytes, headers.items(),
                                   request_id=request_id)
 
     # codex-rs/core/src/client.rs:2336-2354: the upgrade carries the HTTP request's headers and the beta.
-    def _upgrade_headers(self, translation, lane_key, credentials, subagent):
+    def _upgrade_headers(self, lane_key, credentials, subagent):
         headers = self._headers(credentials, subagent)
         headers.update({"OpenAI-Beta": websocket.BETA, "session-id": lane_key, "thread-id": lane_key,
                         "x-client-request-id": lane_key})
-        if translation.lite:
-            headers["x-openai-internal-codex-responses-lite"] = "true"
         return headers.items()
 
     def _over_websocket(self, translation, lane_key, credentials, turn_state, observe, fork=False, subagent=False):
         """The started Answer or a Refusal; None when the upgrade showed the endpoint serves no WebSocket. A kept socket
         that fails before its first message, or that the backend asks to replace, gives way once to a fresh one."""
         request = continuation.Request(translation.body_bytes, turn_state)
-        pool_key = websocket.socket_key(lane_key, translation.lite, credentials)
+        pool_key = websocket.socket_key(lane_key, credentials)
         self.local.transport, self.local.reused, self.local.stale, self.local.delta = "ws", False, False, ""
         for attempt in (1, 2):
             wait = websocket.FORK_WAIT_SECONDS if fork else websocket.LANE_WAIT_SECONDS
             kept = self.sockets.checkout(pool_key, wait if attempt == 1 else 0)
             if kept is None:
                 try:
-                    kept = self.sockets.open(pool_key, self._upgrade_headers(translation, lane_key, credentials, subagent))
+                    kept = self.sockets.open(pool_key, self._upgrade_headers(lane_key, credentials, subagent))
                 except UpstreamError as error:
                     self.sockets.failed(error.message)
                     raise
