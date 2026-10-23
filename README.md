@@ -430,3 +430,5 @@ sqlite3 -readonly ~/.local/state/gpt-gateway/gateway.db 'SELECT * FROM daily ORD
 ## Development
 
 `scripts/gate.sh` from the repository root is the only definition of ready: it compiles every source, lints the shell, runs `scripts/checks.sh` and the unit tests. The layout and its gates are in `docs/design/gpt-gateway-layout.md`.
+
+A release is the merge of the `develop` -> `main` pull request: `make release-check` runs locally what its jobs `check` and `release` run, and the merge tags `v{version}` from `VERSION` and publishes the release through `.github/workflows/release.yml`; no tag is pushed by hand.
