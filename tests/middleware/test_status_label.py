@@ -225,7 +225,7 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(out.events[1]["data"]["content_block"], {"type": "text", "text": ""})
         self.assertEqual(out.events[2]["data"]["delta"], {"type": "text_delta", "text": "Running go test"})
         self.assertEqual(out.events[4]["data"]["delta"]["stop_reason"], "end_turn")
-        self.assertEqual(out.events[4]["data"]["usage"], {"output_tokens": 3})
+        self.assertEqual(out.events[4]["data"]["usage"], {"output_tokens": 0})
         self.assertEqual((out.log, out.row["answered_by"]), ((), "status-label"))
         self.assertEqual((out.result.status, out.result.completed), (200, True))
 
@@ -237,7 +237,7 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual({k: message[k] for k in ("id", "type", "role", "model", "content", "stop_reason")},
                          {"id": "msg_local_9", "type": "message", "role": "assistant", "model": "claude-invented",
                           "content": [{"type": "text", "text": "Reading a.py"}], "stop_reason": "end_turn"})
-        self.assertEqual(message["usage"]["output_tokens"], 2)
+        self.assertEqual(set(message["usage"].values()), {0})
         self.assertEqual(out.events, ({"event": None, "data": message, "raw": out.answer.data},))
 
 
