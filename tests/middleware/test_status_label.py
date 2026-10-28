@@ -111,6 +111,26 @@ class LabelTest(unittest.TestCase):
                 self.assertEqual(answered_label(run(MODULE, body=body, headers=SUB, response=RECORDED)), expected)
 
 
+class SubcommandToolsTest(unittest.TestCase):
+    """Setting `subcommand_tools`: more tools labelled with their subcommand, from the file or the env."""
+
+    def test_a_named_tool_is_labelled_with_its_subcommand(self):
+        body = fork(call("Bash", {"command": "fleetctl --verbose deploy web"}))
+        for why, settings, env, expected in (
+                ("default", None, None, "Running fleetctl"),
+                ("file", {"subcommand_tools": ["fleetctl"]}, None, "Running fleetctl deploy"),
+                ("env", None, {"GPT_GATEWAY_STATUS_LABEL_SUBCOMMAND_TOOLS": "other, fleetctl"},
+                 "Running fleetctl deploy")):
+            with self.subTest(why):
+                out = run(MODULE, body=body, headers=SUB, response=RECORDED, settings=settings, env=env)
+                self.assertEqual(answered_label(out), expected)
+
+    def test_a_value_that_is_no_list_of_names_fails_the_settings(self):
+        for value in (3, [""], [3], {"fleetctl": True}):
+            with self.subTest(value=value), self.assertRaises(SettingsError):
+                load(MODULE, settings={"subcommand_tools": value})
+
+
 MARKED = {"x-claude-code-agent-id": "agent-invented", "x-cache-live-control-summaries": "block"}
 
 
