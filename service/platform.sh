@@ -116,7 +116,6 @@ import sys
 unit, dest, port, logs, drain, python, jq, settings, home, stop_seconds = sys.argv[1:]
 config = {
     "GPT_GATEWAY_PORT": port,
-    "GPT_GATEWAY_LOG": os.path.join(logs, "gpt-gateway.log"),
     "GPT_GATEWAY_DRAIN_SECONDS": drain,
     "GPT_GATEWAY_STOP_SECONDS": stop_seconds,
     "GPT_GATEWAY_PYTHON": python,

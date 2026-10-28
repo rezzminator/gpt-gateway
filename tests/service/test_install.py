@@ -25,10 +25,12 @@ class InstallTest(unittest.TestCase):
                     self.assertEqual(code, 0, out)
                     if platform == "Darwin":
                         self.assertEqual(h.plist_value("EnvironmentVariables.PLUGIN_LOG_DIR"), chosen if configured else "")
+                        self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_LOG"), "")  # the log is no knob
                     else:
                         with open(os.path.join(h.dest, "service.json")) as source:
                             config = json.load(source)
                         self.assertEqual(config.get("PLUGIN_LOG_DIR"), chosen if configured else None)
+                        self.assertNotIn("GPT_GATEWAY_LOG", config)  # the log is no knob
                         if configured:
                             unit = os.path.join(h.home, ".config/systemd/user/gpt-gateway.service")
                             with open(unit) as source:
@@ -59,8 +61,6 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.shipped(h), self.source("status_label.py"))
         self.assertEqual(h.plist_value("Label"), "local.gpt-gateway")
         self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_PORT"), str(h.port))
-        self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_LOG"),
-                         os.path.join(h.home, "Library", "Logs", "gpt-gateway.log"))
         self.assertEqual(h.plist_value("EnvironmentVariables.GPT_GATEWAY_CLAUDE_SETTINGS"), os.path.realpath(h.claude))
         self.assertEqual(h.plist_value("StandardErrorPath"),
                          os.path.join(h.home, "Library", "Logs", "gpt-gateway.stderr.log"))

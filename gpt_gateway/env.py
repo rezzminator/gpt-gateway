@@ -7,12 +7,12 @@ import json
 import os
 import re
 import stat
-import sys
 from urllib.parse import urlsplit
+
+from .plugin_log import log_dir
 
 PORT = "GPT_GATEWAY_PORT"
 UPSTREAM = "GPT_GATEWAY_UPSTREAM"
-LOG = "GPT_GATEWAY_LOG"
 DB = "GPT_GATEWAY_DB"
 CAPTURE_DIR = "GPT_GATEWAY_CAPTURE_DIR"
 DRAIN_SECONDS = "GPT_GATEWAY_DRAIN_SECONDS"
@@ -37,7 +37,6 @@ def model_picker_override(environ):
 
 DEFAULT_PORT = 18787
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
-DEFAULT_LOG = "~/Library/Logs/gpt-gateway.log"
 DEFAULT_DB = "~/.local/state/gpt-gateway/gateway.db"
 DEFAULT_DRAIN_SECONDS = 600.0
 
@@ -61,18 +60,14 @@ def value(env, name):
 
 
 def plugin_log_dir(environ):
-    """The shared level root, otherwise HOME state on every platform; no HOME means no directory."""
-    root = value(environ, "PLUGIN_LOG_DIR")
-    if root is not None:
-        if not os.path.isabs(root):
-            raise EnvError("env PLUGIN_LOG_DIR: must be an absolute path")
-        return os.path.join(root, "gpt-gateway")
-    home = value(environ, "HOME")
-    if home is None:
-        return None
-    if not os.path.isabs(home):
-        raise EnvError("env HOME: an absolute path is required for level logs")
-    return os.path.join(home, ".local", "state", "gpt-gateway", "logs")
+    """The plugin log directory: $PLUGIN_LOG_DIR/gpt-gateway, otherwise HOME state on every platform; no HOME means
+    no directory. A relative value is refused, never resolved against the working directory."""
+    root, home = value(environ, "PLUGIN_LOG_DIR"), value(environ, "HOME")
+    if root is not None and not os.path.isabs(root):
+        raise EnvError("env PLUGIN_LOG_DIR: must be an absolute path")
+    if root is None and home is not None and not os.path.isabs(home):
+        raise EnvError("env HOME: an absolute path is required for the logs")
+    return log_dir(root, home, "gpt-gateway")
 
 
 def under_home(environ, path, needed_for):
@@ -86,14 +81,13 @@ def under_home(environ, path, needed_for):
 
 
 class CoreEnv:
-    """The knobs the environment alone sets: port, upstream, log, database, drain limit, debug."""
+    """The knobs the environment alone sets: port, upstream, database, drain limit, debug."""
 
-    __slots__ = ("port", "upstream", "log_path", "db_path", "drain_seconds", "debug", "listener_fd")
+    __slots__ = ("port", "upstream", "db_path", "drain_seconds", "debug", "listener_fd")
 
-    def __init__(self, port, upstream, log_path, db_path, drain_seconds, debug, listener_fd=None):
+    def __init__(self, port, upstream, db_path, drain_seconds, debug, listener_fd=None):
         self.port = port
         self.upstream = upstream
-        self.log_path = log_path
         self.db_path = db_path
         self.drain_seconds = drain_seconds
         self.debug = debug
@@ -116,10 +110,6 @@ class CoreEnv:
             parts.port
         except ValueError as e:
             raise EnvError("env %s: bad port in %r: %s" % (UPSTREAM, upstream, e))
-        default_log = '~/.local/state/gpt-gateway/gpt-gateway.log' if sys.platform == 'linux' else DEFAULT_LOG
-        log_path = under_home(env, value(env, LOG) or default_log, "the log, or set %s" % LOG)
-        if not os.path.isabs(log_path):
-            raise EnvError("env %s: must be an absolute path, got %r" % (LOG, log_path))
         raw = value(env, DRAIN_SECONDS)
         drain = DEFAULT_DRAIN_SECONDS
         if raw is not None:
@@ -138,7 +128,7 @@ class CoreEnv:
             if not raw.isascii() or not raw.isdigit() or int(raw) < 3:
                 raise EnvError("env %s: must be a listening descriptor >= 3" % LISTENER_FD)
             listener_fd = int(raw)
-        return cls(port, upstream, log_path, db_path, drain, value(env, DEBUG) is not None, listener_fd)
+        return cls(port, upstream, db_path, drain, value(env, DEBUG) is not None, listener_fd)
 
 
 CHATGPT_ORIGIN = "GPT_GATEWAY_CHATGPT_ORIGIN"

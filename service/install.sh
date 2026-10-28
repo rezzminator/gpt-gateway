@@ -236,7 +236,6 @@ cat > "$PLIST.new" <<EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>GPT_GATEWAY_PORT</key><string>$PORT</string>
-    <key>GPT_GATEWAY_LOG</key><string>$LOGS/gpt-gateway.log</string>
     <key>GPT_GATEWAY_DRAIN_SECONDS</key><string>$DRAIN</string>
     <key>GPT_GATEWAY_STOP_SECONDS</key><string>$STOP_SECONDS</string>
     <key>GPT_GATEWAY_PYTHON</key><string>$PY</string>

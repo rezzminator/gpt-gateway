@@ -18,8 +18,8 @@ class ListenerTest(unittest.TestCase):
         jail.write_json(self.settings, {'env': {'ANTHROPIC_BASE_URL': self.url, 'KEEP': '1'}})
         self.env = jail.clean_env(self.home, GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_JQ='/usr/bin/jq',
                                   GPT_GATEWAY_CLAUDE_SETTINGS=self.settings, GPT_GATEWAY_STOP_SECONDS='1',
-                                  GPT_GATEWAY_RETRY_SECONDS='0', GPT_GATEWAY_LISTENER_FD='3',
-                                  GPT_GATEWAY_LOG=os.path.join(self.home, 'gateway.log'))
+                                  GPT_GATEWAY_RETRY_SECONDS='0', GPT_GATEWAY_LISTENER_FD='3')
+        self.log = os.path.join(self.home, '.local', 'state', 'gpt-gateway', 'logs', 'gpt-gateway.log')
 
     def run_fault(self, code, args=None):
         launcher = os.path.join(self.home, 'launch.py')
@@ -63,8 +63,8 @@ class ListenerTest(unittest.TestCase):
         self.assert_unlinked(result)
         self.assertIn('Address already in use', result.stderr)
         diagnosis = result.stderr
-        if os.path.exists(self.env['GPT_GATEWAY_LOG']):
-            with open(self.env['GPT_GATEWAY_LOG']) as source:
+        if os.path.exists(self.log):
+            with open(self.log) as source:
                 diagnosis += source.read()
         self.assertNotIn('Bad file descriptor', diagnosis)
         self.assertNotIn('Socket operation on non-socket', diagnosis)
