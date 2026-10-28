@@ -8,7 +8,8 @@ prompt only turns the answer off. The answer's row says `answered_by` `status-la
 
 Shipped with gpt-gateway; a fresh install lists it in settings.json as `{"module": "status_label"}`. Its setting
 `answer` is `always` (every fork is answered, the default) or `marked` (only a fork whose request carries the header
-`x-cache-live-control-summaries: block`, which the cache-live-control plugin's `/cache summaries off` sets).
+`x-cache-live-control-summaries: block`, which the cache-live-control plugin's `/cache summaries off` sets). Its
+setting `subcommand_tools` names more tools whose label carries their subcommand (default none).
 """
 import json
 import posixpath
@@ -39,7 +40,7 @@ PATH_KEYS = ("file_path", "notebook_path")
 FILE_VERBS = {"Read": "Reading", "Edit": "Editing", "MultiEdit": "Editing", "NotebookEdit": "Editing",
               "Write": "Writing"}
 INTERPRETERS = {"sh", "bash", "zsh", "python", "python3", "node", "ruby", "perl"}
-SUBCOMMAND_TOOLS = {"go", "git", "make", "npm", "pnpm", "yarn", "cargo", "docker", "pfm", "gh", "kubectl", "uv", "pip"}
+SUBCOMMAND_TOOLS = {"go", "git", "make", "npm", "pnpm", "yarn", "cargo", "docker", "gh", "kubectl", "uv", "pip"}
 # The options before a subcommand that take the next word as their value: `git -c k=v log` runs `git log`.
 VALUE_OPTIONS = {"git": {"-C", "-c"}, "make": {"-C", "-f", "--file", "-I"}, "go": {"-C"},
                  "npm": {"--prefix", "-w", "--workspace"}, "pnpm": {"-C", "--dir", "-F", "--filter"},
@@ -98,10 +99,10 @@ def words(command):
         return FALLBACK_WORDS.findall(command)
 
 
-def bash_what(command):
+def bash_what(command, subcommand_tools=frozenset()):
     """What a Bash command runs: past leading assignments, `cd … &&`/`cd …;`, sudo, env, time and a subshell's `(`,
-    an interpreter's script by its basename, a subcommand tool with its subcommand, else the first word's basename;
-    None when nothing is left."""
+    an interpreter's script by its basename, a subcommand tool (SUBCOMMAND_TOOLS or `subcommand_tools`) with its
+    subcommand, else the first word's basename; None when nothing is left."""
     rest = words(command)
     while rest:
         if ASSIGNMENT.match(rest[0]) or rest[0] in PREFIX_WORDS or PUNCTUATION.match(rest[0]):  # `;`, `&&`, `(`
@@ -118,7 +119,7 @@ def bash_what(command):
         if following and not following[0].startswith("-") and not PUNCTUATION.match(following[0]):
             return token(base(following[0]))
         return token(tool)
-    if tool in SUBCOMMAND_TOOLS:
+    if tool in SUBCOMMAND_TOOLS or tool in subcommand_tools:
         skip = False
         for word in following:
             if skip:
@@ -134,7 +135,7 @@ def bash_what(command):
     return token(tool)
 
 
-def tool_label(name, args):
+def tool_label(name, args, subcommand_tools=frozenset()):
     """The label for one tool_use: its name and its input object."""
     def text(key):
         value = args.get(key)
@@ -148,7 +149,7 @@ def tool_label(name, args):
     if name == "Glob":
         return "Listing " + token(text("pattern")) if text("pattern") else None
     if name == "Bash":
-        what = bash_what(text("command")) if text("command") else None
+        what = bash_what(text("command"), subcommand_tools) if text("command") else None
         return "Running " + what if what else None
     if name == "WebFetch":
         try:
@@ -174,7 +175,7 @@ def tool_label(name, args):
     return None
 
 
-def label(messages, fork):
+def label(messages, fork, subcommand_tools=frozenset()):
     """The status label for the fork message `fork` of `messages`: from the last tool call of the message before it."""
     at = next(i for i, message in enumerate(messages) if message is fork)
     before = messages[at - 1] if at > 0 else None
@@ -188,7 +189,7 @@ def label(messages, fork):
     name = calls[-1].get("name")
     name = name if isinstance(name, str) and name else "a tool"
     args = calls[-1].get("input")
-    text = tool_label(name, args if isinstance(args, dict) else {}) or "Using " + token(name)
+    text = tool_label(name, args if isinstance(args, dict) else {}, subcommand_tools) or "Using " + token(name)
     return " ".join(text.split()[:MAX_WORDS])
 
 
@@ -226,7 +227,16 @@ def answer_value(value):
     raise ValueError("answer must be one of %s, got %s" % (", ".join(ANSWERS), json.dumps(value)))
 
 
-SETTINGS = {"answer": ("always", answer_value, "GPT_GATEWAY_STATUS_LABEL_ANSWER")}
+def subcommand_tools_value(value):
+    """More tools labelled with their subcommand: a list of names, or from the env a comma-separated string."""
+    names = [name.strip() for name in value.split(",") if name.strip()] if isinstance(value, str) else value
+    if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
+        raise ValueError("subcommand_tools must be a list of tool names, got %s" % json.dumps(value))
+    return frozenset(name.strip() for name in names)
+
+
+SETTINGS = {"answer": ("always", answer_value, "GPT_GATEWAY_STATUS_LABEL_ANSWER"),
+            "subcommand_tools": ([], subcommand_tools_value, "GPT_GATEWAY_STATUS_LABEL_SUBCOMMAND_TOOLS")}
 
 
 def marked(ctx):
@@ -238,7 +248,7 @@ def on_request(ctx, req):
     fork = fork_message(ctx, req)
     if fork is None or (ctx.settings["answer"] == "marked" and not marked(ctx)):
         return None
-    content_type, data = answer_body(label(req.body["messages"], fork), ctx.model, ctx.request_id,
-                                     req.body.get("stream") is True)
+    text = label(req.body["messages"], fork, ctx.settings["subcommand_tools"])
+    content_type, data = answer_body(text, ctx.model, ctx.request_id, req.body.get("stream") is True)
     req.answer(200, content_type, data)
     return None
