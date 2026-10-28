@@ -195,12 +195,12 @@ def label(messages, fork):
 def answer_body(label_text, model, request_id, stream):
     """(content type, bytes): an Anthropic message holding `label_text`, as an SSE stream or as one JSON object."""
     message_id = "msg_local_%s" % request_id
-    output = len(label_text.split())
+    # No model produced the label, so every usage figure is 0; the gateway counts no tokens.
     zero = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
     if not stream:
         body = {"id": message_id, "type": "message", "role": "assistant", "model": model,
                 "content": [{"type": "text", "text": label_text}], "stop_reason": "end_turn", "stop_sequence": None,
-                "usage": dict(zero, output_tokens=output)}
+                "usage": zero}
         return "application/json", json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     events = [
         ("message_start", {"type": "message_start", "message": {
@@ -212,7 +212,7 @@ def answer_body(label_text, model, request_id, stream):
                                  "delta": {"type": "text_delta", "text": label_text}}),
         ("content_block_stop", {"type": "content_block_stop", "index": 0}),
         ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                           "usage": {"output_tokens": output}}),
+                           "usage": {"output_tokens": 0}}),
         ("message_stop", {"type": "message_stop"}),
     ]
     data = "".join("event: %s\ndata: %s\n\n" % (name, json.dumps(event, ensure_ascii=False, separators=(",", ":")))
