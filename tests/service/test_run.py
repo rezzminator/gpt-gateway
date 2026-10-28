@@ -68,7 +68,7 @@ class RunTest(unittest.TestCase):
                              GPT_GATEWAY_STOP_SECONDS=stop_seconds,
                              GPT_GATEWAY_DRAIN_SECONDS=drain,
                              GPT_GATEWAY_RETRY_SECONDS=retry, GPT_GATEWAY_CLAUDE_SETTINGS=self.settings,
-                             GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_LOG=os.path.join(self.dir, "gateway.log"),
+                             GPT_GATEWAY_PORT=str(self.port),
                              GPT_GATEWAY_UPSTREAM=upstream or "http://127.0.0.1:%d" % jail.free_port(), **overrides)
         # A file, not a pipe: a read to the end of a pipe waits for every gateway still draining to let go of it.
         self.errors = open(os.path.join(self.dir, "run.err"), "wb")

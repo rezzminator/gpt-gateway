@@ -84,6 +84,7 @@ gpt_gateway/cli.py                      COMMANDS table → serve | check | mw | 
 gpt_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 gpt_gateway/clock.py                    façade: time
 gpt_gateway/log.py                      façade: text and level logs
+gpt_gateway/plugin_log.py               the vendored plugin-log library; never edited here, outside every § Gates check
 gpt_gateway/db.py                       façade: Db, query, chatgpt_responses, anthropic_timings, anthropic_transport, DbError
 gpt_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
 gpt_gateway/middleware.py               Module, load_modules, MiddlewareError
@@ -219,7 +220,7 @@ The census of the product spelling exempts this document, since its glossary mus
 
 Every other line the gateway observes is a `requests` row or an `events` row of the database, written only through `gpt_gateway/db.py`; the text log keeps the start, stop, fatal, settings-error, database-failure and proxy-failure lines.
 
-`Log.record(level, event, msg, where, detail=None)` keeps that text line and appends a UTC diagnostic row to `errors.jsonl`, `warnings.jsonl` or `info.jsonl`. The logging façade's `record(writer, ...)` adapter retains single-message callbacks while routing bound `Log.write` callbacks through `Log.record`. `env.plugin_log_dir(environ)` resolves `$PLUGIN_LOG_DIR/gpt-gateway/`, otherwise `$HOME/.local/state/gpt-gateway/logs/` on every platform. Rows are at most 4096 bytes, with oversized detail and messages truncated; a level file past 20 MiB moves to `.1` and emits `log-capped`. New level directories use `0700` and new files `0600`. Write failures never interrupt work and are reported once per failing streak, re-armed after success. The installer includes `PLUGIN_LOG_DIR` in the platform service environment only when supplied.
+Both logs live in the plugin log directory: `env.plugin_log_dir(environ)` resolves `$PLUGIN_LOG_DIR/gpt-gateway/`, otherwise `$HOME/.local/state/gpt-gateway/logs/` on every platform, and refuses a relative value; with neither set, logging is off. The text log is `gpt-gateway.log` there (`log.text_path(environ)`), rotated to `.1` past 5 MiB, its file `0600`; no variable moves it. `Log.record(level, event, msg, where, detail=None)` keeps that text line and appends the level row through `gpt_gateway/plugin_log.py`, the vendored plugin-log library, which owns the row shape, the level files, their 20 MiB rotation with `log-capped`, the held rows and its one line per failing streak. The logging façade's `record(writer, ...)` adapter retains single-message callbacks while routing bound `Log.write` callbacks through `Log.record`. Write failures never interrupt work. The screen gets only an error row's line — a failing text log is the `text-log-failed` error row, said once per streak — and the library's failing-streak line, or one `plugin log off` line when `PLUGIN_LOG_DIR` or `HOME` is unusable. The installer includes `PLUGIN_LOG_DIR` in the platform service environment only when supplied.
 
 Every ChatGPT-route model uses standard Responses. `gpt_gateway/chatgpt/request.py` flattens registered tools, `defer_loading` tools and role-system `tool_addition` definitions into the request's top-level `tools` list. Tool references remain `Tool loaded: {name}` text in history; tool definitions do not become history items. `parallel_tool_calls` is `true` unless Claude Code's `tool_choice.disable_parallel_tool_use` is true. The catalog does not select a wire variant, and this behavior adds no option. HTTP requests and WebSocket upgrades use the same standard Responses protocol; `gpt_gateway/chatgpt/websocket.py` keys sockets by lane plus a digest of the access token and account id.
 
@@ -238,6 +239,8 @@ The ChatGPT route introduces no new primitive façade: it uses `gpt_gateway/upst
 There is no hand-kept list of modules, commands or knobs beside the one that defines them.
 
 ## 6. Gates
+
+Every check below reads the sources minus the vendored `gpt_gateway/plugin_log.py`, whose canonical source carries its tests.
 
 | Check id | Class | Asserts | Broken state reports | Baseline |
 | --- | --- | --- | --- | --- |

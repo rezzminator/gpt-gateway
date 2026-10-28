@@ -71,6 +71,10 @@ fi
 rm -rf "$DEST"
 if [ "$PURGE" = yes ]; then
   rm -f "$LOGS/gpt-gateway.log" "$LOGS/gpt-gateway.log.1" "$LOGS/gpt-gateway.stderr.log" "$LOGS/gpt-gateway-install-tests.log"
+  # The text log lives in the plugin log directory; the pair above is where an install before that move kept it.
+  TEXT_LOGS="$STATE/logs"
+  if [ -n "${PLUGIN_LOG_DIR+set}" ] && [ -n "$PLUGIN_LOG_DIR" ]; then TEXT_LOGS="$PLUGIN_LOG_DIR/gpt-gateway"; fi
+  rm -f "$TEXT_LOGS/gpt-gateway.log" "$TEXT_LOGS/gpt-gateway.log.1"
   rm -f "$DB" "$DB-wal" "$DB-shm"
   echo "logs and database deleted"
 fi

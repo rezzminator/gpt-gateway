@@ -77,7 +77,7 @@ jq '.env | {ANTHROPIC_BASE_URL, ENABLE_TOOL_SEARCH}' "$gateway_settings"
 SH
 ```
 
-Expect `state:  on`, `activity: active`, an `ok pid=...` health line, `enabled`, `active`, and a successful URL check. Tool search is `"true"` unless a user-selected value already exists. Resume the waiting sessions after verification. Supervisor stderr, the text log and installation-test log live under `~/.local/state/gpt-gateway/`.
+Expect `state:  on`, `activity: active`, an `ok pid=...` health line, `enabled`, `active`, and a successful URL check. Tool search is `"true"` unless a user-selected value already exists. Resume the waiting sessions after verification. Supervisor stderr and the installation-test log live under `~/.local/state/gpt-gateway/`; the text log `gpt-gateway.log` and the level logs under `~/.local/state/gpt-gateway/logs/` (or `$PLUGIN_LOG_DIR/gpt-gateway/`).
 
 An update uses the same install command and preserves the enabled state. Linux HUP hands the successor the same listening socket and accept queue, preserving queued connections and accepted requests through the drain limit. An accepted client that has sent no request data closes as idle at drain start. Existing streams finish on their original gateway.
 

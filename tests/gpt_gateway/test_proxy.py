@@ -175,7 +175,7 @@ class PassthroughTest(unittest.TestCase):
             fakes.request(port, "POST", "/v1/messages", ODD)
         self.assertEqual(rows(rt, "path", "status", "error_code", "error_head"), [
             {"path": "/v1/messages", "status": None, "error_code": "gateway_error", "error_head": "RuntimeError('invented')"}])
-        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        path = os.path.join(rt.log.levels.dir, "errors.jsonl")
         self.assertTrue(os.path.isfile(path), "unexpected gateway failures must append an error level row")
         with open(path) as source:
             diagnostic, = [json.loads(line) for line in source]
@@ -196,7 +196,7 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"],
                            r.get("error_class"), r["reused"], r["stale"], r["attempts"]) for r in fakes.recorded(rt)],
                          [("POST", "/v1/messages", 502, "api_error", True, "connect", 0, 0, 1)])
-        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        path = os.path.join(rt.log.levels.dir, "errors.jsonl")
         self.assertTrue(os.path.isfile(path), "upstream transport failures must append an error level row")
         with open(path) as source:
             diagnostic, = [json.loads(line) for line in source]

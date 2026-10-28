@@ -289,7 +289,8 @@ class PlatformTest(unittest.TestCase):
         code, out = host.run('uninstall.sh', '--purge')
         self.assertEqual(code, 0, out)
         self.assertEqual(host.read_claude()['env'], {'ENABLE_TOOL_SEARCH': 'auto:5'})
-        self.assertFalse(os.path.exists(os.path.join(host.home, '.local', 'state', 'gpt-gateway', 'gpt-gateway.log')))
+        for logs in ('', 'logs'):  # before and after the text log moved into the plugin log directory
+            self.assertFalse(os.path.exists(os.path.join(host.home, '.local', 'state', 'gpt-gateway', logs, 'gpt-gateway.log')))
 
 
 if __name__ == '__main__':

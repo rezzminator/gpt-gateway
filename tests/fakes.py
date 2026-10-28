@@ -234,7 +234,7 @@ def start_gateway(test, upstream=None, env=None, settings=None, middleware=None)
         jail.write_json(path, settings)
     for module, source in (middleware or {}).items():
         jail.write_middleware(os.path.join(d, "middleware"), module, source)
-    base = {"GPT_GATEWAY_LOG": os.path.join(d, "gw.log"), "GPT_GATEWAY_DB": os.path.join(d, "gateway.db"),
+    base = {"PLUGIN_LOG_DIR": d, "GPT_GATEWAY_DB": os.path.join(d, "gateway.db"),
             "GPT_GATEWAY_UPSTREAM": upstream or "http://127.0.0.1:%d" % jail.free_port()}
     run = dict(base, **(env or {}))
     run["GPT_GATEWAY_DB"] = base["GPT_GATEWAY_DB"]  # each gateway its own database, a jail env's shared one aside

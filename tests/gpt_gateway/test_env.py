@@ -52,25 +52,16 @@ class CoreEnvTest(unittest.TestCase):
         self.assertEqual(knobs.codex_auth, os.path.join(home, "chosen"))
 
     def test_defaults(self):
-        with patch('sys.platform', 'darwin'):
-            core = env.CoreEnv.parse({"HOME": "/jail"})
+        core = env.CoreEnv.parse({"HOME": "/jail"})
         self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug),
                          (18787, "https://api.anthropic.com", 600.0, False))
-        self.assertEqual(core.log_path, "/jail/Library/Logs/gpt-gateway.log")
         self.assertEqual(core.db_path, "/jail/.local/state/gpt-gateway/gateway.db")
-
-    def test_linux_logs_default_to_the_state_directory_and_allow_an_override(self):
-        with patch('sys.platform', 'linux'):
-            self.assertEqual(env.CoreEnv.parse({'HOME': '/jail'}).log_path,
-                             '/jail/.local/state/gpt-gateway/gpt-gateway.log')
-            self.assertEqual(env.CoreEnv.parse({'HOME': '/jail', 'GPT_GATEWAY_LOG': '~/chosen.log'}).log_path,
-                             '/jail/chosen.log')
 
     def test_the_database_resolves_against_the_mappings_home_never_the_process_home(self):
         with patch.dict(os.environ, {"HOME": "/process-home"}):
             self.assertEqual([env.CoreEnv.parse(m).db_path for m in (
                 {"HOME": "/jail"}, {"HOME": "/jail", "GPT_GATEWAY_DB": "~/x/gw.db"},
-                {"GPT_GATEWAY_DB": "/abs/gw.db", "GPT_GATEWAY_LOG": "/abs/gw.log"})],
+                {"GPT_GATEWAY_DB": "/abs/gw.db"})],
                 ["/jail/.local/state/gpt-gateway/gateway.db", "/jail/x/gw.db", "/abs/gw.db"])
             for mapping, named in (({}, "env HOME"), ({"HOME": "relative"}, "env HOME"),
                                    ({"HOME": "/jail", "GPT_GATEWAY_DB": "gw.db"}, "env GPT_GATEWAY_DB")):
@@ -78,24 +69,12 @@ class CoreEnvTest(unittest.TestCase):
                     env.CoreEnv.parse(mapping)
                 self.assertIn(named, str(cm.exception))
 
-    def test_the_log_resolves_against_the_mappings_home_never_the_process_home(self):
-        with patch.dict(os.environ, {"HOME": "/process-home"}):
-            self.assertEqual([env.CoreEnv.parse(m).log_path for m in (
-                {"HOME": "/jail", "GPT_GATEWAY_LOG": "~/x/gw.log"},
-                {"GPT_GATEWAY_LOG": "/abs/gw.log", "GPT_GATEWAY_DB": "/abs/gw.db"})],
-                ["/jail/x/gw.log", "/abs/gw.log"])  # the default under HOME: test_defaults
-            with self.assertRaisesRegex(env.EnvError, "env HOME: an absolute path is required for the log"):
-                env.CoreEnv.parse({"GPT_GATEWAY_DB": "/abs/gw.db"})
-            for raw in ("gw.log", "~", "~other/gw.log"):  # never the working directory, never left literal
-                with self.assertRaisesRegex(env.EnvError, "env GPT_GATEWAY_LOG: must be an absolute path"):
-                    env.CoreEnv.parse({"HOME": "/jail", "GPT_GATEWAY_LOG": raw})
-
     def test_every_knob_is_read_under_its_prefix(self):
         core = env.CoreEnv.parse({"GPT_GATEWAY_PORT": "1234", "GPT_GATEWAY_UPSTREAM": "http://127.0.0.1:9",
-                                  "GPT_GATEWAY_LOG": "/x/gw.log", "GPT_GATEWAY_DRAIN_SECONDS": "0.5",
+                                  "GPT_GATEWAY_DRAIN_SECONDS": "0.5",
                                   "GPT_GATEWAY_DEBUG": "1", "GPT_GATEWAY_DB": "/x/gw.db"})
-        self.assertEqual((core.port, core.upstream, core.log_path, core.drain_seconds, core.debug, core.db_path),
-                         (1234, "http://127.0.0.1:9", "/x/gw.log", 0.5, True, "/x/gw.db"))
+        self.assertEqual((core.port, core.upstream, core.drain_seconds, core.debug, core.db_path),
+                         (1234, "http://127.0.0.1:9", 0.5, True, "/x/gw.db"))
 
     def test_an_empty_value_means_unset(self):
         self.assertEqual(env.CoreEnv.parse({"GPT_GATEWAY_PORT": "  ", "HOME": "/jail"}).port, 18787)

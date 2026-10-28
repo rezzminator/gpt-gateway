@@ -88,9 +88,14 @@ class UninstallTest(unittest.TestCase):
         os.makedirs(state, exist_ok=True)
         for name in ("gateway.db", "gateway.db-wal", "gateway.db-shm", "chatgpt-models.json"):
             open(os.path.join(state, name), "w").close()
+        text = os.path.join(state, "logs")
+        os.makedirs(text)
+        for name in ("gpt-gateway.log", "gpt-gateway.log.1", "errors.jsonl"):
+            open(os.path.join(text, name), "w").close()
         code, out = h.run("uninstall.sh", "--purge")
         self.assertEqual(code, 0, out)
         self.assertEqual(os.listdir(logs), [])
+        self.assertEqual(os.listdir(text), ["errors.jsonl"])  # the text log, in the plugin log directory
         self.assertEqual(sorted(n for n in os.listdir(state) if n.startswith(("gateway", "chatgpt"))),
                          ["chatgpt-models.json"])  # the catalog is no log
 
