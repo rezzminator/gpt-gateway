@@ -1,8 +1,8 @@
 """The gateway log: the rotating text log `gpt-gateway.log` and the level rows of the vendored plugin-log library, both
 in the plugin log directory.
 
-Failures never interrupt gateway work. The screen gets an error row's line and the library's one line per failing
-streak, nothing else.
+Failures never interrupt gateway work. A service has no screen: stderr gets only a log's one line per failing streak
+(the text log's, the library's, an unusable PLUGIN_LOG_DIR or HOME); every row, errors included, goes to its file.
 """
 import os
 import sys
