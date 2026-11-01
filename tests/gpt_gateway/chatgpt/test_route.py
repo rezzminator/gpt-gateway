@@ -367,6 +367,18 @@ class RouteRetryTest(unittest.TestCase):
         self.assertEqual(message["stop_reason"], "end_turn")
         self.assertEqual([r["empty"] for r in fakes.gpt_rows(rt)], [1])
 
+    def test_a_bad_upstream_event_costs_only_itself_and_lands_in_the_row_notes_with_usage_or_without(self):
+        bad = fakes.responses_event("response.output_text.delta", output_index=0, delta="Hello") + fakes.responses_event("response.output_text.delta", output_index=0)
+        self.fake.script = [(200, bad + fakes.responses_event("response.completed", response={"usage": {"input_tokens": 100, "output_tokens": "x"}})), (200, bad)]
+        rt, port = self.gateway()
+        resp, data = self.send(port)
+        message = stream.accumulate(data)
+        self.assertEqual((resp.status, len(self.responses()), message.get("content"), message.get("stop_reason")), (200, 1, [{"type": "text", "text": "Hello"}], "end_turn"))
+        self.send(port)
+        skipped = "skipped Responses event response.output_text.delta: KeyError 'delta'"
+        self.assertEqual([(r["output_tokens"], r["translation_notes"]) for r in fakes.recorded(rt) if r["route"] == "chatgpt"],
+                         [(None, json.dumps([skipped, "unreadable usage output_tokens: 'x'"])), (None, json.dumps([skipped]))])
+
 
 class CodexRouteTest(unittest.TestCase):
     setUp = RouteTest.setUp

@@ -235,6 +235,38 @@ class RequestTest(unittest.TestCase):
             {'type': 'tool_use', 'id': 'lost', 'name': 'inspect', 'input': {}}]}]})
         self.assertEqual(value.get('input', [])[-1:], [{'type': 'function_call_output', 'call_id': 'lost', 'output': 'aborted'}])
 
+    def test_a_malformed_block_costs_only_itself_and_is_noted(self):
+        marker = {'type': 'input_text', 'text': '[tool result without its call]'}
+        orphan = 'tool result without its call sent as user text'
+        for name, body, items, notes in (
+                ('tool_use without id or name', {'messages': [{'role': 'assistant', 'content': [{'type': 'tool_use', 'input': {'a': 1}}]}]},
+                 [{'type': 'function_call', 'call_id': 'call_unknown_0', 'name': 'unknown', 'arguments': '{"a":1}'},
+                  {'type': 'function_call_output', 'call_id': 'call_unknown_0', 'output': 'aborted'}],
+                 ('tool_use without id or name sent as call_unknown_0 unknown',)),
+                ('tool_result without its call', {'messages': [
+                    {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'c', 'name': 'read', 'input': {}}]},
+                    {'role': 'user', 'content': [{'type': 'tool_result', 'content': 'no id'},
+                                                 {'type': 'tool_result', 'tool_use_id': 'gone', 'content': [{'type': 'text', 'text': 'lost call'}]},
+                                                 {'type': 'tool_result', 'tool_use_id': 'c', 'content': 'read'}]}]},
+                 [{'type': 'function_call', 'call_id': 'c', 'name': 'read', 'arguments': '{}'},
+                  {'type': 'function_call_output', 'call_id': 'c', 'output': 'read'},
+                  {'type': 'message', 'role': 'user', 'content': [marker, {'type': 'input_text', 'text': 'no id'}]},
+                  {'type': 'message', 'role': 'user', 'content': [marker, {'type': 'input_text', 'text': 'lost call'}]}],
+                 (orphan, orphan)),
+                ('text without text', {'system': [{'type': 'text'}], 'messages': [{'role': 'user', 'content': [{'type': 'text'}]}]},
+                 [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': ''}]}],
+                 ('text block without text sent empty', 'text block without text sent empty')),
+                ('base64 image without data', {'messages': [{'role': 'user', 'content': [
+                    {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png'}}]}]},
+                 [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': '[unsupported image]'}]}], ()),
+                ('json_schema without schema', {'output_config': {'format': {'type': 'json_schema'}},
+                                                'messages': [{'role': 'user', 'content': 'hi'}]},
+                 [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'hi'}]}],
+                 ('json_schema output format without a schema dropped',))):
+            with self.subTest(name=name):
+                value, translated = self.result(body)
+                self.assertEqual((value['input'], value.get('text'), translated.notes), (items, {'verbosity': 'low'}, notes))
+
     def test_structured_format_and_supported_images(self):
         body = {'output_config': {'format': {'type': 'json_schema', 'schema': {'type': 'object', 'properties': {}}}},
                 'messages': [{'role': 'user', 'content': [

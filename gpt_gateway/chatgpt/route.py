@@ -84,9 +84,16 @@ def without_reasoning(body):
         if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
             continue
         message["content"] = [block for block in message["content"] if not (
-            isinstance(block, dict) and block.get("type") == "thinking" and
-            isinstance(signature.decode(block.get("signature")), tuple))]
+            isinstance(block, dict) and block.get("type") == "thinking" and _signed_here(block.get("signature")))]
     return cleaned
+
+
+def _signed_here(value):
+    """Whether a signature is this gateway's, a damaged one included: request.translate drops that one anyway."""
+    try:
+        return signature.decode(value) is not None
+    except ValueError:
+        return True
 
 
 def notes_column(notes):
@@ -197,8 +204,9 @@ class Route:
                                 attempt, "final", translator.failure or reader.error_head, credentials,
                                 translator.error.delay, reader.transport_exception)
         row["attempts"] = attempt
+        row["translation_notes"] = notes_column(translation.notes + tuple(translator.notes))  # failed streams too
         if translator.usage is not None:
-            if translator.terminal == "response.completed":
+            if translator.terminal == "response.completed" and translator.input_tokens is not None:
                 with self.lock:
                     estimator.observe(translation.estimate_chars, translator.input_tokens, attachments)
             row.update(
@@ -210,7 +218,6 @@ class Route:
                 total_ms=clock.milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
                 reused=measure.reused, stale=measure.stale, turn_state=measure.turn or None,
                 transport=measure.transport, delta=measure.delta or None,
-                translation_notes=notes_column(translation.notes),
                 empty=translator.empty)
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.

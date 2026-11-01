@@ -19,6 +19,15 @@ def _anthropic_frame(kind, **fields):
     return ("event: " + kind + "\ndata: " + data + "\n\n").encode("utf-8")
 
 
+def _object(value):
+    return value if isinstance(value, dict) else {}
+
+
+# Events that carry an output item's content: one arriving for an output already closed is noted, never translated.
+_CONTENT = ("response.output_item.added", "response.output_item.done", "response.output_text.delta",
+            "response.reasoning_summary_text.delta", "response.reasoning_summary_part.added")
+
+
 class Translator:
     """feed/idle/finish return only new bytes; terminal calls are idempotent.
 
@@ -27,9 +36,11 @@ class Translator:
     (or max_tokens completes). emitted_any records returned bytes; once true
     the caller must not retry. error is always a Decision, with
     retries disabled after output. terminal is the event kind or synthetic
-    stream_closed/idle_timeout/protocol_error. input_tokens is the upstream
+    stream_closed/idle_timeout. input_tokens is the upstream
     total; cache_ratio is cached / total. usage is the final Anthropic usage;
-    reasoning_tokens is upstream's reasoning count, None when it reports none.
+    reasoning_tokens is upstream's reasoning count, None when it reports none; a count upstream sent that
+    reads as no int is None there and in usage, 0 in the client's usage, and noted.
+    notes names each upstream event skipped and each value left unknown: one bad event costs only itself.
     empty is true once a response completed with neither text, a tool call nor signed reasoning.
     """
 
@@ -45,7 +56,9 @@ class Translator:
         self.input_tokens = None
         self.reasoning_tokens = None
         self.empty = False
+        self.notes = []
         self._splitter = EventSplitter()
+        self._overflowed = 0
         self._blocks = {}
         self._done = set()
         self._next_index = 0
@@ -72,8 +85,9 @@ class Translator:
         self._last_upstream = clock.monotonic()
         out = self._start()
         out += self._consume(self._splitter.feed(chunk))
-        if self._splitter.overflowed and not self.terminal:
-            out += self._fail("protocol_error", {"message": "SSE event exceeds the size limit"})
+        if self._splitter.overflowed > self._overflowed:
+            self._overflowed = self._splitter.overflowed
+            self.notes.append("skipped an SSE event over the size limit")
         return self._release(out)
 
     # claude-code-proxy/src/providers/codex/mod.rs:900-960; hold the prelude.
@@ -153,15 +167,17 @@ class Translator:
         for event in events:
             if self.terminal:
                 break
+            kind = event["event"]
             try:
                 data = event["data"]
-                if data is None and event["event"] == "keepalive":
+                if data is None and kind == "keepalive":
                     data = {"type": "keepalive"}
                 if not isinstance(data, dict):
-                    raise ValueError("invalid SSE event JSON")
-                out += self._translate(data.get("type") or event["event"], data)
-            except (KeyError, TypeError, ValueError, AttributeError) as exc:
-                out += self._fail("protocol_error", {"message": "invalid Responses event: " + str(exc)})
+                    raise ValueError("data is not a JSON object")
+                kind = data.get("type") or kind
+                out += self._translate(kind, data)
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:  # raised before any state changed
+                self.notes.append("skipped Responses event %s: %s %s" % (kind or "unnamed", type(exc).__name__, exc))
         return bytes(out)
 
     # claude-code-proxy/src/providers/codex/translate/live_stream.rs:116-191,647-772,990-1071.
@@ -175,6 +191,8 @@ class Translator:
             return self._complete(kind, data)
         key = data.get("output_index", 0)
         if key in self._done:
+            if kind in _CONTENT:
+                self.notes.append("skipped Responses event %s: output %s already closed" % (kind, key))
             return b""
         item = data.get("item") or {}
         item_type = item.get("type")
@@ -185,26 +203,36 @@ class Translator:
                 return self._open(key, "thinking", thinking="", signature="")
         elif kind == "response.output_text.delta":
             text = data["delta"]
+            if not isinstance(text, str):
+                raise TypeError("delta is %s, not str" % type(text).__name__)
             self._has_content |= bool(text)
             return self._open(key, "text", text="") + self._delta(key, "text_delta", text=text)
         elif kind in ("response.reasoning_summary_text.delta", "response.reasoning_summary_part.added"):
             text = "\n\n" if kind.endswith("part.added") else data["delta"]
+            if not isinstance(text, str):
+                raise TypeError("delta is %s, not str" % type(text).__name__)
             self._has_content |= bool(text.strip())
             return (self._open(key, "thinking", thinking="", signature="") +
                     self._delta(key, "thinking_delta", thinking=text))
         elif kind == "response.output_item.done":
             out = b""
             if item_type == "reasoning":
-                out = self._open(key, "thinking", thinking="", signature="")
+                value = None
                 if item.get("encrypted_content"):
-                    value = signature.encode(self.slug, item["id"], item["encrypted_content"])
+                    try:
+                        value = signature.encode(self.slug, item.get("id"), item["encrypted_content"])
+                    except ValueError as exc:
+                        self.notes.append("reasoning sent unsigned: %s" % exc)
+                out = self._open(key, "thinking", thinking="", signature="")
+                if value is not None:
                     out += self._delta(key, "signature_delta", signature=value)
                     self._has_content = True
             elif item_type == "function_call":
-                name = item["name"]
-                out = self._open(key, "tool_use", id=item["call_id"],
-                                 name=self.tool_names.get(name, name), input={})
-                out += self._delta(key, "input_json_delta", partial_json=item["arguments"])
+                name, call_id, arguments = item["name"], item["call_id"], item["arguments"]
+                if not all(isinstance(value, str) for value in (name, call_id, arguments)):
+                    raise TypeError("function_call name, call_id and arguments must be strings")
+                out = self._open(key, "tool_use", id=call_id, name=self.tool_names.get(name, name), input={})
+                out += self._delta(key, "input_json_delta", partial_json=arguments)
                 self._tool_use = self._has_content = True
             return out + self._close(key)
         return b""
@@ -214,30 +242,40 @@ class Translator:
     # its turn, as Codex ends it and as the Messages API answers end_turn with no content; Claude Code then asks once
     # for visible output, where a retried empty regenerates the same nothing and a final error ends the agent.
     def _complete(self, kind, data):
-        response = data.get("response") or {}
+        response = _object(data.get("response"))
         reason = "tool_use" if self._tool_use else "end_turn"
         if kind == "response.incomplete":
-            if (response.get("incomplete_details") or {}).get("reason") != "max_output_tokens":
+            if _object(response.get("incomplete_details")).get("reason") != "max_output_tokens":
                 return self._fail(kind, data)
             reason = "max_tokens"
         self.empty = not self._has_content
-        raw = response.get("usage") or {}
-        details = raw.get("input_tokens_details") or {}
-        total = max(0, int(raw.get("input_tokens") or 0))
-        cached = max(0, int(details.get("cached_tokens") or 0))
-        written = max(0, int(details.get("cache_write_tokens", raw.get("cache_write_tokens")) or 0))
+        raw = _object(response.get("usage"))
+        details = _object(raw.get("input_tokens_details"))
+        total = self._count(raw, "input_tokens")
+        cached = self._count(details, "cached_tokens")
+        written = self._count(details if "cache_write_tokens" in details else raw, "cache_write_tokens")
         self.input_tokens = total
-        reasoning = (raw.get("output_tokens_details") or {}).get("reasoning_tokens")
-        self.reasoning_tokens = max(0, int(reasoning)) if reasoning is not None else None
-        self.cache_ratio = cached / total if total else 0.0
-        self.usage = {"input_tokens": max(0, total - cached - written),
-                      "output_tokens": max(0, int(raw.get("output_tokens") or 0)),
+        reasoning = _object(raw.get("output_tokens_details"))
+        self.reasoning_tokens = None if reasoning.get("reasoning_tokens") is None else self._count(reasoning,
+                                                                                                    "reasoning_tokens")
+        self.cache_ratio = None if None in (total, cached) else cached / total if total else 0.0
+        self.usage = {"input_tokens": None if total is None else max(0, total - (cached or 0) - (written or 0)),
+                      "output_tokens": self._count(raw, "output_tokens"),
                       "cache_creation_input_tokens": written, "cache_read_input_tokens": cached}
         self.terminal = kind
         out = b"".join(self._close(key) for key in list(self._blocks))
         out += _anthropic_frame("message_delta", delta={"stop_reason": reason, "stop_sequence": None},
-                                usage=self.usage)
+                                usage={field: value or 0 for field, value in self.usage.items()})
         return out + _anthropic_frame("message_stop")
+
+    def _count(self, fields, name):
+        """A usage count: 0 when absent, None (and noted) when it reads as no int."""
+        value = fields.get(name)
+        try:
+            return 0 if value is None else max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            self.notes.append("unreadable usage %s: %r" % (name, value))
+            return None
 
 
 # claude-code-proxy/src/providers/codex/translate/accumulate.rs:55-283.

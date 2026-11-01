@@ -127,6 +127,7 @@ class RunTest(unittest.TestCase):
     def install_secret(self, secret="b" * 64, mode=0o600):
         path = os.path.join(self.app, "route-secret")
         with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w") as target:
+            os.fchmod(target.fileno(), mode)  # the umask strips the open mode: 0o644 under umask 0077 is a valid 0600
             target.write(secret + "\n")
         return secret
 
@@ -430,6 +431,12 @@ class RunTest(unittest.TestCase):
 
     def test_connections_opened_during_hup_keep_their_first_request(self):
         self.write_settings({})
+        # a slow `date` holds run.sh in its "linked" log line, so the HUP below lands before the supervisor's wait
+        stubs = os.path.join(self.dir, "platform-bin")
+        os.makedirs(stubs)
+        with open(os.path.join(stubs, "date"), "w") as f:
+            f.write('#!/bin/sh\nsleep 0.5\nexec /bin/date "$@"\n')
+        os.chmod(os.path.join(stubs, "date"), 0o755)
         self.start(platform='Linux')
         self.assertTrue(jail.wait_for(self.linked), self.stderr())
         before = self.health_pid()

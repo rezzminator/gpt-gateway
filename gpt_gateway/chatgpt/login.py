@@ -129,8 +129,9 @@ def device_login(store, output=print):
         raise AuthError("Invalid ChatGPT device authorization response")
     try:
         interval = max(1, int(data.get("interval", 5)))
-    except (TypeError, ValueError, OverflowError):
-        raise AuthError("Invalid ChatGPT device polling interval") from None
+    except (TypeError, ValueError, OverflowError):  # a pace only: the login goes on at Codex's default
+        interval = 5
+        output("ChatGPT sent an unreadable device polling interval %r; polling every 5 s" % (data.get("interval"),))
     output("Open %s/codex/device and enter %s (expires in 15 minutes)." % (store.origin, code))
     while True:
         remaining = deadline - clock.monotonic()

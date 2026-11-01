@@ -145,11 +145,12 @@ def read_file(path):
     return out
 
 
-def module_settings(module, values, env, where):
+def module_settings(module, values, env, where, warn=None):
     """A module's validated settings, read-only: env over the file's `settings` over the default.
 
     Every value goes through the module's validator; a ValueError (or any other error) from it, or
     from the module's check(), becomes a SettingsError naming the module, the key and the source.
+    A string check() returns goes to `warn` as `middleware {module}: check warning: {text}`.
     """
     unknown = sorted(set(values) - set(module.spec))
     if unknown:
@@ -172,10 +173,12 @@ def module_settings(module, values, env, where):
     frozen = MappingProxyType(out)
     if module.check is not None:
         try:
-            module.check(frozen)
+            warning = module.check(frozen)
         except Exception as e:
             raise SettingsError("middleware %s: check failed: %s" % (
                 module.module, e if isinstance(e, ValueError) else repr(e)))
+        if isinstance(warning, str) and warn is not None:
+            warn("middleware %s: check warning: %s" % (module.module, warning))
     return frozen
 
 
@@ -243,7 +246,9 @@ class Settings:
 
     def build(self, core, modules, state):
         capture, mdir, entries, sources, chatgpt, retention, cache_retention = core
-        per_module = {m.module: module_settings(m, values, self.env, self.path)
+        def warn(message):
+            record(self.log, "warning", "middleware-check-warning", message, "gpt_gateway/settings.py#build")
+        per_module = {m.module: module_settings(m, values, self.env, self.path, warn)
                       for m, (_, values) in zip(modules, entries)}
         return Snapshot(capture, mdir, tuple(name for name, _ in entries), MappingProxyType(per_module),
                         MappingProxyType(sources), state, chatgpt, retention, cache_retention)

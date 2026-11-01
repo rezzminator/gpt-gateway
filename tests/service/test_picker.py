@@ -11,6 +11,8 @@ DEFAULT_ROWS = [
     {"model": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "description": DESCRIPTION},
     {"model": "gpt-6-astra", "label": "GPT-6 Astra", "description": DESCRIPTION},
 ]
+NOVA_UNCHECKED = ("env GPT_GATEWAY_MODEL_PICKER_MODELS: model gpt-7-nova could not be checked against the catalog; "
+                  "kept with its default label")
 FOREIGN = {"model": "claude-custom", "label": "My model", "description": "User-owned"}
 
 
@@ -95,6 +97,10 @@ class PickerTest(unittest.TestCase):
                     '["gpt-6-astra", "gpt-6-astra"]', '[42]', '["claude-custom"]'):
             with self.subTest(raw=raw):
                 h = self.host()
+                cache = os.path.join(h.home, "catalog.json")  # read whole: a model it lacks is refused
+                with open(cache, "w") as target:
+                    json.dump({"models": [{"slug": "gpt-7-comet", "supported_reasoning_levels": []}]}, target)
+                h.env["GPT_GATEWAY_CHATGPT_MODELS_PATH"] = cache
                 original = {"env": {"ANTHROPIC_BASE_URL": "https://example.invalid", "KEEP": "1"}}
                 h.write_claude(original)
                 h.env["GPT_GATEWAY_MODEL_PICKER_MODELS"] = raw
@@ -130,14 +136,37 @@ class PickerTest(unittest.TestCase):
                 self.assertNotEqual(code, 0, out)
                 self.assertIn("modelPicker", out)
                 self.assertEqual(h.read_claude(), {"modelPicker": picker})
-        h = self.host()
-        cache = os.path.join(h.home, "catalog.json")
-        with open(cache, "w") as target:
-            target.write("broken")
-        h.env["GPT_GATEWAY_CHATGPT_MODELS_PATH"] = cache
-        code, out = h.install()
-        self.assertNotEqual(code, 0, out)
-        self.assertIn("catalog", out)
+
+
+    def test_a_catalog_cache_that_does_not_read_costs_only_its_labels_with_a_warning(self):
+        bad_label = {"slug": "gpt-7-comet", "display_name": " ", "supported_reasoning_levels": []}
+        for name, contents, picked, rows, warnings in (
+                ("broken", "broken", '["gpt-6.1-sol", "gpt-7-nova"]',
+                 DEFAULT_ROWS[:1] + [{"model": "gpt-7-nova", "label": "GPT-7 Nova", "description": DESCRIPTION}],
+                 ["catalog {cache}: cannot read: Expecting value: line 1 column 1 (char 0); default labels used",
+                  NOVA_UNCHECKED]),
+                ("no models array", '{"models": {}}', '["gpt-6.1-sol"]', DEFAULT_ROWS[:1],
+                 ["catalog {cache}: catalog.models must be an array in an object; default labels used"]),
+                ("blank label and a bad entry", json.dumps({"models": [bad_label, {"slug": "gpt-7-nova"}]}),
+                 '["gpt-7-comet", "gpt-7-nova", "gpt-6.1-sol"]',
+                 [{"model": "gpt-7-comet", "label": "GPT-7 Comet", "description": DESCRIPTION},
+                  {"model": "gpt-7-nova", "label": "GPT-7 Nova", "description": DESCRIPTION}, DEFAULT_ROWS[0]],
+                 ["catalog {cache}: catalog.models[1]: supported_reasoning_levels must be an array of objects",
+                  'catalog {cache}: gpt-7-comet: display_name " " is no label; the default label is used',
+                  NOVA_UNCHECKED])):
+            with self.subTest(name=name):
+                h = self.host()
+                cache = os.path.join(h.home, "catalog.json")
+                with open(cache, "w") as target:
+                    target.write(contents)
+                h.env["GPT_GATEWAY_CHATGPT_MODELS_PATH"] = cache
+                h.env["GPT_GATEWAY_MODEL_PICKER_MODELS"] = picked
+                code, out = h.install()
+                self.assertEqual(code, 0, out)
+                self.assertEqual(h.read_claude()["modelPicker"]["options"], rows)
+                said = [line for line in out.splitlines() if line.startswith("gpt-gateway: model picker: warning: ")]
+                self.assertEqual(said, ["gpt-gateway: model picker: warning: " + w.format(cache=cache)
+                                        for w in warnings] * 2, out)  # once by the check, once by the install
 
     def test_uninstall_removes_only_owned_rows_and_preserves_other_picker_fields(self):
         for remaining in ({"options": [FOREIGN], "replaceBuiltInOptions": True},

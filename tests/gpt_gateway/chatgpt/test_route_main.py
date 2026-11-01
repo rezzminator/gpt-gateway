@@ -3,6 +3,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+from gpt_gateway.chatgpt import signature
+from gpt_gateway.chatgpt.route import without_reasoning
 from tests import fakes
 from tests.gpt_gateway.chatgpt import test_route as route_tests
 
@@ -65,3 +67,12 @@ class MainRouteTest(unittest.TestCase):
                         self.assertEqual(response.getheader("x-should-retry"), "false")
         self.assertEqual(self.fake.seen, [])
         self.assertEqual(self.send(port)[0].status, 200)
+
+
+class WithoutReasoningTest(unittest.TestCase):
+    def test_reasoning_drop_retry_survives_a_damaged_signature(self):
+        body = {"messages": [{"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "t", "signature": signature.PREFIX + "broken"},
+            {"type": "thinking", "thinking": "f", "signature": "foreign"}, {"type": "text", "text": "kept"}]}]}
+        self.assertEqual(without_reasoning(body)["messages"][0]["content"], [
+            {"type": "thinking", "thinking": "f", "signature": "foreign"}, {"type": "text", "text": "kept"}])

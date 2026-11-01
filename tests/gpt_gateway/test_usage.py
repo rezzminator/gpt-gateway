@@ -48,7 +48,14 @@ CASES = [
      {"error_code": "rate_limit_error"}, "no_usage"),
     ("a JSON body that is no JSON", "application/json", b"{not json", {}, "not_json"),
     ("a count-tokens reply", "application/json", b'{"input_tokens": 12}', {}, "no_usage"),
-    ("a usage of the wrong shape", "application/json", b'{"usage": {"input_tokens": "12"}}', {}, "bad_usage"),
+    ("a usage of the wrong shape", "application/json", b'{"usage": {"input_tokens": "12", "output_tokens": 3}}',
+     {"input_tokens": None, "cache_read_tokens": 0, "cache_write_tokens": 0, "output_tokens": 3,
+      "reasoning_tokens": None, "hit": None}, "bad_usage"),
+    ("an error event whose type is no string", "text/event-stream", sse(START, ("error", {"error": {"type": 5}})),
+     dict(TOKENS, output_tokens=1, reasoning_tokens=None, hit=5000 / 5110, error_code="unknown",
+          error_head=json.dumps({"error": {"type": 5}})), None),
+    ("a JSON error reply whose type is no string", "application/json", b'{"type": "error", "error": "slow down"}',
+     {"error_code": "unknown"}, "no_usage"),
     ("plain text", "text/plain", b"event: message_start\n\n", {}, "no_usage"),
 ]
 
@@ -79,7 +86,10 @@ class MeterTest(unittest.TestCase):
             meter.feed(body[i:i + 65536])
             peak = max(peak, len(meter.pending))
         self.assertLessEqual(peak, usage.MAX_EVENT + 65536)
-        self.assertEqual(meter.fields()["output_tokens"], 437)
+        self.assertEqual((meter.fields()["output_tokens"], meter.unread), (437, None))
+        lost = ("message_delta", {"usage": {"output_tokens": 9}, "pad": "x" * 2 * usage.MAX_EVENT})
+        meter, got = metered("text/event-stream", sse(START, lost), 65536)  # a wanted event too big to hold says so
+        self.assertEqual((got["output_tokens"], meter.unread), (1, "too_large"))
 
     def test_a_nesting_too_deep_to_parse_is_unread_never_raised(self):
         deep = b"[" * 100000  # past the parser's recursion limit, inside MAX_EVENT

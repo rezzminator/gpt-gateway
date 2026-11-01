@@ -43,43 +43,55 @@ class Model:
 
 
 # codex-rs/protocol/src/openai_models.rs:195-202,228-232,406-491,846-851.
-def parse(models_json) -> dict:
+def parse(models_json, faults=None) -> dict:
     """Read a decoded /codex/models response or Codex cache envelope.
 
-    Unknown representations of consumed fields raise ValueError with the field
-    name, so the caller can report the error and retain its last good catalog.
-    Unrelated metadata is intentionally ignored. Optional Rust fields stay None.
+    An envelope that is no object holding a models array raises ValueError, so the caller can report the error and
+    retain its last good catalog. An entry with an unknown representation of a consumed field is skipped, and a
+    default_reasoning_summary no request may name is sent as none: each appended to `faults`, when given, naming
+    the field, so one bad entry costs only itself. Unrelated metadata is intentionally ignored. Optional Rust fields
+    stay None.
     """
     if not isinstance(models_json, dict) or not isinstance(models_json.get('models'), list):
         raise ValueError('catalog.models must be an array in an object')
+    faults = [] if faults is None else faults
     models = {}
-    for entry in models_json['models']:
-        if not isinstance(entry, dict):
-            raise ValueError('catalog.models entry must be an object')
-        slug = _catalog_string(entry.get('slug'), 'slug')
-        if slug in models:
-            raise ValueError('duplicate catalog slug: ' + slug)
-        window = entry.get('context_window')
-        if window is not None and (type(window) is not int or window <= 0):
-            raise ValueError('context_window must be a positive integer or null')
-        levels = _catalog_options(entry.get('supported_reasoning_levels'), 'supported_reasoning_levels', 'effort')
-        tiers = _catalog_options(entry.get('service_tiers', []), 'service_tiers', 'id')
-        default = _catalog_string(entry.get('default_reasoning_level'), 'default_reasoning_level', nullable=True)
-        verbosity = _catalog_string(entry.get('default_verbosity'), 'default_verbosity', nullable=True)
-        updates = _catalog_bool(entry, 'supports_reasoning_effort_updates', False)
-        support_verbosity = _catalog_bool(entry, 'support_verbosity', False)
-        percent = entry.get('effective_context_window_percent', 95)
-        if type(percent) is not int or not 1 <= percent <= 100:
-            raise ValueError('effective_context_window_percent must be an integer from 1 to 100')
-        summaries = _catalog_bool(entry, 'supports_reasoning_summaries', True)
-        summary_parameter = _catalog_bool(entry, 'supports_reasoning_summary_parameter', True)
-        summary = _catalog_string(entry.get('default_reasoning_summary', 'auto'), 'default_reasoning_summary')
-        if summary not in _SUMMARIES:
-            raise ValueError('default_reasoning_summary must be one of ' + ', '.join(_SUMMARIES))
-        sent = summary if summaries and summary_parameter and summary != 'none' else None
-        models[slug] = Model(slug, window, levels, default, verbosity, sent, tiers,
-                             updates, support_verbosity, percent)
+    for index, entry in enumerate(models_json['models']):
+        try:
+            model = _model(entry, faults)
+            if model.slug in models:
+                raise ValueError('duplicate catalog slug: ' + model.slug)
+        except ValueError as error:
+            faults.append('catalog.models[%d]: %s' % (index, error))
+            continue
+        models[model.slug] = model
     return models
+
+
+def _model(entry, faults):
+    if not isinstance(entry, dict):
+        raise ValueError('catalog.models entry must be an object')
+    slug = _catalog_string(entry.get('slug'), 'slug')
+    window = entry.get('context_window')
+    if window is not None and (type(window) is not int or window <= 0):
+        raise ValueError('context_window must be a positive integer or null')
+    levels = _catalog_options(entry.get('supported_reasoning_levels'), 'supported_reasoning_levels', 'effort')
+    tiers = _catalog_options(entry.get('service_tiers', []), 'service_tiers', 'id')
+    default = _catalog_string(entry.get('default_reasoning_level'), 'default_reasoning_level', nullable=True)
+    verbosity = _catalog_string(entry.get('default_verbosity'), 'default_verbosity', nullable=True)
+    updates = _catalog_bool(entry, 'supports_reasoning_effort_updates', False)
+    support_verbosity = _catalog_bool(entry, 'support_verbosity', False)
+    percent = entry.get('effective_context_window_percent', 95)
+    if type(percent) is not int or not 1 <= percent <= 100:
+        raise ValueError('effective_context_window_percent must be an integer from 1 to 100')
+    summaries = _catalog_bool(entry, 'supports_reasoning_summaries', True)
+    summary_parameter = _catalog_bool(entry, 'supports_reasoning_summary_parameter', True)
+    summary = entry.get('default_reasoning_summary', 'auto')
+    if summary not in _SUMMARIES:  # only the request names it: the model stays, sending none
+        faults.append('%s: default_reasoning_summary %r is not one of %s; none sent' % (slug, summary, ', '.join(_SUMMARIES)))
+        summary = 'none'
+    sent = summary if summaries and summary_parameter and summary != 'none' else None
+    return Model(slug, window, levels, default, verbosity, sent, tiers, updates, support_verbosity, percent)
 
 
 # codex-rs/protocol/src/config_types.rs:65-72 ReasoningSummary; serde default Auto.
@@ -132,11 +144,19 @@ class Catalog:
         self.pending = None
         try:
             with open(self.path, encoding="utf-8") as source:
-                self.copy = parse(json.load(source))
+                self.copy = self._parse(json.load(source))
             age = max(0, clock.now() - os.stat(self.path).st_mtime)
             self.next_refresh = clock.monotonic() + max(0, 300 - age)
         except (OSError, ValueError) as error:
             self.cause = str(error)
+
+    def _parse(self, raw):
+        """The models of a catalog; each entry it skips or field it overrides is a `catalog_fault` event."""
+        faults = []
+        models = parse(raw, faults)
+        for fault in faults:
+            self.event("catalog_fault", cause=fault)
+        return models
 
     def count(self):
         """Health never fetches or waits on the refresh lock."""
@@ -158,7 +178,7 @@ class Catalog:
             raw, error = result.get_nowait()
             if error is not None:
                 raise error
-            models = parse(raw)
+            models = self._parse(raw)
             self._save(raw)
         except Exception as error:
             with self.lock:
@@ -212,7 +232,7 @@ class Catalog:
                     self.pending = None
                     if error is not None:
                         raise error
-                    models = parse(raw)
+                    models = self._parse(raw)
                     self._save(raw)
                     self.copy = models
                     self.next_refresh = clock.monotonic() + 300

@@ -127,10 +127,11 @@ class CaptureTest(unittest.TestCase):
             outside.write(b"keep this")
         os.symlink(target, os.path.join(exchange.dir, capture.REQUEST_BODY))
         exchange.request_body(b"private conversation")
+        exchange.response(200, "OK", [])  # the refused file costs only itself
         with open(target, "rb") as outside:
             self.assertEqual(outside.read(), b"keep this")
-        self.assertIsNone(exchange.dir)
-        self.assertIn("capture_error", events)
+        self.assertEqual((events, sorted(os.listdir(exchange.dir))),
+                         (["capture_error"], ["1-request.json", "2-request.body", "4-response.json", "5-response.body"]))
 
     def test_a_capture_that_cannot_write_is_recorded_and_the_request_goes_on(self):
         blocker = os.path.join(jail.scratch(self), "a-file")
@@ -174,7 +175,25 @@ class CaptureShortageTest(unittest.TestCase):
         self.assertIn("Too many open files", fields["error"])
         self.now[0] += handles.EVENT_SECONDS + 1
         self.exchange(5, makedirs=True)
-        self.assertEqual([(k, f["suppressed"]) for k, f in self.events], [("fd_exhausted", 0), ("fd_exhausted", 3)])
+        # held back: the second and fourth exchanges' folder, and each of the third's four files
+        self.assertEqual([(k, f["suppressed"]) for k, f in self.events], [("fd_exhausted", 0), ("fd_exhausted", 6)])
+
+    def test_a_file_that_cannot_be_written_costs_only_itself(self):
+        real = os.open
+
+        def refuse(path, *args):
+            if path.endswith(capture.REQUEST_BODY):
+                raise PermissionError(errno.EACCES, "refused")
+            return real(path, *args)
+        with mock.patch("gpt_gateway.capture.os.open", side_effect=refuse):
+            cap = capture.Capture(self.root, 1, "POST", "/v1/messages", {"x": "1"}, "main",
+                                  lambda kind, **fields: self.events.append((kind, fields)))
+            cap.request_body(b"{}")
+            cap.response(200, "OK", [("a", "b")])
+            cap.chunk(b"data")
+            cap.close()
+        self.assertEqual(([k for k, _ in self.events], sorted(os.listdir(cap.dir))),
+                         (["capture_error"], ["1-request.json", "4-response.json", "5-response.body"]))
 
     def test_any_other_failure_stays_a_capture_error(self):
         blocker = os.path.join(jail.scratch(self), "a-file")

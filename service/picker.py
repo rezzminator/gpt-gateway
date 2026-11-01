@@ -17,8 +17,16 @@ from gpt_gateway.chatgpt import catalog
 DESCRIPTION = "GPT via local gpt-gateway (ChatGPT plan)"
 
 
+def warn(text):
+    print("gpt-gateway: model picker: warning: %s" % text, file=sys.stderr)
+
+
 def picker_rows(install_dir, environ):
-    """Validate configuration and local availability even when the route is off; never fetch a catalog."""
+    """Validate configuration and local availability even when the route is off; never fetch a catalog.
+
+    The catalog cache only labels rows: one that cannot be read gives the default labels, an entry or label that does
+    not parse costs only itself, each with a warning. A model the cache lacks is refused when the cache was read whole;
+    when it could not be read, or skipped an entry, the model stays with its default label and a warning."""
     path = settings.default_path(install_dir)
     values = settings.read_file(path) or {}
     override = env.model_picker_override(environ)
@@ -26,28 +34,40 @@ def picker_rows(install_dir, environ):
     models = settings.model_picker_models(
         override if override is not None else values.get("model_picker_models", list(settings.DEFAULT_PICKER_MODELS)),
         where)
-    labels = {}
+    labels, whole = {}, False
     if models:
         cache = env.chatgpt_path(environ, env.CHATGPT_MODELS_PATH, "~/.local/state/gpt-gateway/chatgpt-models.json")
+        raw, faults, parsed = None, [], None
         try:
             with open(cache, encoding="utf-8") as source:
                 raw = json.load(source)
         except FileNotFoundError:
-            raw = {"models": []}  # Only absence permits offline defaults; a broken cache is a named error.
+            pass  # no cache yet: the default labels
         except (OSError, ValueError) as error:
-            raise ValueError("catalog %s: cannot read: %s" % (cache, error)) from error
-        try:
-            catalog.parse(raw)
-            for entry in raw["models"]:
-                name = entry.get("display_name")
-                if name is not None and (not isinstance(name, str) or not name.strip()):
-                    raise ValueError("display_name must be a nonempty string or null")
-                labels[entry["slug"]] = name
-        except ValueError as error:
-            raise ValueError("catalog %s: %s" % (cache, error)) from error
+            warn("catalog %s: cannot read: %s; default labels used" % (cache, error))
+        if raw is not None:
+            try:
+                parsed = catalog.parse(raw, faults)
+            except ValueError as error:
+                warn("catalog %s: %s; default labels used" % (cache, error))
+        whole = parsed is not None and not faults
+        for entry in raw["models"] if parsed else []:
+            slug = entry.get("slug") if isinstance(entry, dict) else None
+            if not isinstance(slug, str) or slug not in parsed:
+                continue
+            name = entry.get("display_name")
+            if name is not None and (not isinstance(name, str) or not name.strip()):
+                faults.append("%s: display_name %s is no label; the default label is used" % (slug, json.dumps(name)))
+                name = None
+            labels[slug] = name
+        for fault in faults:
+            warn("catalog %s: %s" % (cache, fault))
     for model in models:
-        if model not in settings.DEFAULT_PICKER_MODELS and model not in labels:
+        if model in settings.DEFAULT_PICKER_MODELS or model in labels:
+            continue
+        if whole:
             raise ValueError("%s: unknown model %s; not in the local ChatGPT catalog" % (where, model))
+        warn("%s: model %s could not be checked against the catalog; kept with its default label" % (where, model))
     enabled = settings.Settings(path, environ, None).core(values)[4]
     if not enabled:
         return []

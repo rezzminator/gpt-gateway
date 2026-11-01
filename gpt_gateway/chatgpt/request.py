@@ -62,7 +62,7 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     ("24h"), rides as prompt_cache_retention right after the cache key; nothing else in the body changes."""
     registered, deferred, names, tool_notes = tools.translate_tools(body)
     notes = list(tool_notes)
-    instructions = _system_text(body.get('system', []))
+    instructions = _system_text(body.get('system', []), notes)
     if agent_contract:
         stripped, count = _HARNESS_NO_REPORT_NOTE.subn('', instructions)
         instructions = stripped.rstrip('\n') if count else instructions
@@ -93,7 +93,7 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
     tier = model.service_tier_for_request('fast' if raw_model.endswith('-fast') else None)
     if tier is not None:
         result['service_tier'] = tier
-    result['input'] = _normalize_calls(items)
+    result['input'] = _normalize_calls(items, notes)
     result['tools'] = registered
     result['tool_choice'] = tools.tool_choice(body, names)
     result['parallel_tool_calls'] = not disable_parallel
@@ -110,8 +110,11 @@ def translate(body: dict, model: Model, lane_key: str, effort: Optional[str] = N
         text['verbosity'] = model.default_verbosity
     output_format = body.get('output_config', {}).get('format')
     if isinstance(output_format, dict) and output_format.get('type') == 'json_schema':
-        text['format'] = {'type': 'json_schema', 'name': output_format.get('name', 'response'),
-                          'strict': True, 'schema': output_format['schema']}
+        if 'schema' in output_format:
+            text['format'] = {'type': 'json_schema', 'name': output_format.get('name', 'response'),
+                              'strict': True, 'schema': output_format['schema']}
+        else:
+            notes.append('json_schema output format without a schema dropped')
     if text:
         result['text'] = text
     metadata = {'session_id': lane_key, 'thread_id': lane_key, 'x-codex-window-id': parent_key or lane_key}
@@ -162,10 +165,18 @@ def _attachment_chars(items):
 
 
 # claude-code-proxy/src/providers/translate_shared.rs:36-58.
-def _system_text(content):
-    blocks = _content_blocks(content)
-    return '\n\n'.join(block['text'] for block in blocks if block.get('type') == 'text'
-                       and not block['text'].startswith('x-anthropic-billing-header:'))
+def _system_text(content, notes):
+    texts = [_block_text(block, notes) for block in _content_blocks(content) if block.get('type') == 'text']
+    return '\n\n'.join(text for text in texts if not text.startswith('x-anthropic-billing-header:'))
+
+
+def _block_text(block, notes):
+    """A text block's text; one without a string text is sent empty and noted."""
+    text = block.get('text')
+    if isinstance(text, str):
+        return text
+    notes.append('text block without text sent empty')
+    return ''
 
 
 def _content_blocks(content):
@@ -207,18 +218,23 @@ def _request_items(messages, slug, instructions, notes):
                 if item is None:
                     continue
             elif role == 'assistant' and kind == 'tool_use':
-                item = {'type': 'function_call', 'call_id': block['id'], 'name': tools.short_name(block['name']),
+                call_id, name = block.get('id'), block.get('name')
+                if not (isinstance(call_id, str) and isinstance(name, str)):
+                    call_id = call_id if isinstance(call_id, str) else 'call_unknown_%d' % len(items)
+                    name = name if isinstance(name, str) else 'unknown'
+                    notes.append('tool_use without id or name sent as %s %s' % (call_id, name))
+                item = {'type': 'function_call', 'call_id': call_id, 'name': tools.short_name(name),
                         'arguments': _compact_json(block.get('input', {}))}
-            elif role == 'user' and kind == 'tool_result':
-                item = {'type': 'function_call_output', 'call_id': block['tool_use_id'],
-                        'output': _tool_output(block)}
+            elif role == 'user' and kind == 'tool_result':  # one without tool_use_id goes as user text
+                item = {'type': 'function_call_output', 'call_id': block.get('tool_use_id'),
+                        'output': _tool_output(block, notes)}
             if item is not None:
                 if parts:
                     items.append(_response_message(role, parts))
                     parts = []
                 items.append(item)
             else:
-                parts.append(_content_part(block, role))
+                parts.append(_content_part(block, notes, role))
         if parts:
             items.append(_response_message(role, parts))
         if switched:
@@ -234,19 +250,19 @@ def _request_items(messages, slug, instructions, notes):
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:865-908;
 # codex-rs/utils/image/src/lib.rs:181-207 (remote-image placeholder policy).
-def _content_part(block, role='user'):
+def _content_part(block, notes, role='user'):
     kind = block.get('type', 'unknown')
     text_type = 'output_text' if role == 'assistant' else 'input_text'
     if kind == 'text':
-        return {'type': text_type, 'text': block['text']}
+        return {'type': text_type, 'text': _block_text(block, notes)}
+    source = block.get('source')
+    base64 = isinstance(source, dict) and source.get('type') == 'base64' and isinstance(source.get('data'), str)
     if kind == 'image' and role != 'assistant':
-        source = block.get('source', {})
-        if source.get('type') == 'base64' and source.get('media_type') in _IMAGE_MEDIA:
+        if base64 and source.get('media_type') in _IMAGE_MEDIA:
             return {'type': 'input_image', 'image_url': 'data:' + source['media_type'] + ';base64,' + source['data']}
     # Responses API input_file: inline file_data is a data URL and needs a filename.
     if kind == 'document' and role != 'assistant':
-        source = block.get('source', {})
-        if source.get('type') == 'base64' and source.get('media_type') == 'application/pdf':
+        if base64 and source.get('media_type') == 'application/pdf':
             return {'type': 'input_file', 'filename': 'document.pdf',
                     'file_data': 'data:application/pdf;base64,' + source['data']}
     if kind == 'tool_reference' and isinstance(block.get('tool_name'), str):
@@ -255,8 +271,8 @@ def _content_part(block, role='user'):
 
 
 # claude-code-proxy/src/providers/codex/translate/request.rs:877-908.
-def _tool_output(block):
-    parts = [_content_part(part) for part in _content_blocks(block.get('content', []))]
+def _tool_output(block, notes):
+    parts = [_content_part(part, notes) for part in _content_blocks(block.get('content', []))]
     if block.get('is_error'):
         parts.insert(0, {'type': 'input_text', 'text': '[tool execution error]'})
     if any(part['type'] in ('input_image', 'input_file') for part in parts):
@@ -264,18 +280,26 @@ def _tool_output(block):
     return '\n'.join(part['text'] for part in parts)
 
 
-# codex-rs/core/src/context_manager/normalize.rs:46-67 (synthetic output); orphan output policy.
-def _normalize_calls(items):
+# codex-rs/core/src/context_manager/normalize.rs:46-67 (synthetic output); orphan output policy: an output without
+# its call goes as user text after the run of outputs it sat in, so no message splits a call from its output.
+def _normalize_calls(items, notes):
     calls = {item['call_id'] for item in items if item['type'] == 'function_call'}
     outputs = {item['call_id'] for item in items if item['type'] == 'function_call_output'}
-    normalized = []
+    normalized, held = [], []
     for item in items:
         if item['type'] == 'function_call_output' and item['call_id'] not in calls:
+            output = item['output']
+            held.append(_response_message('user', [{'type': 'input_text', 'text': '[tool result without its call]'}] + (
+                output if isinstance(output, list) else [{'type': 'input_text', 'text': output}])))
+            notes.append('tool result without its call sent as user text')
             continue
+        if item['type'] != 'function_call_output':
+            normalized.extend(held)
+            held = []
         normalized.append(item)
         if item['type'] == 'function_call' and item['call_id'] not in outputs:
             normalized.append({'type': 'function_call_output', 'call_id': item['call_id'], 'output': 'aborted'})
-    return normalized
+    return normalized + held
 
 
 def _request_effort(body, model, notes, pinned=None):

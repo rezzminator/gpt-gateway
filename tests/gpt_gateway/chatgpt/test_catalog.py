@@ -73,8 +73,11 @@ class CatalogTest(unittest.TestCase):
                 ('effective_context_window_percent', (None, True, False, 0, -1, 101, 95.0, '95'))):
             for value in values:
                 with self.subTest(field=field, value=value):
-                    with self.assertRaisesRegex(ValueError, field):
-                        catalog.parse({'models': [self.entry(**{field: value})]})
+                    faults = []
+                    self.assertEqual(list(catalog.parse({'models': [self.entry(**{field: value}), dict(self.entry(), slug='gpt-kept')]},
+                                                        faults)), ['gpt-kept'])
+                    self.assertEqual(len(faults), 1, faults)
+                    self.assertRegex(faults[0], r'^catalog\.models\[0\]: ' + field + ' must be ')
 
     def test_summary_flags(self):
         entry = self.entry(supports_reasoning_summaries=False)
@@ -91,9 +94,13 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertEqual(catalog.parse({'models': [self.entry(**fields)]})['gpt-example'].reasoning_summary,
                                  expected)
-        for bad in ('loud', '', 7, None):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                catalog.parse({'models': [self.entry(default_reasoning_summary=bad)]})
+        for bad in ('loud', '', 7, None):  # a summary only the request names never costs its model
+            with self.subTest(bad=bad):
+                faults = []
+                self.assertIsNone(catalog.parse({'models': [self.entry(default_reasoning_summary=bad)]},
+                                                faults)['gpt-example'].reasoning_summary)
+                self.assertEqual(faults, ['gpt-example: default_reasoning_summary %r is not one of auto, concise, '
+                                          'detailed, none; none sent' % (bad,)])
 
     def test_nullable_defaults_and_future_effort(self):
         entry = self.entry()
@@ -115,13 +122,17 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 entry = self.entry()
                 entry[field] = value
-                with self.assertRaisesRegex(ValueError, field):
-                    catalog.parse({'models': [entry]})
-        for bad in (None, [], {}, {'models': {}}, {'models': [False]}):
+                faults = []
+                self.assertEqual(list(catalog.parse({'models': [entry, dict(self.entry(), slug='gpt-kept')]}, faults)), ['gpt-kept'])
+                self.assertEqual(len(faults), 1, faults)
+                self.assertRegex(faults[0], r'^catalog\.models\[0\]: ' + field + '(\\.\\w+)? (must|entry must)')
+        for bad in (None, [], {}, {'models': {}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 catalog.parse(bad)
-        with self.assertRaisesRegex(ValueError, 'duplicate'):
-            catalog.parse({'models': [self.entry(), self.entry()]})
+        faults = []
+        self.assertEqual(list(catalog.parse({'models': [False, self.entry(), self.entry()]}, faults)), ['gpt-example'])
+        self.assertEqual(faults, ['catalog.models[0]: catalog.models entry must be an object',
+                                  'catalog.models[2]: duplicate catalog slug: gpt-example'])
 
 
 class CatalogStoreTest(unittest.TestCase):
@@ -165,10 +176,18 @@ class CatalogStoreTest(unittest.TestCase):
             self.assertTrue(jail.wait_for(lambda: cache.pending is None), "retry never completed")
             self.assertEqual(self.client.models.call_count, 3)
             self.assertEqual(self.events, [("catalog_refresh_failed", {"cause": "invented unavailable"})] * 2)
+            timer.return_value = 760  # one bad entry costs only itself, named in a catalog_fault event
+            self.client.models.side_effect = None
+            self.client.models.return_value = {"models": [{"slug": "gpt-bad"}] + self.raw["models"]}
+            cache.models()
+            self.assertTrue(jail.wait_for(lambda: cache.pending is None), "refresh never completed")
+            self.assertEqual((list(cache.models()), self.events[2:]), (["gpt-test"], [("catalog_fault", {
+                "cause": "catalog.models[0]: supported_reasoning_levels must be an array of objects"})]))
+            self.events[2:] = []
             loaded = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.assertEqual(loaded.count(), 1)
             self.assertIn("gpt-test", loaded.models())
-            self.assertEqual(self.client.models.call_count, 3)
+            self.assertEqual(self.client.models.call_count, 4)
 
     def test_cached_models_return_during_one_refresh(self):
         import concurrent.futures

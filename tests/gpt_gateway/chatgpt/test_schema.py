@@ -7,7 +7,13 @@ from gpt_gateway.chatgpt.schema import sanitize
 class SchemaTest(unittest.TestCase):
     def test_codex_lowering_table(self):
         cases = [(True, {'type': 'string'}), (False, {'type': 'string'}),
-                 ({'description': 'Unspecified'}, {}), ({'const': 7}, {'enum': [7], 'type': 'string'}),
+                 ({'description': 'Unspecified', 'title': 'Any'}, {'description': 'Unspecified', 'title': 'Any'}),
+                 ({'type': 'any', 'description': 'Anything'}, {'description': 'Anything'}),
+                 ({'type': ['unknown'], 'description': 'Anything'}, {'description': 'Anything'}),
+                 ({'type': None, 'description': 'Anything'}, {'description': 'Anything'}),
+                 ({'type': 'any', '$ref': '#/$defs/A'}, {'$ref': '#/$defs/A'}),
+                 ({'type': ['unknown'], 'anyOf': [False]}, {'anyOf': [{'type': 'string'}]}),
+                 ({'const': 7}, {'enum': [7], 'type': 'string'}),
                  ({'required': ['x']}, {'required': ['x'], 'type': 'object', 'properties': {}}),
                  ({'minimum': 1}, {'minimum': 1, 'type': 'number'}),
                  ({'type': ['unknown', 'array', 'null']}, {'type': ['array', 'null'], 'items': {'type': 'string'}}),

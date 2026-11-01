@@ -286,14 +286,15 @@ class HookExchangeTest(unittest.TestCase):
         expected = dict(json.loads(ODD), added=1)
         self.assertEqual(Upstream.seen[-1]["body"], json.dumps(expected, separators=(",", ":")).encode())
 
-    def test_an_on_request_failure_forwards_the_original_bytes_and_the_stream_whole(self):
+    def test_an_on_request_failure_forwards_the_earlier_edits_and_the_stream_whole(self):
         rt, port = self.gateway("edit", "fail", "rec", edit=EDIT, fail=FAIL, rec=RECORDER.format(name="rec"))
         resp, data = fakes.request(port, "POST", "/v1/messages", ODD)
-        self.assertEqual((resp.status, data, Upstream.seen[-1]["body"]), (200, SSE_BODY, ODD))
-        self.assertEqual([c[0] for c in ended("rec", 1)], ["on_event"] * 3 + ["on_response_end"])
+        self.assertEqual((resp.status, data, Upstream.seen[-1]["body"]), (200, SSE_BODY, (
+            b'{"model":"claude-x","stream":true,"messages":[{"role":"user","content":"hi"}],"added":1}')))
+        self.assertEqual([c[0] for c in ended("rec", 1)], ["on_request"] + ["on_event"] * 3 + ["on_response_end"])
         self.assertEqual([(e["fields"]["module"], e["fields"]["hook"], e["fields"]["error"])
                           for e in fakes.events(rt, "middleware_failed")], [("fail", "on_request", "RuntimeError('x')")])
-        self.assertEqual(rows(rt, "status", "kind", "note"), [{"status": 200, "kind": "main", "note": None}])
+        self.assertEqual(rows(rt, "status", "kind", "note"), [{"status": 200, "kind": "main", "note": "rec=seen"}])
 
     def test_on_event_sees_whole_events_across_split_chunks(self):
         rt, port = self.gateway("rec", rec=RECORDER.format(name="rec"))
