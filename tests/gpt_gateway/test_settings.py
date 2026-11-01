@@ -22,6 +22,8 @@ def positive(value):
 def check(settings):
     if settings["low"] > settings["high"]:
         raise ValueError("low above high")
+    if settings["low"] == settings["high"]:
+        return "low equals high"
 
 SETTINGS = {"low": (1, positive, "GPT_GATEWAY_POS_LOW"), "high": (5, positive, None)}
 '''
@@ -243,6 +245,11 @@ class MiddlewareSettingsTest(SettingsCase):
         with self.assertRaises(SettingsError) as cm:
             self.loaded()
         self.assertIn("middleware pos: check failed: low above high", str(cm.exception))
+
+    def test_a_check_warning_is_logged_and_the_settings_kept(self):
+        self.write(self.entry(low=3, high=3))
+        self.assertEqual(dict(self.loaded().current().module_settings["pos"]), {"low": 3, "high": 3})
+        self.assertEqual(self.lines, ["middleware pos: check warning: low equals high"])
 
     def test_a_module_that_cannot_load_stops_the_load(self):
         self.write({"middleware": [{"module": "absent"}]})

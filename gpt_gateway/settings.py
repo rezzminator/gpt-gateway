@@ -18,7 +18,9 @@ from . import middleware
 from .log import record
 
 FILE_NAME = "settings.json"
-KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention")
+KEYS = ("capture_dir", "middleware", "middleware_dir", "chatgpt", "db_retention_days", "chatgpt_cache_retention",
+        "model_picker_models")
+DEFAULT_PICKER_MODELS = ("gpt-6.1-sol", "gpt-6-astra")
 CACHE_RETENTIONS = ("off", "24h")
 ENTRY_KEYS = ("module", "settings")
 MODULE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*\Z")
@@ -86,6 +88,20 @@ def middleware_entries(value, where):
     return tuple(out)
 
 
+def model_picker_models(models, where):
+    """Validate the install-time ordered GPT id list; availability is the installer's catalog concern."""
+    if not isinstance(models, list):
+        raise SettingsError("%s: model_picker_models must be an array of GPT model ids" % where)
+    seen = set()
+    for model in models:
+        if not isinstance(model, str) or not re.fullmatch(r"gpt-[a-z0-9]+(?:[.-][a-z0-9]+)*", model):
+            raise SettingsError("%s: model_picker_models: malformed GPT model id %r" % (where, model))
+        if model in seen:
+            raise SettingsError("%s: model_picker_models: duplicate model %s" % (where, model))
+        seen.add(model)
+    return list(models)
+
+
 def read_file(path):
     """The file's validated values {key: value}; None when the file does not exist."""
     try:
@@ -105,6 +121,8 @@ def read_file(path):
     if unknown:
         raise SettingsError("%s: unknown key(s) %s; known: %s" % (path, ", ".join(unknown), ", ".join(KEYS)))
     out = {}
+    if "model_picker_models" in data:
+        out["model_picker_models"] = model_picker_models(data["model_picker_models"], path)
     if "chatgpt" in data:
         if data["chatgpt"] is not None and type(data["chatgpt"]) is not bool:
             raise SettingsError("%s: chatgpt must be a boolean or null" % path)
@@ -127,11 +145,12 @@ def read_file(path):
     return out
 
 
-def module_settings(module, values, env, where):
+def module_settings(module, values, env, where, warn=None):
     """A module's validated settings, read-only: env over the file's `settings` over the default.
 
     Every value goes through the module's validator; a ValueError (or any other error) from it, or
     from the module's check(), becomes a SettingsError naming the module, the key and the source.
+    A string check() returns goes to `warn` as `middleware {module}: check warning: {text}`.
     """
     unknown = sorted(set(values) - set(module.spec))
     if unknown:
@@ -154,10 +173,12 @@ def module_settings(module, values, env, where):
     frozen = MappingProxyType(out)
     if module.check is not None:
         try:
-            module.check(frozen)
+            warning = module.check(frozen)
         except Exception as e:
             raise SettingsError("middleware %s: check failed: %s" % (
                 module.module, e if isinstance(e, ValueError) else repr(e)))
+        if isinstance(warning, str) and warn is not None:
+            warn("middleware %s: check warning: %s" % (module.module, warning))
     return frozen
 
 
@@ -225,7 +246,9 @@ class Settings:
 
     def build(self, core, modules, state):
         capture, mdir, entries, sources, chatgpt, retention, cache_retention = core
-        per_module = {m.module: module_settings(m, values, self.env, self.path)
+        def warn(message):
+            record(self.log, "warning", "middleware-check-warning", message, "gpt_gateway/settings.py#build")
+        per_module = {m.module: module_settings(m, values, self.env, self.path, warn)
                       for m, (_, values) in zip(modules, entries)}
         return Snapshot(capture, mdir, tuple(name for name, _ in entries), MappingProxyType(per_module),
                         MappingProxyType(sources), state, chatgpt, retention, cache_retention)

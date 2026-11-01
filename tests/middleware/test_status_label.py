@@ -111,6 +111,26 @@ class LabelTest(unittest.TestCase):
                 self.assertEqual(answered_label(run(MODULE, body=body, headers=SUB, response=RECORDED)), expected)
 
 
+class SubcommandToolsTest(unittest.TestCase):
+    """Setting `subcommand_tools`: more tools labelled with their subcommand, from the file or the env."""
+
+    def test_a_named_tool_is_labelled_with_its_subcommand(self):
+        body = fork(call("Bash", {"command": "fleetctl --verbose deploy web"}))
+        for why, settings, env, expected in (
+                ("default", None, None, "Running fleetctl"),
+                ("file", {"subcommand_tools": ["fleetctl"]}, None, "Running fleetctl deploy"),
+                ("env", None, {"GPT_GATEWAY_STATUS_LABEL_SUBCOMMAND_TOOLS": "other, fleetctl"},
+                 "Running fleetctl deploy")):
+            with self.subTest(why):
+                out = run(MODULE, body=body, headers=SUB, response=RECORDED, settings=settings, env=env)
+                self.assertEqual(answered_label(out), expected)
+
+    def test_a_value_that_is_no_list_of_names_fails_the_settings(self):
+        for value in (3, [""], [3], {"fleetctl": True}):
+            with self.subTest(value=value), self.assertRaises(SettingsError):
+                load(MODULE, settings={"subcommand_tools": value})
+
+
 MARKED = {"x-claude-code-agent-id": "agent-invented", "x-cache-live-control-summaries": "block"}
 
 
@@ -225,7 +245,7 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(out.events[1]["data"]["content_block"], {"type": "text", "text": ""})
         self.assertEqual(out.events[2]["data"]["delta"], {"type": "text_delta", "text": "Running go test"})
         self.assertEqual(out.events[4]["data"]["delta"]["stop_reason"], "end_turn")
-        self.assertEqual(out.events[4]["data"]["usage"], {"output_tokens": 3})
+        self.assertEqual(out.events[4]["data"]["usage"], {"output_tokens": 0})
         self.assertEqual((out.log, out.row["answered_by"]), ((), "status-label"))
         self.assertEqual((out.result.status, out.result.completed), (200, True))
 
@@ -237,7 +257,7 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual({k: message[k] for k in ("id", "type", "role", "model", "content", "stop_reason")},
                          {"id": "msg_local_9", "type": "message", "role": "assistant", "model": "claude-invented",
                           "content": [{"type": "text", "text": "Reading a.py"}], "stop_reason": "end_turn"})
-        self.assertEqual(message["usage"]["output_tokens"], 2)
+        self.assertEqual(set(message["usage"].values()), {0})
         self.assertEqual(out.events, ({"event": None, "data": message, "raw": out.answer.data},))
 
 

@@ -1,10 +1,11 @@
 """The per-request half of the middleware contract: Context, Request, Result and the hook chain.
 
 Hooks run in list order. A hook that raises is recorded as a `middleware_failed` event (its NAME, the
-hook, `{exc!r}` and its traceback's last frame), and its module's error count goes up. A failed `on_request` sends
-the original bytes upstream with every module's edits (and notes) discarded and skips the later
-modules' `on_request`; a failed `on_event` or `on_response_end` is skipped. No hook breaks a request
-or cuts a stream. A hook that changes `body["model"]` has failed: routing is the core's job.
+hook, `{exc!r}` and its traceback's last frame), and its module's error count goes up. A failed `on_request` (an
+edit that does not serialize included) costs only its own edits and note: the body goes back to what the modules
+before it left, and the later modules run; a note that is no string costs only that note. A failed `on_event` or
+`on_response_end` is skipped. No hook breaks a request or cuts a stream. A hook that changes `body["model"]` has
+failed: routing is the core's job.
 An `on_request` hook may answer the request itself (`req.answer`): the later modules' `on_request` is
 skipped, nothing goes upstream on either route, and the core relays the answer as it relays any response.
 """
@@ -190,39 +191,40 @@ class Chain:
     def run_request(self, ctx, req):
         """(bytes to send upstream, notes): the original bytes unless a hook marked a change.
 
-        A hook that answers ends the run: the original bytes, nothing serialized, the notes closed by
+        The body is serialized after each hook once one marked a change, so an edit that cannot be sent fails the
+        hook that made it. A hook that answers ends the run: the original bytes, the notes closed by
         ` answered={NAME}`; a hook that fails leaves no answer.
         """
         model = req.body.get("model", _MISSING) if req.body is not None else _MISSING
-        notes, marker = [], None
+        notes, sent = [], req.raw  # sent: the bytes of the body as the last hook that did not fail left it
         for m in self.modules:
             if m.on_request is None:
                 continue
-            was_changed = req.changed
             ok, note = self.call(m, "on_request", ctx, req)
             if ok and req.body is not None and req.body.get("model", _MISSING) != model:
                 ok = False
                 self.fail(m, "on_request", ValueError("changed body['model']; routing is the core's job"), ctx)
-            if ok and note is not None and not isinstance(note, str):
-                ok = False
-                self.fail(m, "on_request", TypeError("returned %s, not str or None" % type(note).__name__), ctx)
+            if ok and req.changed and req.answered is None:
+                try:
+                    serialized = json.dumps(req.body, separators=(",", ":")).encode()
+                except Exception as e:
+                    ok = False
+                    self.fail(m, "on_request", e, ctx)
             if not ok:
                 req._answer = None
-                return req.raw, []
+                req._body, req._changed = parse_object(sent), sent is not req.raw
+                continue
+            if note is not None and not isinstance(note, str):
+                self.fail(m, "on_request", TypeError("returned %s, not str or None" % type(note).__name__), ctx)
+                note = None
             if note:
                 notes.append(note)
             if req.answered is not None:
                 notes.append(" answered=%s" % m.NAME)
                 return req.raw, notes
-            if req.changed and not was_changed:
-                marker = m
-        if not req.changed:
-            return req.raw, notes
-        try:
-            return json.dumps(req.body, separators=(",", ":")).encode(), notes
-        except Exception as e:
-            self.fail(marker, "on_request", e, ctx)
-            return req.raw, []
+            if req.changed:
+                sent = serialized
+        return sent, notes
 
     def event_sink(self, ctx, content_type):
         """An EventSink for this response, or None when no module defines on_event or the body is neither SSE nor JSON."""

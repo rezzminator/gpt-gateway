@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from gpt_gateway.chatgpt import signature, stream
-from gpt_gateway.events import EventSplitter
+from gpt_gateway.events import MAX_PENDING, EventSplitter
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
@@ -123,18 +123,60 @@ class StreamTest(unittest.TestCase):
         self.time.return_value = 44
         self.assertIn(b"event: ping", t.idle())
 
-    def test_idle_timeout_and_malformed_data_are_errors(self):
+    def test_idle_timeout_is_an_error(self):
         t = self.translator()
         t.feed(upstream("response.output_text.delta", output_index=0, delta="x"))
         self.time.return_value = 300
         self.assertIn(b"event: error", t.idle())
         self.assertFalse(t.error.retry)
         self.assertEqual(t.idle(), b"")
-        for malformed in (b"data: invalid\n\n", b"data: []\n\n"):
-            with self.subTest(malformed=malformed):
+
+    def test_a_bad_event_costs_only_itself_and_is_noted(self):
+        text = [{"type": "text", "text": "Hello"}]
+        unsigned = [{"type": "thinking", "thinking": "", "signature": ""}]
+        for name, bad, content, note in (
+                ("invalid JSON", b"data: invalid\n\n", text,
+                 "skipped Responses event unnamed: ValueError data is not a JSON object"),
+                ("not an object", b"event: odd\ndata: []\n\n", text,
+                 "skipped Responses event odd: ValueError data is not a JSON object"),
+                ("text without delta", upstream("response.output_text.delta", output_index=1), text,
+                 "skipped Responses event response.output_text.delta: KeyError 'delta'"),
+                ("summary delta not text", upstream("response.reasoning_summary_text.delta", output_index=1, delta=7), text,
+                 "skipped Responses event response.reasoning_summary_text.delta: TypeError delta is int, not str"),
+                ("call without name", upstream("response.output_item.done", output_index=1, item={
+                    "type": "function_call", "call_id": "call_1", "arguments": "{}"}), text,
+                 "skipped Responses event response.output_item.done: KeyError 'name'"),
+                ("call arguments not text", upstream("response.output_item.done", output_index=1, item={
+                    "type": "function_call", "call_id": "call_1", "name": "lookup_short", "arguments": {}}), text,
+                 "skipped Responses event response.output_item.done: TypeError function_call name, call_id and "
+                 "arguments must be strings"),
+                ("reasoning without id", upstream("response.output_item.done", output_index=1, item={
+                    "type": "reasoning", "encrypted_content": "opaque"}), text + unsigned,
+                 "reasoning sent unsigned: signature item_id must be a non-empty string, got None"),
+                ("late delta", upstream("response.output_text.delta", output_index=0, delta="late"), text,
+                 "skipped Responses event response.output_text.delta: output 0 already closed"),
+                ("oversized", b"data: " + b"x" * MAX_PENDING, text, "skipped an SSE event over the size limit")):
+            with self.subTest(name=name):
                 t = self.translator()
-                t.feed(upstream("response.output_text.delta", output_index=0, delta="x"))
-                self.assertIn(b"event: error", t.feed(malformed))
+                out = t.feed(upstream("response.output_text.delta", output_index=0, delta="Hello"))
+                out += t.feed(upstream("response.output_item.done", output_index=0, item={"type": "message"}))
+                out += t.feed(bad) + t.feed(upstream("response.completed", response={"usage": {"output_tokens": 3}}))
+                message = stream.accumulate(out)
+                self.assertEqual((t.terminal, t.error, message.get("content"), message.get("stop_reason"), t.notes),
+                                 ("response.completed", None, content, "end_turn", [note]))
+
+    def test_a_usage_count_that_does_not_read_is_unknown_and_the_response_completes(self):
+        t = self.translator()
+        out = t.feed(upstream("response.output_text.delta", output_index=0, delta="Hello"))
+        out += t.feed(upstream("response.completed", response={"usage": {
+            "input_tokens": "many", "output_tokens": 4, "input_tokens_details": {"cached_tokens": 2}}}))
+        message = stream.accumulate(out)
+        self.assertEqual((t.terminal, t.error, message.get("content")), ("response.completed", None, [{"type": "text", "text": "Hello"}]))
+        self.assertEqual(message.get("usage"), {"input_tokens": 0, "output_tokens": 4, "cache_creation_input_tokens": 0,
+                                            "cache_read_input_tokens": 2})
+        self.assertEqual((t.usage, t.input_tokens, t.cache_ratio, t.notes), (
+            {"input_tokens": None, "output_tokens": 4, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 2},
+            None, None, ["unreadable usage input_tokens: 'many'"]))
 
     def test_unterminated_frame_and_missing_terminal(self):
         t = self.translator()
@@ -220,7 +262,6 @@ class StreamTest(unittest.TestCase):
             ("failed", upstream("response.failed", response={"error": None}), 502, True),
             ("error", upstream("error", code="usage_not_included"), 403, False),
             ("incomplete", upstream("response.incomplete", response={"incomplete_details": {"reason": "content_filter"}}), 502, False),
-            ("protocol", b"data: invalid\n\n", 502, True),
             ("closed", None, 502, True),
             ("idle", None, 502, True),
         ]

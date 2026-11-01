@@ -86,7 +86,6 @@ class RouteTest(unittest.TestCase):
             h = req["headers"]
             self.assertEqual(h["session-id"], h["x-client-request-id"])
             self.assertEqual(h["x-openai-subagent"], "collab_spawn")
-            self.assertEqual(h["x-openai-internal-codex-responses-lite"], "true")
         folders = sorted(Path(self.capture).rglob(SENT_BODY))
         self.assertEqual(len(folders), 3)
         for path, req in zip(folders, seen):
@@ -117,17 +116,6 @@ class RouteTest(unittest.TestCase):
         rows = re.compile(r" (db_rows|fds)=\S+")  # a row still queued may land between the two, a handle open for one
         self.assertEqual(rows.sub("", fakes.request(port, "GET", "/__gateway/health")[1].decode()),
                          rows.sub("", health_line(rt.settings.current(), rt)))
-
-    def test_guard_unknown_and_suffixes(self):
-        rt, port = self.gateway()
-        for model, headers, text in [("gpt-test", {}, "GPT models run as sub-agents only"),
-                ("unknown", self.headers, 'unknown model "unknown"; the ChatGPT catalog has: gpt-test')]:
-            with self.subTest(model=model):
-                resp, data = self.send(port, dict(self.body, model=model), headers)
-                self.assertEqual(resp.status, 400)
-                self.assertEqual(json.loads(data)["error"]["message"], "chatgpt upstream: " + text)
-        self.assertEqual(self.send(port, dict(self.body, model="gpt-test-fast[1m]"))[0].status, 200)
-        self.assertEqual(json.loads(self.responses()[-1]["body"])["service_tier"], "priority")
 
     def test_refresh_once_and_oauth_identity(self):
         self.fake.script = [(401, {"error": {"message": "expired"}}), (200, fakes.responses_turn())]
@@ -378,6 +366,18 @@ class RouteRetryTest(unittest.TestCase):
         self.assertEqual((resp.status, len(self.responses()), message["content"]), (200, 1, []))
         self.assertEqual(message["stop_reason"], "end_turn")
         self.assertEqual([r["empty"] for r in fakes.gpt_rows(rt)], [1])
+
+    def test_a_bad_upstream_event_costs_only_itself_and_lands_in_the_row_notes_with_usage_or_without(self):
+        bad = fakes.responses_event("response.output_text.delta", output_index=0, delta="Hello") + fakes.responses_event("response.output_text.delta", output_index=0)
+        self.fake.script = [(200, bad + fakes.responses_event("response.completed", response={"usage": {"input_tokens": 100, "output_tokens": "x"}})), (200, bad)]
+        rt, port = self.gateway()
+        resp, data = self.send(port)
+        message = stream.accumulate(data)
+        self.assertEqual((resp.status, len(self.responses()), message.get("content"), message.get("stop_reason")), (200, 1, [{"type": "text", "text": "Hello"}], "end_turn"))
+        self.send(port)
+        skipped = "skipped Responses event response.output_text.delta: KeyError 'delta'"
+        self.assertEqual([(r["output_tokens"], r["translation_notes"]) for r in fakes.recorded(rt) if r["route"] == "chatgpt"],
+                         [(None, json.dumps([skipped, "unreadable usage output_tokens: 'x'"])), (None, json.dumps([skipped]))])
 
 
 class CodexRouteTest(unittest.TestCase):

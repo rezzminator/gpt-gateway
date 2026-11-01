@@ -21,12 +21,12 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | --- | --- | --- | --- |
 | entry | the `gateway.py` script: import path setup, hand-off to the CLI | `gateway.py` | assumed: changes only when the package's entry changes |
 | cli | core and `chatgpt-login`, `chatgpt-status`, `chatgpt-stats` commands; usage | `gpt_gateway/cli.py` | assumed: a new command adds a table row and its function together |
-| env | environment reads, `GPT_GATEWAY_*`, `CoreEnv`, `ChatGPTEnv` | `gpt_gateway/env.py` | assumed: a new knob lands here alone |
+| env | environment reads, `GPT_GATEWAY_*`, `CoreEnv`, `ChatGPTEnv`, the `GPT_GATEWAY_MODEL_PICKER_MODELS` JSON-array override read through the snapshot | `gpt_gateway/env.py` | assumed: a new knob lands here alone |
 | clock | wall time, local-time stamps, the time the host slept, sleeping | `gpt_gateway/clock.py` | assumed: never co-changes |
 | log | the locked text log and bounded append-only diagnostic rows split by level | `gpt_gateway/log.py` | assumed: rotation and line format change together |
 | db | the SQLite database: its schema and views, the in-place column migration, the one writer thread off a bounded queue, drops and failures counted and recorded as `db_lost`, retention, the readers | `gpt_gateway/db.py` | assumed: a column, its view and its reader change together |
 | usage | a relayed response's token usage and error code, read beside the relay | `gpt_gateway/usage.py` | assumed: changes with the Messages API usage shape only |
-| settings | `settings.json`: the core keys, the `middleware` entries, env over file over default for core keys and each module's `SETTINGS`, `check()`, the strict start read, the mtime/size/inode reload with last-good | `gpt_gateway/settings.py` | assumed: a new core key changes its default, validator and reload together |
+| settings | `settings.json`: the core keys, the installation-only `model_picker_models` list shape, the `middleware` entries, env over file over default for core keys and each module's `SETTINGS`, `check()`, the strict start read, the mtime/size/inode reload with last-good | `gpt_gateway/settings.py` | assumed: a new core key changes its default, validator and reload together |
 | middleware | loading `{middleware_dir}/{module}.py`, the module attribute checks, the `SETTINGS` shape | `gpt_gateway/middleware.py` | assumed: the module half of the contract |
 | hooks | `Context`, `Request`, `Result`, the hook chain in list order, failure isolation, error counters, the single re-serialization, a hook's answer, the last turn message | `gpt_gateway/hooks.py` | assumed: the per-request half of the contract |
 | headers | the secret headers, the hop-by-hop set, the read-only `ctx.headers` mapping, the debug header pick | `gpt_gateway/headers.py` | assumed: the secret set changes once, for capture and hooks alike |
@@ -49,24 +49,24 @@ The gateway has an Anthropic passthrough, a middleware contract and an optional 
 | chatgpt login | browser PKCE and device-code login | `gpt_gateway/chatgpt/login.py` | assumed: OAuth flow changes together |
 | chatgpt keychain | macOS Keychain token storage | `gpt_gateway/chatgpt/keychain.py` | assumed: platform storage changes alone |
 | chatgpt catalog | model parsing, fetch and last-good cache | `gpt_gateway/chatgpt/catalog.py` | assumed: refresh and model fields co-change |
-| chatgpt request | Anthropic to Responses body translation | `gpt_gateway/chatgpt/request.py` | assumed: request mapping changes together |
+| chatgpt request | Anthropic to Responses body translation, the sub-agent delivery contract appended only to a request carrying `x-claude-code-agent-id` when the knob is on | `gpt_gateway/chatgpt/request.py` | assumed: request mapping changes together |
 | chatgpt tools | tool definitions, choice and name mapping | `gpt_gateway/chatgpt/tools.py` | assumed: tool request and response names agree |
 | chatgpt schema | pure JSON schema sanitization | `gpt_gateway/chatgpt/schema.py` | assumed: schema rules change alone |
-| chatgpt lane | per-session, per-agent cache key | `gpt_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
+| chatgpt lane | per-session, per-agent cache key: UUIDv5 of the compact JSON array `[session_id, agent_id]`, never a colon join | `gpt_gateway/chatgpt/lane.py` | assumed: affinity identity changes alone |
 | chatgpt turn | a request's turn position and the lane's `x-codex-turn-state` token | `gpt_gateway/chatgpt/turn.py` | assumed: Codex's turn contract changes alone |
 | chatgpt stream | Responses SSE translation and accumulation | `gpt_gateway/chatgpt/stream.py` | assumed: event mapping and accumulation agree |
 | chatgpt errors | error decisions and retry backoff | `gpt_gateway/chatgpt/errors.py` | assumed: status and retry policy co-change |
 | chatgpt estimate | per-lane token estimate calibration | `gpt_gateway/chatgpt/estimate.py` | assumed: measurement and estimate co-change |
 | chatgpt identity | Codex client version and identity headers | `gpt_gateway/chatgpt/identity.py` | assumed: OAuth and backend share identity |
-| chatgpt client | Responses over the WebSocket or HTTP, and models requests | `gpt_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
+| chatgpt client | Responses over the WebSocket or HTTP, and models requests; `x-openai-subagent: collab_spawn` on sub-agent lanes only | `gpt_gateway/chatgpt/client.py` | assumed: headers and endpoints co-change |
 | chatgpt websocket | the Responses WebSocket: per-lane socket pool, response.create, the answer the route reads | `gpt_gateway/chatgpt/websocket.py` | assumed: socket lifecycle and Codex's WebSocket contract co-change |
 | chatgpt keeper | the thread that answers and pings the idle pooled WebSockets, and takes a dead one out of the pool | `gpt_gateway/chatgpt/keeper.py` | assumed: pool lifecycle and the server's idle behaviour co-change |
 | chatgpt continuation | Codex's incremental request: a socket's last completed response, what the next request sends, output-item identity | `gpt_gateway/chatgpt/continuation.py` | assumed: Codex's continuation rule and the translator's round trip co-change |
-| chatgpt route | routing decision, authenticated candidates, attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
+| chatgpt route | routing decision: a non-`claude-` string model without the secret prefix gets 403 before the catalog, a prefixed one (main session or sub-agent) routes; attempts, stream commit, lanes | `gpt_gateway/chatgpt/route.py` | assumed: lifecycle and relay integration agree |
 | chatgpt response | the reader thread behind a translated SSE body, read through the core's `Response` | `gpt_gateway/chatgpt/response.py` | assumed: commit, heartbeat and EOF agree with the relay |
 | example | the minimal middleware, the contract's executable documentation | `examples/middleware/model_note.py` | assumed: changes with the contract |
 | shipped middleware | the middleware an install copies into its `middleware/`, each file its own, and a fresh `settings.json` lists | `middleware/` | assumed: each module changes alone, against the contract |
-| service | the portable supervisor (`run.sh`, fail-open), platform-dispatching install, control and removal, launchd agent and systemd user unit, generated route credential | `service/` | assumed: the stored service environment and lifecycle co-change |
+| service | the portable supervisor (`run.sh`, fail-open), platform-dispatching install, control and removal, launchd agent and systemd user unit, generated route credential, the Claude Code `/model` picker rows (`picker.py`) | `service/` | assumed: the stored service environment and lifecycle co-change |
 | gates | `scripts/checks.sh`, `scripts/gate.sh`, `scripts/baselines/` | `scripts/` | assumed: a new check and its baseline land together |
 
 ## 2. Tree
@@ -84,6 +84,7 @@ gpt_gateway/cli.py                      COMMANDS table → serve | check | mw | 
 gpt_gateway/env.py                      façade: environment reads; CoreEnv, ChatGPTEnv
 gpt_gateway/clock.py                    façade: time
 gpt_gateway/log.py                      façade: text and level logs
+gpt_gateway/plugin_log.py               the plugin's own plugin-log module, covered by every § Gates check
 gpt_gateway/db.py                       façade: Db, query, chatgpt_responses, anthropic_timings, anthropic_transport, DbError
 gpt_gateway/settings.py                 Settings, Snapshot, SettingsError, module_settings
 gpt_gateway/middleware.py               Module, load_modules, MiddlewareError
@@ -135,6 +136,7 @@ service/ctl.sh                            start | stop | restart | status; on | 
 service/platform.sh                       service-manager paths, lifecycle, Linux unit rendering and stored environment
 service/settings.sh                       tri-state settings reads and gateway-owned cleanup retries
 service/listener.py                       Linux listener descriptor inherited across supervisor and gateway execs
+service/picker.py                         install and uninstall helper for Claude Code's modelPicker.options: validates cached model availability and labels, reconciles the rows marked by the description `GPT via local gpt-gateway (ChatGPT plan)`, backs up, writes atomically keeping the mode
 scripts/checks.sh                         every countable law, one CHECK line each
 scripts/gate.sh                           the only definition of ready
 scripts/baselines/*.txt                   committed baselines, one per ratchet
@@ -152,7 +154,7 @@ tests/gpt_gateway/test_{cli,env,clock,log,db,usage,settings,middleware,hooks,hea
 tests/gpt_gateway/chatgpt/__init__.py
 tests/gpt_gateway/chatgpt/test_codex_login.py
 tests/gpt_gateway/chatgpt/test_response.py
-tests/gpt_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,websocket,keeper,retention,continuation}.py
+tests/gpt_gateway/chatgpt/test_{signature,auth,login,keychain,catalog,request,tools,schema,lane,stream,errors,estimate,identity,client,route,route_main,websocket,keeper,retention,continuation}.py
 tests/gpt_gateway/chatgpt/fixtures/      invented or scrubbed wire shapes, with provenance
 tests/examples/__init__.py
 tests/examples/middleware/__init__.py
@@ -162,14 +164,14 @@ tests/middleware/test_status_label.py
 tests/middleware/test_advisor_cache.py
 tests/service/__init__.py
 tests/service/stub.py                     scratch HOME, one-test source suite, stub launchctl/systemctl and macOS tools first on PATH
-tests/service/test_{install,uninstall,run,ctl,platform,settings,listener}.py
+tests/service/test_{install,uninstall,run,ctl,platform,settings,listener,picker}.py
 tests/scripts/__init__.py
 tests/scripts/test_{checks,gate}.py
 ```
 
-Top-level install items are flat: `install.sh` copies `gateway.py`, `gpt_gateway/`, `service/run.sh`, `service/ctl.sh`, `service/platform.sh`, `service/settings.sh`, `service/listener.py`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, and creates `middleware/` there, copying each shipped `middleware/*.py` into it as its own file (a user's module beside it stays); a first install writes `settings.json` there, listing `status_label` (every shipped module is copied; only that one is listed). The package copy includes every `*.py` recursively, preserving subdirectories through the `.new` swap. Linux validation runs with `-B`; macOS keeps its interpreter bytecode behavior. `tests/jail.py` mirrors that layout with `os.walk`. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
+Top-level install items are flat: `install.sh` copies `gateway.py`, `gpt_gateway/`, `service/run.sh`, `service/ctl.sh`, `service/platform.sh`, `service/settings.sh`, `service/listener.py`, `service/picker.py`, `README.md`, `LICENSE` and `THIRD_PARTY_NOTICES.md` to `~/.local/share/gpt-gateway/`, and creates `middleware/` there, copying each shipped `middleware/*.py` into it as its own file (a user's module beside it stays); a first install writes `settings.json` there, listing `status_label` (every shipped module is copied; only that one is listed). The package copy includes every `*.py` recursively, preserving subdirectories through the `.new` swap. Linux validation runs with `-B`; macOS keeps its interpreter bytecode behavior. `tests/jail.py` mirrors that layout with `os.walk`. `run.sh` starts `$DIR/gateway.py` with `/usr/bin/python3 -I`; `gateway.py` puts its own directory on `sys.path`, since `-I` leaves it off.
 
-`service/` is the neutral service unit of change. Each user-facing script selects the platform through `platform.sh` and `uname -s`; shared packaging, health polling and settings ownership stay in the entry scripts. macOS uses `local.gpt-gateway` in `~/Library/LaunchAgents/` and logs in `~/Library/Logs/`. Linux requires systemd 252+ and a reachable user bus, checked before installation; it uses the user unit `gpt-gateway.service` under `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`, logs in `~/.local/state/gpt-gateway/`, and an installed `service.json` carrying its environment. `XDG_CONFIG_HOME` is a standard path input, outside the product-knob prefix census.
+`service/` is the neutral service unit of change. Each user-facing script selects the platform through `platform.sh` and `uname -s`; shared packaging, health polling and settings ownership stay in the entry scripts. macOS uses `local.gpt-gateway` in `~/Library/LaunchAgents/` and logs in `~/Library/Logs/`. Linux requires systemd 252+ and a reachable user bus, checked before installation; it uses the user unit `gpt-gateway.service` under `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/`, logs in `~/.local/state/gpt-gateway/`, and an installed `service.json` carrying its environment. `XDG_CONFIG_HOME` is a standard path input, outside the product-knob prefix census. `picker.py` is the one owner of the `modelPicker.options` edit: `settings.py` owns the `model_picker_models` list shape and key, `env.py` the `GPT_GATEWAY_MODEL_PICKER_MODELS` read, and `picker.py` the cached-catalog availability and labels, row reconciliation, backup and the mode-preserving atomic write; its test home is `tests/service/test_picker.py`.
 
 On Linux the unit uses `Restart=on-failure`, `KillMode=mixed` and `TimeoutStopSec=630`: TERM reaches the supervisor first, which tries to unlink Claude Code before signalling its children to drain; failed cleanup retries alongside that drain. Enable/disable carry on/off state; a first install enables and starts. An on update sends `systemctl --user kill -s HUP --kill-whom=main gpt-gateway.service` unless the supervisor or unit changed, in which case the service drains and reloads. HUP targets the main process because signalling every process would terminate Python before it can drain. An off update stays disabled. Unit strings escape systemd specifiers; ExecStart and Environment quote their words, while StandardError takes a literal path after `append:`. The ExecStart `:` prefix disables dollar expansion. The Linux supervisor holds one inherited listening socket, so both gateways consume the same accept queue. Acceptance registers a pending first request before its handler thread starts; drain keeps those connections once request data has arrived, until the first request completes or the drain limit expires. A silent accepted client closes as idle; a request line already read stays pending while its headers arrive. Independently bound Linux reuse-port listeners can lose their queued connections when closed. An absent settings file is already unlinked. On stop, settings cleanup retries read and rewrite failures alongside the full gateway drain, ending one second before `GPT_GATEWAY_STOP_SECONDS` (default 630). The listener bootstrap imports no gateway package, ignores HUP until its shell takes over, and returns startup failures through the supervisor cleanup. The supervisor closes its listener before retry sleeps or crash cleanup; ctl waits for the supervisor and never edits the shared settings. Without linger the user manager stops at logout.
 
@@ -197,7 +199,7 @@ Anatomy: every source module opens with a purpose docstring and has a test home 
 | models and their capabilities | catalog | allowlist, model table | `chatgpt/catalog.py`, disk cache, route decision |
 | a response a hook gives in place of upstream's | answer (`req.answer`, `Answer`) | reply, short-circuit, local response | `gpt_gateway/hooks.py`, the note's `" answered="`, the row's `answered_by`, harness `out.answer` |
 | Claude Code's request for a sub-agent's status label | activity-summary fork | label call, status call, summary request | `chatgpt/turn.py` `FORK`, `chatgpt/request.py` `activity_summary`, `middleware/status_label.py` |
-| catalog-selected Responses wire variant | Responses-Lite | lite mode, Sol protocol | `use_responses_lite`, `additional_tools`, `x-openai-internal-codex-responses-lite` |
+| ChatGPT request wire format for every model | standard Responses | model-specific wire format | `chatgpt/request.py`, top-level `tools`, `parallel_tool_calls` |
 | replayable encrypted reasoning envelope | reasoning signature | thinking cache, reasoning blob | `chatgpt/signature.py`, `gpt-gateway:chatgpt:v1:` |
 
 The census of the product spelling exempts this document, since its glossary must be able to name what it rejects, and one line in each of `service/install.sh` and `tests/service/test_install.py`: the `LEGACY_NAME` constant the migration from the former install derives every old path from; the predecessor's names are never written, even here.
@@ -218,7 +220,9 @@ The census of the product spelling exempts this document, since its glossary mus
 
 Every other line the gateway observes is a `requests` row or an `events` row of the database, written only through `gpt_gateway/db.py`; the text log keeps the start, stop, fatal, settings-error, database-failure and proxy-failure lines.
 
-`Log.record(level, event, msg, where, detail=None)` keeps that text line and appends a UTC diagnostic row to `errors.jsonl`, `warnings.jsonl` or `info.jsonl`. The logging façade's `record(writer, ...)` adapter retains single-message callbacks while routing bound `Log.write` callbacks through `Log.record`. `env.plugin_log_dir(environ)` resolves `$PLUGIN_LOG_DIR/gpt-gateway/`, otherwise `$HOME/.local/state/gpt-gateway/logs/` on every platform. Rows are at most 4096 bytes, with oversized detail and messages truncated; a level file past 20 MiB moves to `.1` and emits `log-capped`. New level directories use `0700` and new files `0600`. Write failures never interrupt work and are reported once per failing streak, re-armed after success. The installer includes `PLUGIN_LOG_DIR` in the platform service environment only when supplied.
+Both logs live in the plugin log directory: `env.plugin_log_dir(environ)` resolves `$PLUGIN_LOG_DIR/gpt-gateway/`, otherwise `$HOME/.local/state/gpt-gateway/logs/` on every platform, and refuses a relative value; with neither set, logging is off. The text log is `gpt-gateway.log` there (`log.text_path(environ)`), rotated to `.1` past 5 MiB, its file `0600`; no variable moves it. `Log.record(level, event, msg, where, detail=None)` keeps that text line and appends the level row through `gpt_gateway/plugin_log.py`, gpt-gateway's own plugin-log module, which owns the row shape, the level files, their 20 MiB rotation with `log-capped`, the held rows and its one line per failing streak. The logging façade's `record(writer, ...)` adapter retains single-message callbacks while routing bound `Log.write` callbacks through `Log.record`. Write failures never interrupt work. The screen gets only an error row's line — a failing text log is the `text-log-failed` error row, said once per streak — and the library's failing-streak line, or one `plugin log off` line when `PLUGIN_LOG_DIR` or `HOME` is unusable. The installer includes `PLUGIN_LOG_DIR` in the platform service environment only when supplied.
+
+Every ChatGPT-route model uses standard Responses. `gpt_gateway/chatgpt/request.py` flattens registered tools, `defer_loading` tools and role-system `tool_addition` definitions into the request's top-level `tools` list. Tool references remain `Tool loaded: {name}` text in history; tool definitions do not become history items. `parallel_tool_calls` is `true` unless Claude Code's `tool_choice.disable_parallel_tool_use` is true. The catalog does not select a wire variant, and this behavior adds no option. HTTP requests and WebSocket upgrades use the same standard Responses protocol; `gpt_gateway/chatgpt/websocket.py` keys sockets by lane plus a digest of the access token and account id.
 
 The ChatGPT route introduces no new primitive façade: it uses `gpt_gateway/upstream.py` for its separate HTTP client and its WebSocket upgrades, `gpt_gateway/env.py` for its knobs and `gpt_gateway/clock.py` for time and backoff. Its rows and events, and capture, go through the existing façades. Its package modules own translation and lifecycle concepts, not parallel implementations of those mechanisms.
 
@@ -235,6 +239,8 @@ The ChatGPT route introduces no new primitive façade: it uses `gpt_gateway/upst
 There is no hand-kept list of modules, commands or knobs beside the one that defines them.
 
 ## 6. Gates
+
+Every check below reads every source, `gpt_gateway/plugin_log.py` included.
 
 | Check id | Class | Asserts | Broken state reports | Baseline |
 | --- | --- | --- | --- | --- |

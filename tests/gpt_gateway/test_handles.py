@@ -157,8 +157,7 @@ class ProcessCase(unittest.TestCase):
             p.wait()
 
     def env(self):
-        return jail.clean_env(self.tmp, GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_UPSTREAM=self.origin,
-                              GPT_GATEWAY_LOG=os.path.join(self.tmp, "gw.log"))
+        return jail.clean_env(self.tmp, GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_UPSTREAM=self.origin)
 
     def spawn(self, argv, **kw):
         p = subprocess.Popen(argv, env=self.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)

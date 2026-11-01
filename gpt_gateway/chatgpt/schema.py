@@ -61,6 +61,7 @@ def _lower_schema(value):
     declared = declared if isinstance(declared, list) else [declared]
     kinds = [kind for kind in declared if isinstance(kind, str) and kind in _TYPES]
     if not kinds:
+        value.pop('type', None)  # a type naming nothing the backend knows is no type: upstream would reject it
         if any(field in value for field in ('$ref', 'anyOf', 'oneOf', 'allOf')):
             return value
         if any(field in value for field in ('properties', 'required', 'additionalProperties')):
@@ -72,7 +73,7 @@ def _lower_schema(value):
         elif any(field in value for field in ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf')):
             kinds = ['number']
         else:
-            return {}
+            return value  # any value: no type to name, its description and other keys kept for the model
     value['type'] = kinds[0] if len(kinds) == 1 else kinds
     if 'object' in kinds:
         value.setdefault('properties', {})

@@ -1,1 +1,0 @@
-{"model":"gpt-6-sol-fast","system":"Help with a toy task.","messages":[{"role":"user","content":"Run the toy tool."}],"tools":[{"name":"inspect","description":"Inspect.","input_schema":{"type":"object"}}]}

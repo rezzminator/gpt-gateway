@@ -1,4 +1,5 @@
 """Tests for gpt_gateway.response: the in-memory response surface the relay reads."""
+from http import HTTPStatus
 import unittest
 
 from gpt_gateway.response import Response
@@ -9,7 +10,7 @@ class ResponseTest(unittest.TestCase):
         response = Response.json(413, {"type": "error"}, {"Retry-After": "4"})
         self.assertEqual(response.getheader("retry-after"), "4")
         self.assertEqual(response.getheader("missing", "default"), "default")
-        self.assertEqual(response.reason, "Request Entity Too Large")
+        self.assertEqual(response.reason, HTTPStatus(413).phrase)
         self.assertEqual(response.read1(2) + response.read(), b'{"type":"error"}')
         self.assertEqual(response.read1(20), b"")
 

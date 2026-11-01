@@ -13,13 +13,14 @@ class RuntimeTest(unittest.TestCase):
         d = jail.scratch(self)
         jail.write_middleware(os.path.join(d, "middleware"), "a", 'NAME = "a"\n')
         jail.write_json(os.path.join(d, "settings.json"), {"middleware": [{"module": "a"}]})
-        rt = Runtime({"GPT_GATEWAY_LOG": os.path.join(d, "gw.log"), "GPT_GATEWAY_DB": os.path.join(d, "gateway.db")},
+        rt = Runtime({"PLUGIN_LOG_DIR": d, "GPT_GATEWAY_DB": os.path.join(d, "gateway.db")},
                      os.path.join(d, "settings.json"))
         self.assertEqual(rt.chain.modules, ())
         rt.load()
         self.addCleanup(rt.db.close)
         self.assertEqual([m.NAME for m in rt.chain.modules], ["a"])
-        self.assertEqual((rt.log.path, rt.db.path), (os.path.join(d, "gw.log"), os.path.join(d, "gateway.db")))
+        self.assertEqual((rt.log.path, rt.db.path), (os.path.join(d, "gpt-gateway", "gpt-gateway.log"),
+                                                     os.path.join(d, "gateway.db")))
         self.assertEqual((rt.db.thread is not None and rt.db.thread.is_alive(), rt.db.flush()), (True, True))
         from unittest import mock
         with mock.patch.object(rt.settings, "current", side_effect=AssertionError("a settings reload on the writer")):
@@ -29,7 +30,7 @@ class RuntimeTest(unittest.TestCase):
         from unittest.mock import patch
         import builtins
         d = jail.scratch(self)
-        env = {"HOME": d, "GPT_GATEWAY_LOG": os.path.join(d, "gw.log"),  # the database under this HOME
+        env = {"HOME": d,  # the database and the logs under this HOME
                "GPT_GATEWAY_CHATGPT_ORIGIN": "invalid", "GPT_GATEWAY_CHATGPT_AUTH_STORE": "file"}
         rt = Runtime(env, os.path.join(d, "settings.json"))
         with patch("builtins.__import__", wraps=builtins.__import__) as imports:
@@ -76,6 +77,16 @@ class RuntimeTest(unittest.TestCase):
                 rt.chatgpt.store.credentials()
             probe.assert_called_once_with()
         self.assertEqual(str(caught.exception), "ChatGPT Keychain unavailable")
+
+    def test_the_text_log_lives_in_the_plugin_log_directory_and_no_knob_moves_it(self):
+        d = jail.scratch(self)
+        base = {"GPT_GATEWAY_LOG": os.path.join(d, "elsewhere.log"), "GPT_GATEWAY_DB": os.path.join(d, "gateway.db")}
+        for extra, directory in (({"PLUGIN_LOG_DIR": os.path.join(d, "root")}, os.path.join(d, "root", "gpt-gateway")),
+                                 ({"HOME": d}, os.path.join(d, ".local", "state", "gpt-gateway", "logs"))):
+            with self.subTest(extra=extra):
+                rt = Runtime(dict(base, **extra), os.path.join(d, "settings.json"))
+                self.assertEqual(rt.log.path, os.path.join(directory, "gpt-gateway.log"))
+        self.assertIsNone(Runtime(base, os.path.join(d, "settings.json")).log.path)  # no directory: logging off
 
     def test_a_bad_env_stops_it(self):
         for mapping in ({"GPT_GATEWAY_PORT": "x"}, {}):  # {}: no HOME to place the database under

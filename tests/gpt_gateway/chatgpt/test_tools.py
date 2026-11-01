@@ -17,6 +17,12 @@ class ToolsTest(unittest.TestCase):
              'filters': {'allowed_domains': ['example.com'], 'blocked_domains': ['invalid.example']}}])
         self.assertEqual(reverse, {})
         self.assertTrue(any('remote_20260101' in note for note in notes))
+        inspect = {'name': 'inspect', 'input_schema': {'type': 'object'}}
+        converted, _, _, notes = tools.translate_tools({'tools': [inspect, dict(inspect)]})  # identical twice: sent once
+        self.assertEqual((converted, notes), ([{'type': 'function', 'name': 'inspect', 'description': '', 'strict': False,
+                                                'parameters': {'type': 'object', 'properties': {}}}], ()))
+        with self.assertRaisesRegex(ValueError, '^duplicate or colliding tool name: inspect$'):
+            tools.translate_tools({'tools': [inspect, dict(inspect, description='Other')]})
 
     def test_long_names_and_choice_share_the_map(self):
         long = 'mcp__' + 'x' * 85

@@ -26,7 +26,7 @@ case "$PORT" in ''|*[!0-9]*) echo "install.sh: --port must be a number" >&2; exi
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 # What an install copies; top-level items are flat, package subdirectories are preserved.
-SHIP="gateway.py gpt_gateway service/run.sh service/ctl.sh service/platform.sh service/settings.sh service/listener.py README.md LICENSE THIRD_PARTY_NOTICES.md"
+SHIP="gateway.py gpt_gateway service/run.sh service/ctl.sh service/platform.sh service/settings.sh service/listener.py service/picker.py README.md LICENSE THIRD_PARTY_NOTICES.md"
 # shellcheck source=service/platform.sh
 . "$SRC/service/platform.sh"
 # shellcheck source=service/settings.sh
@@ -45,6 +45,8 @@ service_jq
 # run.sh rewrites the file the setting lives in, so it gets the real path, not a symlink to it.
 SETTINGS=$("$PY" -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${GPT_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}")
 [ -f "$SETTINGS" ] || { echo "install.sh: no Claude Code settings at $SETTINGS" >&2; exit 1; }
+# Reject picker configuration before tests, migration, code replacement or any settings edit.
+"$PY" -I -B "$SRC/service/picker.py" check "$DEST" "$SETTINGS" "$BACKUPS" || exit 1
 # The suite's whole output is kept in TEST_LOG. A failure names its tests and the log. A run still going after
 # TEST_SECONDS dumps every thread's stack into the log and exits (faulthandler's own exit, so no crash report).
 TEST_SECONDS=${GPT_GATEWAY_TEST_SECONDS:-1800}
@@ -146,6 +148,8 @@ with open(path, encoding="ascii") as source:
         raise ValueError("route secret must contain 64 lowercase hex digits")
 PY
 settings_route "$DEST" || { echo "install.sh: the route secret is unreadable ($DEST/route-secret)" >&2; exit 1; }
+# This edit backs up before changing anything, including when the old base URL must also be removed.
+"$PY" -I -B "$SRC/service/picker.py" install "$DEST" "$SETTINGS" "$BACKUPS" || exit 1
 CUR=$("$JQ" -r '.env.ANTHROPIC_BASE_URL // ""' "$SETTINGS") || { echo "install.sh: cannot read Claude Code settings at $SETTINGS" >&2; exit 1; }
 if [ -n "$CUR" ] && [ "$CUR" != "$URL" ] && [ "$CUR" != "$LINK_URL" ]; then
   # Another URL (an earlier port, another proxy) would keep run.sh from linking; this install replaces it,
@@ -232,7 +236,6 @@ cat > "$PLIST.new" <<EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>GPT_GATEWAY_PORT</key><string>$PORT</string>
-    <key>GPT_GATEWAY_LOG</key><string>$LOGS/gpt-gateway.log</string>
     <key>GPT_GATEWAY_DRAIN_SECONDS</key><string>$DRAIN</string>
     <key>GPT_GATEWAY_STOP_SECONDS</key><string>$STOP_SECONDS</string>
     <key>GPT_GATEWAY_PYTHON</key><string>$PY</string>

@@ -10,7 +10,7 @@ from . import env as envmod
 from . import handles
 from . import server as servermod
 from .hooks import Chain, Context
-from .log import Log
+from .log import Log, text_path
 from .middleware import MiddlewareError
 from .runtime import Runtime
 from .settings import FILE_NAME, Settings, SettingsError, default_path, describe
@@ -71,9 +71,9 @@ def cmd_check(args, install_dir, environ):
 def invoke(module, argv, ctx, event, log=None):
     """`module.cli(argv, ctx)` as `gateway.py mw` runs it; its int return value (None: 0) is the exit status.
     A cli that raises is a `middleware_failed` event, its line printed on stderr too."""
-    log = log if log is not None else Log(None, environ={})
+    note = log.record if log is not None else (lambda *row: None)  # the harness keeps no log
     if module.cli is None:
-        log.record("warning", "middleware-cli-unavailable", "middleware %s has no cli" % module.NAME, "gpt_gateway/cli.py#invoke")
+        note("error", "middleware-cli-unavailable", "middleware %s has no cli" % module.NAME, "gpt_gateway/cli.py#invoke")
         print("gpt-gateway: middleware %s has no cli" % module.NAME, file=sys.stderr)
         return 2
     ctx._module = module.module
@@ -82,13 +82,13 @@ def invoke(module, argv, ctx, event, log=None):
     except SystemExit as e:
         code = e.code
         if isinstance(code, str):
-            log.record("error", "middleware-cli-exit", code, "gpt_gateway/cli.py#invoke")
+            note("error", "middleware-cli-exit", code, "gpt_gateway/cli.py#invoke")
             print(code, file=sys.stderr)
             code = 1
     except Exception as e:
         def failed(kind, request_id=None, lane=None, **fields):
             event(kind, request_id=request_id, lane=lane, **fields)
-            log.record("error", "middleware-cli-failed", "middleware %s cli failed: %s" % (module.NAME, fields["error"]), "gpt_gateway/cli.py#invoke")
+            note("error", "middleware-cli-failed", "middleware %s cli failed: %s" % (module.NAME, fields["error"]), "gpt_gateway/cli.py#invoke")
             print("middleware %s cli failed: %s%s" % (module.NAME, fields["error"],
                                                        " at " + fields["where"] if fields["where"] else ""),
                   file=sys.stderr)
@@ -100,7 +100,7 @@ def invoke(module, argv, ctx, event, log=None):
         return 0
     if isinstance(code, int):
         return int(code)
-    log.record("error", "middleware-cli-invalid-result", "middleware %s cli returned %r, not an int" % (module.NAME, code), "gpt_gateway/cli.py#invoke")
+    note("error", "middleware-cli-invalid-result", "middleware %s cli returned %r, not an int" % (module.NAME, code), "gpt_gateway/cli.py#invoke")
     print("gpt-gateway: middleware %s cli returned %r, not an int" % (module.NAME, code), file=sys.stderr)
     return 1
 
@@ -115,7 +115,7 @@ def cmd_mw(args, install_dir, environ):
         diagnostics.record("error", "env-invalid", "env error: %s" % e, "gpt_gateway/cli.py#cmd_mw")
         print("gpt-gateway: env error: %s" % e, file=sys.stderr)
         return 1
-    log = Log(core.log_path, environ=environ)
+    log = Log(text_path(environ), environ=environ)
     settings = Settings(default_path(install_dir), environ, log.write)
     try:
         settings.load()
@@ -125,7 +125,7 @@ def cmd_mw(args, install_dir, environ):
         return 1
     module = next((m for m in settings.modules if m.NAME == args[0]), None)
     if module is None:
-        diagnostics.record("warning", "middleware-unknown", "unknown middleware %r" % args[0], "gpt_gateway/cli.py#cmd_mw")
+        diagnostics.record("error", "middleware-unknown", "unknown middleware %r" % args[0], "gpt_gateway/cli.py#cmd_mw")
         print("gpt-gateway: unknown middleware %r; loaded: %s" % (
             args[0], ", ".join(m.NAME for m in settings.modules) or "none"), file=sys.stderr)
         return 2

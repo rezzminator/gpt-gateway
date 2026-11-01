@@ -4,7 +4,8 @@
 1-request.json (method, path, headers; secrets redacted), 2-request.body (as the client sent it),
 3-request.sent.body (only when a hook changed it), 4-response.json (status, headers),
 5-response.body (the literal bytes streamed back, SSE included). Capture never breaks a request:
-a write failure is recorded as a `capture_error` event, and capture stops for that exchange; a failure
+a file that cannot be written is a `capture_error` event and costs only that file (a folder that cannot be made, the
+whole exchange); a failure
 that is the process running out of handles is an `fd_exhausted` event instead (`handles.announce`: one per
 window, the ones held back counted).
 """
@@ -70,14 +71,16 @@ class Capture:
         except Exception as e:
             self.fail(e)
 
-    def fail(self, e):
+    def fail(self, e, stop=True):
+        """Record a failure; `stop` ends the exchange's capture (its folder failed), else only that file is lost."""
         shortage = handles.diagnose(e)
         if shortage is None:
             self.event("capture_error", request_id=self.seq, dir=self.dir, error=repr(e))
         else:
             handles.announce(self.event, "fd_exhausted", where="capture", error=repr(e), open=shortage.open,
                              limit=shortage.limit)
-        self.dir = None
+        if stop:
+            self.dir = None
 
     def _open_private(self, name):
         """Open `name` for writing as a regular file only the owner can read; a symlink there is refused."""
@@ -97,7 +100,7 @@ class Capture:
             with self._open_private(name) as f:
                 f.write(data)
         except Exception as e:
-            self.fail(e)
+            self.fail(e, stop=False)
 
     def request_body(self, data):
         self.write(REQUEST_BODY, data)
@@ -115,7 +118,7 @@ class Capture:
             try:
                 self.body = self._open_private(RESPONSE_BODY)
             except Exception as e:
-                self.fail(e)
+                self.fail(e, stop=False)
 
     def chunk(self, data):
         if self.body is not None:

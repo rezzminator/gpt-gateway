@@ -82,15 +82,35 @@ class UninstallTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(h.read_claude()["env"], {"KEEP": "1"})
 
+    def test_purge_deletes_the_level_files_where_the_service_wrote_them(self):
+        h = Host(self)
+        shared = os.path.join(h.root, "plugin-logs")
+        h.env["PLUGIN_LOG_DIR"] = shared
+        code, out = h.install()
+        self.assertEqual(code, 0, out)
+        del h.env["PLUGIN_LOG_DIR"]  # the uninstalling shell has none: the recorded one is the service's
+        text = os.path.join(shared, "gpt-gateway")
+        os.makedirs(text, exist_ok=True)
+        for name in ("gpt-gateway.log", "errors.jsonl", "info.jsonl.2"):
+            open(os.path.join(text, name), "w").close()
+        code, out = h.run("uninstall.sh", "--purge")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(os.listdir(text), [])
+
     def test_purge_deletes_the_logs_and_the_database(self):
         h, logs = self.installed()
         state = os.path.join(h.home, ".local", "state", "gpt-gateway")
         os.makedirs(state, exist_ok=True)
         for name in ("gateway.db", "gateway.db-wal", "gateway.db-shm", "chatgpt-models.json"):
             open(os.path.join(state, name), "w").close()
+        text = os.path.join(state, "logs")
+        os.makedirs(text)
+        for name in ("gpt-gateway.log", "gpt-gateway.log.1", "errors.jsonl", "warnings.jsonl.5", "debug.jsonl", "keep.txt"):
+            open(os.path.join(text, name), "w").close()
         code, out = h.run("uninstall.sh", "--purge")
         self.assertEqual(code, 0, out)
         self.assertEqual(os.listdir(logs), [])
+        self.assertEqual(os.listdir(text), ["keep.txt"])  # the text log and the level files, in the plugin log directory
         self.assertEqual(sorted(n for n in os.listdir(state) if n.startswith(("gateway", "chatgpt"))),
                          ["chatgpt-models.json"])  # the catalog is no log
 

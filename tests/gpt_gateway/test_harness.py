@@ -1,4 +1,6 @@
 """Tests for gpt_gateway.harness: a middleware file run in process against a request and a recorded response."""
+import contextlib
+import io
 import json
 import os
 import unittest
@@ -110,6 +112,13 @@ class HarnessTest(unittest.TestCase):
             load(os.path.join(self.dir, "Bad-Name.py"))
         with self.assertRaises(MiddlewareError):
             load(os.path.join(self.dir, "absent.py"))
+
+    def test_a_check_warning_reaches_stderr(self):
+        path = jail.write_middleware(self.dir, "careful", 'NAME = "careful"\ndef check(s):\n    return "mind the cache"\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            load(path)
+        self.assertEqual(err.getvalue(), "gpt-gateway harness: middleware careful: check warning: mind the cache\n")
 
     def test_run_cli(self):
         log, path = os.path.join(self.dir, "gw.log"), os.path.join(self.dir, "gateway.db")

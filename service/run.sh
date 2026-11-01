@@ -144,13 +144,15 @@ supervise() {
   link
 
   while :; do
-    wait "$pid"
-    status=$?
+    # Checked before the wait too: a HUP trapped while run.sh was busy (linking, logging, restarting) interrupts no wait.
     if [ -n "$reload" ]; then
       reload=
       restart
       continue
     fi
+    wait "$pid"
+    status=$?
+    if [ -n "$reload" ]; then continue; fi
     if kill -0 "$pid" 2>/dev/null; then continue; fi  # wait was interrupted, the gateway still runs
     log "gateway exited with status $status"
     close_listener

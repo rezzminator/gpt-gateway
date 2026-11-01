@@ -24,10 +24,10 @@ _PLACEHOLDER = 'DeferredToolPlaceholder'
 def translate_tools(body):
     """(tools, deferred tools by original name, short-to-original names, notes), retaining the client's order.
 
-    A tool marked defer_loading stays out of tools and is returned in deferred: it reaches the model only after a
-    tool_reference names it. Its short name is in the name map like any other."""
+    A tool marked defer_loading is returned separately in deferred; the request translator merges it into the
+    top-level tools list regardless of tool_reference history. Its short name is in the name map like any other."""
     converted, deferred, names, notes = [], {}, {}, []
-    registered = set()
+    registered = {}
     for tool in body.get('tools', []):
         kind = tool.get('type', 'function')
         if kind == 'web_search_20250305':
@@ -42,8 +42,10 @@ def translate_tools(body):
                 continue
             name = short_name(original)
             if name in registered:
+                if registered[name] == tool:  # the same definition twice: sent once
+                    continue
                 raise ValueError('duplicate or colliding tool name: ' + name)
-            registered.add(name)
+            registered[name] = tool
             if original != name:
                 names[name] = original
             function = _function(name, tool)

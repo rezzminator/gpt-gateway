@@ -17,20 +17,71 @@ class CatalogTest(unittest.TestCase):
         for envelope in ({'models': [entry]}, {'models': [entry], 'etag': 'synthetic', 'identity': {}}):
             with self.subTest(envelope=envelope):
                 self.assertEqual(catalog.parse(envelope), {'gpt-example': catalog.Model(
-                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', False, ('priority',))})
+                    'gpt-example', 272000, ('low', 'xhigh'), 'low', 'low', 'auto', ('priority',))})
 
-    def test_lite_fallback_and_explicit_false_and_summary_flags(self):
-        for slug in ('gpt-6.1-sol', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.5'):
-            for override in (None, False, True):
-                entry = self.entry(supports_reasoning_summaries=False)
-                entry['slug'] = slug
-                if override is not None:
-                    entry['use_responses_lite'] = override
-                result = catalog.parse({'models': [entry]})
-                self.assertIn(slug, result)
-                model = result[slug]
-                self.assertEqual(model.responses_lite, slug != 'gpt-5.5' if override is None else override)
-                self.assertIsNone(model.reasoning_summary)
+    def test_backward_compatible_model_capability_defaults(self):
+        for model in (catalog.Model('gpt-example', 272000, (), None, None, None, ()),
+                      catalog.parse({'models': [self.entry()]})['gpt-example']):
+            with self.subTest(model=model):
+                self.assertIs(getattr(model, 'supports_reasoning_effort_updates', None), False)
+                self.assertIs(getattr(model, 'support_verbosity', None), False)
+                self.assertEqual(getattr(model, 'effective_context_window_percent', None), 95)
+                self.assertEqual(getattr(model, 'effective_context_window', None), 258400)
+                self.assertEqual(model.context_window, 272000)
+
+    def test_explicit_capabilities_and_effective_context_window(self):
+        entry = self.entry(supports_reasoning_effort_updates=True, support_verbosity=True,
+                           effective_context_window_percent=80)
+        entry['context_window'] = 101
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        self.assertIs(getattr(model, 'supports_reasoning_effort_updates', None), True)
+        self.assertIs(getattr(model, 'support_verbosity', None), True)
+        self.assertEqual(getattr(model, 'effective_context_window_percent', None), 80)
+        self.assertEqual(getattr(model, 'effective_context_window', None), 80)
+        self.assertEqual(model.context_window, 101)
+        entry['context_window'] = None
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        self.assertIsNone(getattr(model, 'effective_context_window', 'missing'))
+
+    def test_service_tier_resolver(self):
+        # Codex normalizes the fast alias to priority before filtering advertised tiers.
+        for tiers, requested, expected in (
+                (('priority',), 'fast', 'priority'), (('priority',), 'priority', 'priority'),
+                (('fast',), 'fast', None), (('fast', 'priority'), 'fast', 'priority'),
+                (('future',), 'future', 'future'), (('priority',), 'unsupported', None),
+                (('default', 'priority'), 'default', None), (('priority',), None, None),
+                ((), 'fast', None), ((), 'priority', None), ((), 'flex', 'flex'),
+                (('priority',), 'flex', 'flex')):
+            with self.subTest(tiers=tiers, requested=requested):
+                entry = self.entry(service_tiers=[{'id': tier} for tier in tiers],
+                                   default_service_tier='priority')
+                model = catalog.parse({'models': [entry]})['gpt-example']
+                self.assertEqual(model.service_tiers, tiers)
+                resolver = getattr(model, 'service_tier_for_request', None)
+                self.assertTrue(callable(resolver), 'model must resolve request service tiers')
+                self.assertEqual(resolver(requested), expected)
+        entry = self.entry(additional_speed_tiers=['fast'])
+        model = catalog.parse({'models': [entry]})['gpt-example']
+        resolver = getattr(model, 'service_tier_for_request', None)
+        self.assertTrue(callable(resolver), 'model must resolve request service tiers')
+        self.assertIsNone(resolver('fast'), 'picker-only speed tiers must not authorize wire tiers')
+
+    def test_capability_metadata_validated_at_entry(self):
+        for field, values in (
+                ('supports_reasoning_effort_updates', (None, 0, 1, 'true', [], {})),
+                ('support_verbosity', (None, 0, 1, 'false', [], {})),
+                ('effective_context_window_percent', (None, True, False, 0, -1, 101, 95.0, '95'))):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    faults = []
+                    self.assertEqual(list(catalog.parse({'models': [self.entry(**{field: value}), dict(self.entry(), slug='gpt-kept')]},
+                                                        faults)), ['gpt-kept'])
+                    self.assertEqual(len(faults), 1, faults)
+                    self.assertRegex(faults[0], r'^catalog\.models\[0\]: ' + field + ' must be ')
+
+    def test_summary_flags(self):
+        entry = self.entry(supports_reasoning_summaries=False)
+        self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)
         entry = self.entry(supports_reasoning_summaries=True, supports_reasoning_summary_parameter=False)
         self.assertIsNone(catalog.parse({'models': [entry]})['gpt-example'].reasoning_summary)
 
@@ -43,9 +94,13 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertEqual(catalog.parse({'models': [self.entry(**fields)]})['gpt-example'].reasoning_summary,
                                  expected)
-        for bad in ('loud', '', 7, None):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                catalog.parse({'models': [self.entry(default_reasoning_summary=bad)]})
+        for bad in ('loud', '', 7, None):  # a summary only the request names never costs its model
+            with self.subTest(bad=bad):
+                faults = []
+                self.assertIsNone(catalog.parse({'models': [self.entry(default_reasoning_summary=bad)]},
+                                                faults)['gpt-example'].reasoning_summary)
+                self.assertEqual(faults, ['gpt-example: default_reasoning_summary %r is not one of auto, concise, '
+                                          'detailed, none; none sent' % (bad,)])
 
     def test_nullable_defaults_and_future_effort(self):
         entry = self.entry()
@@ -62,18 +117,22 @@ class CatalogTest(unittest.TestCase):
         for field, value in [('context_window', 'big'), ('context_window', True),
                              ('supported_reasoning_levels', ['high']), ('supported_reasoning_levels', [{}]),
                              ('service_tiers', ['priority']), ('service_tiers', [{'name': 'Fast'}]),
-                             ('use_responses_lite', 'false'), ('supports_reasoning_summary_parameter', None),
+                             ('supports_reasoning_summary_parameter', None),
                              ('default_reasoning_level', 5), ('default_verbosity', {}), ('slug', None)]:
             with self.subTest(field=field, value=value):
                 entry = self.entry()
                 entry[field] = value
-                with self.assertRaisesRegex(ValueError, field):
-                    catalog.parse({'models': [entry]})
-        for bad in (None, [], {}, {'models': {}}, {'models': [False]}):
+                faults = []
+                self.assertEqual(list(catalog.parse({'models': [entry, dict(self.entry(), slug='gpt-kept')]}, faults)), ['gpt-kept'])
+                self.assertEqual(len(faults), 1, faults)
+                self.assertRegex(faults[0], r'^catalog\.models\[0\]: ' + field + '(\\.\\w+)? (must|entry must)')
+        for bad in (None, [], {}, {'models': {}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 catalog.parse(bad)
-        with self.assertRaisesRegex(ValueError, 'duplicate'):
-            catalog.parse({'models': [self.entry(), self.entry()]})
+        faults = []
+        self.assertEqual(list(catalog.parse({'models': [False, self.entry(), self.entry()]}, faults)), ['gpt-example'])
+        self.assertEqual(faults, ['catalog.models[0]: catalog.models entry must be an object',
+                                  'catalog.models[2]: duplicate catalog slug: gpt-example'])
 
 
 class CatalogStoreTest(unittest.TestCase):
@@ -117,10 +176,18 @@ class CatalogStoreTest(unittest.TestCase):
             self.assertTrue(jail.wait_for(lambda: cache.pending is None), "retry never completed")
             self.assertEqual(self.client.models.call_count, 3)
             self.assertEqual(self.events, [("catalog_refresh_failed", {"cause": "invented unavailable"})] * 2)
+            timer.return_value = 760  # one bad entry costs only itself, named in a catalog_fault event
+            self.client.models.side_effect = None
+            self.client.models.return_value = {"models": [{"slug": "gpt-bad"}] + self.raw["models"]}
+            cache.models()
+            self.assertTrue(jail.wait_for(lambda: cache.pending is None), "refresh never completed")
+            self.assertEqual((list(cache.models()), self.events[2:]), (["gpt-test"], [("catalog_fault", {
+                "cause": "catalog.models[0]: supported_reasoning_levels must be an array of objects"})]))
+            self.events[2:] = []
             loaded = catalog.Catalog(self.knobs, self.client, self.store, self.record)
             self.assertEqual(loaded.count(), 1)
             self.assertIn("gpt-test", loaded.models())
-            self.assertEqual(self.client.models.call_count, 3)
+            self.assertEqual(self.client.models.call_count, 4)
 
     def test_cached_models_return_during_one_refresh(self):
         import concurrent.futures

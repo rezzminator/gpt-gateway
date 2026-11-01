@@ -168,15 +168,13 @@ class CheckTest(unittest.TestCase):
         root = self.agents({"a.md": "You are the Reviewer role.", "deep/b.md": "The Planner role.", "c.txt": "Ignored."})
         self.assertIsNone(refusal({"advisor_agents": ["Reviewer role", "Planner role"], "agent_dirs": [root]}))
 
-    def test_an_entry_in_no_agent_file_is_refused_with_where_it_looked(self):
+    def test_an_entry_in_no_agent_file_is_kept_with_a_warning_of_where_it_looked(self):
         root = self.agents({"a.md": "You are the Reviewer role.", "c.txt": "Missing role."})
         missing = os.path.join(root, "absent")
-        with self.assertRaises(SettingsError) as caught:
-            load(MODULE, {"advisor_agents": ["Reviewer role", "Missing role"], "agent_dirs": [root, missing]})
-        message = str(caught.exception)
-        self.assertIn("check failed: advisor_agents: no agent *.md under", message)
-        self.assertIn("%s (1 files); %s (missing) contains \"Missing role\"" % (root, missing), message)
-        self.assertNotIn('"Reviewer role"', message)
+        module, settings = load(MODULE, {"advisor_agents": ["Reviewer role", "Missing role"], "agent_dirs": [root, missing]})
+        self.assertEqual(settings["advisor_agents"], ("Reviewer role", "Missing role"))
+        self.assertEqual(module.check(settings), 'advisor_agents: no agent *.md under %s (1 files); %s (missing) contains '
+                                                 '"Missing role"; it matches no sub-agent' % (root, missing))
 
     def test_no_scope_and_an_empty_scope_read_no_directory(self):
         gone = os.path.join(jail.scratch(self), "absent")
@@ -193,13 +191,15 @@ class CheckTest(unittest.TestCase):
         for entry in ("Own role", "File role", "Directory role"):
             with self.subTest(entry):
                 self.assertIsNone(refusal({"advisor_agents": [entry], "agent_dirs": [root]}))
-        self.assertIn('contains "Nowhere role"', refusal({"advisor_agents": ["Nowhere role"], "agent_dirs": [root]}))
+        module, settings = load(MODULE, {"advisor_agents": ["Nowhere role"], "agent_dirs": [root]})
+        self.assertIn('contains "Nowhere role"', module.check(settings))
 
     def test_the_default_directory_is_the_home_agents_directory(self):
         home = self.agents({".claude/agents/r.md": "Home role."})
         with mock.patch.dict(os.environ, {"HOME": home}):
             self.assertIsNone(refusal({"advisor_agents": ["Home role"]}))
-            reason = refusal({"advisor_agents": ["Other role"]})
+            module, settings = load(MODULE, {"advisor_agents": ["Other role"]})
+            reason = module.check(settings)
         self.assertIn("%s (1 files)" % os.path.join(home, ".claude", "agents"), reason)
 
     def test_an_unreadable_agent_file_is_refused_naming_the_directory(self):
@@ -466,6 +466,11 @@ class ResponseTest(unittest.TestCase):
             "advisor claude-opus-5-5 kind=main ttl=5m in=11 cache_read=0 cache_write=9000 out=300",
             "advisor claude-opus-5-5 kind=main ttl=5m in=12 cache_read=9000 cache_write=40 out=250"))
         self.assertEqual(out.errors, ())
+        mixed = ('event: message_delta\ndata: {"type":"message_delta","usage":{"iterations":[5,{"type":"advisor_message",'
+                 '"model":"claude-opus-5-5","input_tokens":1}]}}\n\n').encode()
+        out = go(request(), response=mixed)  # an iteration that is no object costs only itself
+        self.assertEqual((out.log, out.errors), (
+            ("advisor claude-opus-5-5 kind=main ttl=5m in=1 cache_read=None cache_write=None out=None",), ()))
 
     def test_a_line_names_the_kind_and_the_ttl_the_request_ran_at(self):
         row = iterations(("claude-opus-5-5", 1, 2, 3, 4))

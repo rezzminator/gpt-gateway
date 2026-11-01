@@ -23,12 +23,20 @@ DB="$HOME/.local/state/gpt-gateway/gateway.db"
 PORT=18787
 SETTINGS=${GPT_GATEWAY_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}
 service_jq
+# The plugin log root the service ran with, read before its definition goes; this shell's when none is recorded.
+LOG_ROOT=
+if [ -n "${PLUGIN_LOG_DIR+set}" ]; then LOG_ROOT=$PLUGIN_LOG_DIR; fi
 if [ "$PLATFORM" = Linux ] && [ -f "$AGENT" ]; then
-  service_read || echo 'uninstall.sh: could not read the service environment; using supplied settings and port' >&2
+  if service_read; then
+    LOG_ROOT=$(printf '%s\n' "$record" | "$JQ" -r '.PLUGIN_LOG_DIR // ""')
+  else
+    echo 'uninstall.sh: could not read the service environment; using supplied settings and port' >&2
+  fi
 elif [ "$PLATFORM" = Darwin ] && [ -f "$PLIST" ]; then
   PORT=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_PORT raw "$PLIST" 2>/dev/null || echo "$PORT")
   SETTINGS=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_CLAUDE_SETTINGS raw "$PLIST" 2>/dev/null || echo "$SETTINGS")
   JQ=$(plutil -extract EnvironmentVariables.GPT_GATEWAY_JQ raw "$PLIST" 2>/dev/null || echo "$JQ")
+  LOG_ROOT=$(plutil -extract EnvironmentVariables.PLUGIN_LOG_DIR raw "$PLIST" 2>/dev/null || true)
 fi
 URL="http://127.0.0.1:$PORT"
 # shellcheck source=service/settings.sh
@@ -52,6 +60,8 @@ if settings_ours; then
   cp -p "$SETTINGS" "$BACKUPS/settings.json.pre-uninstall-$(date +%Y%m%d-%H%M%S)"
 fi
 settings_unlink "${GPT_GATEWAY_STOP_SECONDS:-630}" || exit 1
+# The helper follows settings symlinks and backs up before removing only description-marked rows.
+"${GPT_GATEWAY_PYTHON:-/usr/bin/python3}" -I -B "$DIR/picker.py" uninstall "$DEST" "$SETTINGS" "$BACKUPS" || exit 1
 echo "Claude Code talks to the API directly ($SETTINGS)"
 
 if [ -f "$DEST/settings.json" ] || [ -d "$DEST/middleware" ]; then
@@ -69,6 +79,12 @@ fi
 rm -rf "$DEST"
 if [ "$PURGE" = yes ]; then
   rm -f "$LOGS/gpt-gateway.log" "$LOGS/gpt-gateway.log.1" "$LOGS/gpt-gateway.stderr.log" "$LOGS/gpt-gateway-install-tests.log"
+  # The text log and the level files live in the plugin log directory; the files above are where an install before that move kept it.
+  TEXT_LOGS="$STATE/logs"
+  if [ -n "$LOG_ROOT" ]; then TEXT_LOGS="$LOG_ROOT/gpt-gateway"; fi
+  for name in gpt-gateway.log errors.jsonl warnings.jsonl info.jsonl debug.jsonl; do
+    rm -f "$TEXT_LOGS/$name" "$TEXT_LOGS/$name.1" "$TEXT_LOGS/$name.2" "$TEXT_LOGS/$name.3" "$TEXT_LOGS/$name.4" "$TEXT_LOGS/$name.5"
+  done
   rm -f "$DB" "$DB-wal" "$DB-shm"
   echo "logs and database deleted"
 fi

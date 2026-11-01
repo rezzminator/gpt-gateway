@@ -1,6 +1,6 @@
 # gpt-gateway — a local passthrough between Claude Code and the Anthropic API, with a middleware hook API and an opt-in ChatGPT route
 
-On the Anthropic route the core forwards every request byte for byte and relays every response chunk as it arrives; the ChatGPT route, the one route built in and off unless `chatgpt` is true, translates GPT sub-agent requests to the ChatGPT Codex backend and back; every other behaviour lives in middleware the core loads, never in the core. The layout, glossary, façades and gates are fixed by `docs/design/gpt-gateway-layout.md`; read it before adding a file.
+On the Anthropic route the core forwards every request byte for byte and relays every response chunk as it arrives; the ChatGPT route, the one route built in and off unless `chatgpt` is true, translates GPT main-session and sub-agent requests to the ChatGPT Codex backend and back; every other behaviour lives in middleware the core loads, never in the core. The layout, glossary, façades and gates are fixed by `docs/design/gpt-gateway-layout.md`; read it before adding a file.
 
 # Vocabulary
 
@@ -10,7 +10,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 - harness: the public middleware test harness, `run`, `run_cli`, `load` · `gpt_gateway/harness.py`
 - example: the smallest middleware, the contract's executable documentation · `examples/middleware/model_note.py`
 - kind: `main` or `sub` (a request carrying `x-claude-code-agent-id`); the request row's `kind` column; a ChatGPT-route capture folder carries `gpt` in its place
-- ChatGPT route: GPT models as Claude Code sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, its `requests` rows and `retry`/`final_error` events, and `gateway.py chatgpt-stats` · `gpt_gateway/chatgpt/`, `README.md` § ChatGPT route; its login, Codex's `auth.json` first and the gateway's own store second · `gpt_gateway/chatgpt/codex_login.py`, `gpt_gateway/chatgpt/auth.py`; third-party licences · `THIRD_PARTY_NOTICES.md`
+- ChatGPT route: GPT models as Claude Code main sessions and sub-agents over the user's ChatGPT login, `ctx.route == "chatgpt"`, its `requests` rows and `retry`/`final_error` events, and `gateway.py chatgpt-stats` · `gpt_gateway/chatgpt/`, `README.md` § ChatGPT route; its login, Codex's `auth.json` first and the gateway's own store second · `gpt_gateway/chatgpt/codex_login.py`, `gpt_gateway/chatgpt/auth.py`; third-party licences · `THIRD_PARTY_NOTICES.md`
 - capture: one folder per exchange, off by default · `gpt_gateway/capture.py`
 - database: `~/.local/state/gpt-gateway/gateway.db` (`GPT_GATEWAY_DB`), tables `requests` and `events`, views `cache_misses` and `daily`, retention `db_retention_days`; never a request or response body · `gpt_gateway/db.py`, `README.md` § Database
 - service: the portable supervisor and platform-dispatching `ctl.sh`, `install.sh`, `uninstall.sh`; flat install under `~/.local/share/gpt-gateway/`, package subdirectories preserved; macOS label `local.gpt-gateway`, Linux user unit `gpt-gateway.service` · `service/`
@@ -52,3 +52,8 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 ## Git
 
 - Git goes through gitter, per the parent directory's `CLAUDE.md`; this repository is checked out inside that directory.
+- `develop` is protected by the ruleset `develop keeps its history`: never force-push or delete it.
+- `main` is protected by `main is release-only`: it moves only by merging the `develop` -> `main` pull request with a merge commit, after `ci` passes; never a direct push, never an admin override.
+- Every pull request merged into `main` publishes: `VERSION` moves past main's (main's `VERSION`, else its latest `v*` tag), and a pre-release version (`-dev.N`) is bumped to the real release version `X.Y.Z` in that pull request; the version's `CHANGELOG.md` section is the release notes.
+- Before opening it: `git fetch origin main`, then `make release-check` (the gate, then the version check, the same targets `.github/workflows/ci.yml` runs) passes.
+- After the merge, the `publish` job tags `v{version}` on the merge commit and creates the GitHub release `gpt-gateway v{version}`; nobody pushes a tag by hand. Then `develop` is fast-forwarded onto `main`.

@@ -119,13 +119,13 @@ LATER = 'NAME = "later"\nRAN = []\ndef on_request(ctx, req):\n    RAN.append(1)\
 
 
 class FailureTest(ChainCase):
-    def test_an_on_request_failure_sends_the_original_bytes_and_skips_the_rest(self):
+    def test_an_on_request_failure_costs_only_its_own_edits_and_note(self):
         import sys
         chain, modules = self.chain({"edits": EDITS, "fails": FAILS, "later": LATER})
         sent, notes = chain.run_request(self.ctx(), self.request())
-        self.assertIs(sent, RAW)
-        self.assertEqual(notes, [])
-        self.assertEqual(sys.modules["gpt_gateway_mw_later"].RAN, [])
+        self.assertEqual(sent, b'{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"z":9}')
+        self.assertEqual(notes, [" edits=1", " later=1"])
+        self.assertEqual(sys.modules["gpt_gateway_mw_later"].RAN, [1])
         self.assertEqual([m.errors for m in modules], [0, 1, 0])
         (line,) = self.lines
         self.assertRegex(line, r"^middleware fails on_request failed: RuntimeError\('boom',?\) at fails\.py:6 in on_request$")
@@ -139,7 +139,7 @@ class FailureTest(ChainCase):
             "router": 'NAME = "router"\ndef on_request(ctx, req):\n    req.body["model"] = "other"\n    req.mark_changed()\n',
             "later": LATER})
         sent, _ = chain.run_request(self.ctx(), self.request())
-        self.assertIs(sent, RAW)
+        self.assertEqual(sent, b'{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"z":9}')
         self.assertEqual([m.errors for m in modules], [0, 1, 0])
         self.assertIn("middleware router on_request failed: ValueError(\"changed body['model']", self.lines[0])
         chain, _ = self.chain({"drop": 'NAME = "drop"\ndef on_request(ctx, req):\n    del req.body["model"]\n'})
@@ -158,6 +158,12 @@ class FailureTest(ChainCase):
             self.assertEqual(modules[0].errors, 1, module)
             self.assertIn("middleware %s on_request failed: " % module, self.lines[-1])
             self.assertIn(text, self.lines[-1])
+        chain, modules = self.chain({"edits": EDITS, "number": 'NAME = "number"\ndef on_request(ctx, req):\n    return 3\n',
+                                     "setish": 'NAME = "setish"\ndef on_request(ctx, req):\n    req.body["s"] = {1}\n'
+                                               '    req.mark_changed()\n    return " setish=1"\n', "later": LATER})
+        sent, notes = chain.run_request(self.ctx(), self.request())  # a bad note or edit costs only its own module
+        self.assertEqual((sent, notes, [m.errors for m in modules]), (
+            b'{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"z":9}', [" edits=1", " later=1"], [0, 1, 1, 0]))
 
     def test_on_event_and_on_response_end_failures_are_skipped(self):
         bad = 'NAME = "bad"\nN = []\ndef on_event(ctx, e):\n    N.append(e)\n    raise KeyError("x")\n' \
@@ -226,7 +232,7 @@ class AnswerTest(ChainCase):
         req = self.request()
         sent, notes = chain.run_request(self.ctx(), req)
         self.assertIn("middleware half on_request failed: RuntimeError('after')", self.lines[-1])
-        self.assertEqual((sent, notes, modules[0].errors), (RAW, [], 1))
+        self.assertEqual((sent, notes, modules[0].errors), (RAW, [" later=1"], 1))
         self.assertIsNone(req.answered)
 
     def test_a_malformed_answer_is_a_failure_of_its_hook(self):

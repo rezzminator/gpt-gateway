@@ -113,7 +113,7 @@ def agent_texts(directory):
 
 
 def check(settings):
-    """Every `advisor_agents` entry appears verbatim in at least one agent file, else ValueError naming it."""
+    """A warning naming each `advisor_agents` entry no agent file holds verbatim (kept); ValueError if one is unreadable."""
     entries = settings["advisor_agents"]
     if not entries:  # null: unscoped; []: no entry to find
         return
@@ -130,8 +130,8 @@ def check(settings):
         searched.append("%s (%d files)" % (directory, len(found)))
     missing = [e for e in entries if not any(e in text for text in texts)]
     if missing:
-        raise ValueError("advisor_agents: no agent *.md under %s contains %s" % (
-            "; ".join(searched), ", ".join(json.dumps(e) for e in missing)))
+        return "advisor_agents: no agent *.md under %s contains %s; it matches no sub-agent" % (
+            "; ".join(searched), ", ".join(json.dumps(e) for e in missing))
 
 
 def advisor_tools(j):
@@ -383,7 +383,7 @@ def on_event(ctx, event):
 def on_response_end(ctx, result):
     """One `advisor` row per advisor iteration of the response, after the request's own line."""
     usage = (ctx.state.pop("usage", None) or {}).get("usage") or {}
-    for it in [i for i in usage.get("iterations") or [] if i.get("type") == "advisor_message"]:
+    for it in [i for i in usage.get("iterations") or [] if isinstance(i, dict) and i.get("type") == "advisor_message"]:
         ttl = re.search(r"advisor-caching(?:-kept)?=(\w+)", result.note)
         ctx.log("advisor %s kind=%s ttl=%s in=%s cache_read=%s cache_write=%s out=%s" % (
             it.get("model"), ctx.kind or "-", ttl.group(1) if ttl else "-",

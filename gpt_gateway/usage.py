@@ -19,6 +19,13 @@ def count(value):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def error_type(body):
+    """An error body's `error.type`, "unknown" when it names none as a string."""
+    error = body.get("error")
+    kind = error.get("type") if isinstance(error, dict) else None
+    return kind if isinstance(kind, str) else "unknown"
+
+
 class Meter:
     """Fed the relayed chunks of one response; `fields()` is its share of the request row."""
 
@@ -50,6 +57,9 @@ class Meter:
             if not found:
                 self.scanned = len(self.pending)
                 if len(self.pending) > MAX_EVENT:
+                    field, _, name = bytes(self.pending[:64]).partition(b"\n")[0].partition(b":")
+                    if not self.skipping and (field != b"event" or name.strip().decode("utf-8", "replace") in WANTED):
+                        self.unread = "too_large"  # an event the meter reads, lost: never read as "no usage"
                     self.pending, self.scanned, self.skipping = bytearray(), 0, True
                 return
             end, sep = min(found)
@@ -99,10 +109,7 @@ class Meter:
             self.usage.update((k, v) for k, v in usage.items() if v is not None)
 
     def _error(self, body, raw):
-        error = body.get("error")
-        kind = error.get("type") if isinstance(error, dict) else None
-        if isinstance(kind, str):
-            self.error_code, self.error_head = kind, raw[:HEAD].decode("utf-8", "replace")
+        self.error_code, self.error_head = error_type(body), raw[:HEAD].decode("utf-8", "replace")
 
     def finish(self):
         """Read a JSON body once it has all arrived."""
@@ -118,9 +125,7 @@ class Meter:
             self.pending = bytearray()
         if isinstance(body, dict):
             if body.get("type") == "error":
-                error = body.get("error")
-                if isinstance(error, dict) and isinstance(error.get("type"), str):
-                    self.error_code = error["type"]
+                self.error_code = error_type(body)
             self._usage(body.get("usage"), replace=True)
 
     def fields(self):
@@ -139,9 +144,8 @@ class Meter:
         details = self.usage.get("output_tokens_details")
         thinking = count(details.get("thinking_tokens")) if isinstance(details, dict) else None
         if None in (fresh, read, written, output):
-            self.unread = "bad_usage"
-            return out
-        total = fresh + read + written
+            self.unread = "bad_usage"  # the counts that read are kept; the others, and what needs them, are NULL
+        total = None if None in (fresh, read, written) else fresh + read + written
         out.update(input_tokens=total, cache_read_tokens=read, cache_write_tokens=written, output_tokens=output,
-                   reasoning_tokens=thinking, hit=read / total if total else 0.0)
+                   reasoning_tokens=thinking, hit=None if total is None else read / total if total else 0.0)
         return out

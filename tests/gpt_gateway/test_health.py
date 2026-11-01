@@ -77,6 +77,9 @@ class HealthTest(unittest.TestCase):
         rt, port = fakes.start_gateway(self, up, settings={"middleware": [{"module": m} for m in ("says", "fail")]},
                                        middleware={"says": SAYS, "fail": FAIL})
         fakes.request(port, "POST", "/v1/messages", b'{"model":"m"}')
+        # The handler queues the request's row last, after the reply went out: count once it landed.
+        self.assertTrue(jail.wait_for(lambda: rt.db.flush() and db.query(rt.db.path, "SELECT id FROM requests")),
+                        "the request's row never reached %s" % rt.db.path)
         part = db_part(rt)
         self.assertNotIn(b" db_rows=0 ", part + b" ")  # the request's row and its failure's event
         self.assertEqual(health(port), b"ok pid=%d fds=N/L capture=off settings=ok %s middleware=[says v=7 errors=0, fail errors=1]\n"

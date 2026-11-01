@@ -3,6 +3,8 @@ import socket
 import struct
 import threading
 import unittest
+from unittest import mock
+import zlib
 
 from gpt_gateway import frames
 from gpt_gateway.upstream import UpstreamError
@@ -37,6 +39,92 @@ class FramesTest(unittest.TestCase):
             s.settimeout(5)
             self.addCleanup(s.close)
         return frames.WebSocket(left), right
+
+    def test_negotiated_deflate_compresses_sends_and_expands_fragmented_messages(self):
+        ws, peer = self.pair()
+        # Set on an existing socket so the unfixed implementation fails an assertion, not a signature error.
+        ws.compression = True
+        ws.server_no_context_takeover = True
+        data = b"large shared prefix " * 1000
+        ws.send(data)
+        opcode, payload = read_client_frame(peer)
+        self.assertLess(len(payload), len(data) // 10)
+        self.assertEqual(opcode, frames.TEXT)
+        self.assertEqual(zlib.decompressobj(-15).decompress(payload + b"\x00\x00\xff\xff"), data)
+        compressor = zlib.compressobj(wbits=-15)
+        compressed = compressor.compress(data) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        compressed = compressed[:-4]
+        first = bytearray(server_frame(frames.TEXT, compressed[:5], fin=False)); first[0] |= 0x40
+        peer.sendall(first + server_frame(frames.PING, b"p") + server_frame(frames.CONTINUATION, compressed[5:]))
+        self.assertEqual(ws.receive(), data)
+        self.assertEqual(read_client_frame(peer), (frames.PONG, b"p"))
+
+    def test_compression_negotiation_and_invalid_frames_fail_closed(self):
+        self.assertTrue(callable(getattr(frames, 'deflate_options', None)))
+        self.assertEqual(frames.deflate_options(None), (False, False))
+        self.assertEqual(frames.deflate_options('permessage-deflate; server_no_context_takeover'), (True, True))
+        for value in ('unknown', 'permessage-deflate; unknown', 'permessage-deflate; server_no_context_takeover=1',
+                      'permessage-deflate, permessage-deflate',
+                      'permessage-deflate; client_no_context_takeover; client_no_context_takeover'):
+            with self.subTest(value=value), self.assertRaisesRegex(UpstreamError, 'extension'):
+                frames.deflate_options(value)
+        for frame in (b"\xc9\x00", b"\xc0\x00", b"\xe1\x00"):
+            with self.subTest(frame=frame), self.assertRaisesRegex(UpstreamError, 'reserved'):
+                frames.parse_frame(bytearray(frame), True)
+        ws, peer = self.pair(); ws.compression = True
+        peer.sendall(b"\xc1\x01\xff")
+        with self.assertRaisesRegex(UpstreamError, 'deflate'):
+            ws.receive()
+
+    def test_server_can_negotiate_a_smaller_window_without_an_offer(self):
+        for bits in range(8, 16):
+            for spelling in (str(bits), '"%d"' % bits):
+                with self.subTest(bits=spelling):
+                    extension = 'permessage-deflate; server_max_window_bits=' + spelling
+                    try:
+                        options = frames.deflate_options(extension)
+                    except UpstreamError as error:
+                        self.fail('valid server window negotiation rejected: %s' % error)
+                    self.assertEqual(options, (True, False))
+        for bits in range(9, 16):  # zlib's compressor does not support an eight-bit raw window.
+            with self.subTest(inflated_bits=bits):
+                plain, peer = self.pair()
+                ws = frames.WebSocket(plain.sock, extension=(
+                    'permessage-deflate; server_no_context_takeover; server_max_window_bits=%d' % bits))
+                text = b'small-window content ' * 100
+                compressor = zlib.compressobj(wbits=-bits)
+                payload = (compressor.compress(text) + compressor.flush(zlib.Z_SYNC_FLUSH))[:-4]
+                peer.sendall(server_frame(frames.TEXT | 0x40, payload))
+                self.assertEqual(ws.receive(), text)
+        for parameter in ('server_max_window_bits', 'server_max_window_bits=7', 'server_max_window_bits=16',
+                          'server_max_window_bits=09', 'server_max_window_bits=""15""',
+                          'server_max_window_bits=14; server_max_window_bits=15', 'client_max_window_bits=15'):
+            with self.subTest(invalid=parameter), self.assertRaisesRegex(UpstreamError, 'extension'):
+                frames.deflate_options('permessage-deflate; ' + parameter)
+
+    def test_deflate_context_takeover_and_both_inflated_and_wire_limits(self):
+        ws, peer = self.pair(); ws.compression = True
+        compressor = zlib.compressobj(wbits=-15)
+        for _ in range(2):
+            text = b"shared dictionary content " * 100
+            payload = (compressor.compress(text) + compressor.flush(zlib.Z_SYNC_FLUSH))[:-4]
+            peer.sendall(server_frame(frames.TEXT | 0x40, payload))
+            self.assertEqual(ws.receive(), text)
+        ws, peer = self.pair(); ws.compression = True
+        compressor = zlib.compressobj(wbits=-15)
+        payload = (compressor.compress(b"x" * 65) + compressor.flush(zlib.Z_SYNC_FLUSH))[:-4]
+        peer.sendall(server_frame(frames.TEXT | 0x40, payload))
+        with mock.patch.object(frames, 'MESSAGE_LIMIT', 64), self.assertRaisesRegex(UpstreamError, 'limit'):
+            ws.receive()
+        ws, peer = self.pair(); ws.compression = True
+        compressor = zlib.compressobj(wbits=-15)
+        payload = b"".join(compressor.compress(b"x") + compressor.flush(zlib.Z_SYNC_FLUSH) for _ in range(50))[:-4]
+        self.assertGreater(len(payload), 64)
+        chunks = [payload[i:i + 32] for i in range(0, len(payload), 32)]
+        peer.sendall(b"".join(server_frame(frames.TEXT | 0x40 if i == 0 else frames.CONTINUATION,
+                                          chunk, fin=i == len(chunks) - 1) for i, chunk in enumerate(chunks)))
+        with mock.patch.object(frames, 'MESSAGE_LIMIT', 64), self.assertRaisesRegex(UpstreamError, 'limit'):
+            ws.receive()
 
     def test_mask_and_parse_frame_at_every_length_form(self):
         key = b"\x01\x02\x03\x04"

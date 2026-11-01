@@ -38,8 +38,6 @@ def decide(catalog, method, path, body, headers, authorized=False):
     if (method != "POST" or path.split("?", 1)[0] not in ("/v1/messages", "/v1/messages/count_tokens")
             or not isinstance(model, str) or model.startswith("claude-")):
         return "anthropic", None, None  # no model id to route on: Anthropic validates the body, as before
-    if not headers.get("x-claude-code-agent-id"):
-        return "chatgpt", None, route_error(400, "invalid_request_error", "GPT models run as sub-agents only")
     if not authorized:  # the install's credential rides the base URL; a client without it never spends the subscription
         return "chatgpt", None, route_error(403, "permission_error", "local client authentication required",
                                             {"x-should-retry": "false"})
@@ -86,9 +84,16 @@ def without_reasoning(body):
         if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
             continue
         message["content"] = [block for block in message["content"] if not (
-            isinstance(block, dict) and block.get("type") == "thinking" and
-            isinstance(signature.decode(block.get("signature")), tuple))]
+            isinstance(block, dict) and block.get("type") == "thinking" and _signed_here(block.get("signature")))]
     return cleaned
+
+
+def _signed_here(value):
+    """Whether a signature is this gateway's, a damaged one included: request.translate drops that one anyway."""
+    try:
+        return signature.decode(value) is not None
+    except ValueError:
+        return True
 
 
 def notes_column(notes):
@@ -199,8 +204,9 @@ class Route:
                                 attempt, "final", translator.failure or reader.error_head, credentials,
                                 translator.error.delay, reader.transport_exception)
         row["attempts"] = attempt
+        row["translation_notes"] = notes_column(translation.notes + tuple(translator.notes))  # failed streams too
         if translator.usage is not None:
-            if translator.terminal == "response.completed":
+            if translator.terminal == "response.completed" and translator.input_tokens is not None:
                 with self.lock:
                     estimator.observe(translation.estimate_chars, translator.input_tokens, attachments)
             row.update(
@@ -212,7 +218,6 @@ class Route:
                 total_ms=clock.milliseconds((clock.monotonic() if ended is None else ended) - measure.started),
                 reused=measure.reused, stale=measure.stale, turn_state=measure.turn or None,
                 transport=measure.transport, delta=measure.delta or None,
-                translation_notes=notes_column(translation.notes),
                 empty=translator.empty)
 
     # codex-rs/codex-client/src/retry.rs:15-52; retries stop at the translator commit boundary.
@@ -222,7 +227,12 @@ class Route:
         backend refused it; None sends none."""
         measure = Measure(clock.monotonic() if started is None else started)
         silent = False  # the one free retry of a kept-alive connection that died before any body byte
-        key = lane.key(headers.get("x-claude-code-session-id", ""), headers.get("x-claude-code-agent-id", ""))
+        agent_id = headers.get("x-claude-code-agent-id", "")
+        subagent = bool(agent_id)
+        agent_contract = self.agent_contract and subagent
+        session_id = headers.get("x-claude-code-session-id", "")
+        key = lane.key(session_id, agent_id)
+        parent_key = lane.key(session_id, "") if subagent else None
         row = {} if row is None else row
         row.update(lane=key, slug=model.slug)
         state = self.lane_state(key)
@@ -233,7 +243,7 @@ class Route:
             with self.lock:
                 pinned = state.effort if summary else None
             sending = None if settings is None else self.retention_sends(settings)
-            translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
+            translation = request.translate(body, model, key, pinned, agent_contract, sending, parent_key)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             return route_error(400, "invalid_request_error", str(error))
         cap.sent_body(translation.body_bytes)
@@ -265,7 +275,7 @@ class Route:
                         if state.turn_state.observe(where, issued):
                             measure.turn = "issued"
                 response = self.client.responses(translation, key, credentials, token, observe, where == turn.FORK,
-                                                 row.get("request_id"))
+                                                 row.get("request_id"), subagent)
                 reused, retried, measure.transport, measure.delta = self.client.reuse()
                 measure.reused, measure.stale = reused, measure.stale or retried
                 status = response.status
@@ -336,7 +346,7 @@ class Route:
                     dropped = True
                     body = without_reasoning(body)
                 if decision.drop_reasoning or strip:
-                    translation = request.translate(body, model, key, pinned, self.agent_contract, sending)
+                    translation = request.translate(body, model, key, pinned, agent_contract, sending, parent_key)
                     cap.sent_body(translation.body_bytes)
                     attachments = attachment_count(body)
                     with self.lock:

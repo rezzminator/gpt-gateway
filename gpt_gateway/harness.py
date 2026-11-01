@@ -68,7 +68,8 @@ def load(path, settings=None, env=None):
     ((stem, values),) = middleware_entries([{"module": stem, "settings": {} if settings is None else settings}],
                                            "harness")
     module = load_module(stem, os.path.dirname(path))
-    return module, module_settings(module, values, dict(env or {}), "harness")
+    return module, module_settings(module, values, dict(env or {}), "harness",
+                                   lambda text: print("gpt-gateway harness: " + text, file=sys.stderr))
 
 
 def split(data, chunk_size):

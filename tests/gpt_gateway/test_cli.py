@@ -141,10 +141,10 @@ class CliCase(unittest.TestCase):
         self.tmp = jail.scratch(self)
         self.app = jail.stage_install(os.path.join(self.tmp, "app"))
         self.settings = os.path.join(self.app, "settings.json")
-        self.log = os.path.join(self.tmp, "gw.log")
+        self.log = os.path.join(self.tmp, ".local", "state", "gpt-gateway", "logs", "gpt-gateway.log")
 
     def run_gateway(self, *args, **env):
-        env = jail.clean_env(self.tmp, GPT_GATEWAY_PORT=str(jail.free_port()), GPT_GATEWAY_LOG=self.log, **env)
+        env = jail.clean_env(self.tmp, GPT_GATEWAY_PORT=str(jail.free_port()), **env)
         p = subprocess.run(["/usr/bin/python3", "-I", "-B", os.path.join(self.app, "gateway.py")] + list(args),
                            env=env, capture_output=True, text=True, timeout=20)
         return p.returncode, p.stdout, p.stderr
@@ -247,14 +247,14 @@ class CheckTest(CliCase):
 
 class MwTest(CliCase):
     def test_stderr_only_middleware_sites_emit_their_classified_rows(self):
-        cases = (("no-cli", 'NAME = "tool"\n', {}, ["tool"], 2, "warning", "middleware-cli-unavailable", "invoke"),
+        cases = (("no-cli", 'NAME = "tool"\n', {}, ["tool"], 2, "error", "middleware-cli-unavailable", "invoke"),
                  ("crash", 'NAME = "tool"\ndef cli(argv, ctx):\n    raise RuntimeError("bad")\n', {},
                   ["tool"], 1, "error", "middleware-cli-failed", "invoke"),
                  ("exit", 'NAME = "tool"\ndef cli(argv, ctx):\n    raise SystemExit("refused")\n', {},
                   ["tool"], 1, "error", "middleware-cli-exit", "invoke"),
                  ("wrong-result", 'NAME = "tool"\ndef cli(argv, ctx):\n    return "bad"\n', {},
                   ["tool"], 1, "error", "middleware-cli-invalid-result", "invoke"),
-                 ("unknown", MW_CLI, {}, ["missing"], 2, "warning", "middleware-unknown", "cmd_mw"),
+                 ("unknown", MW_CLI, {}, ["missing"], 2, "error", "middleware-unknown", "cmd_mw"),
                  ("env", MW_CLI, {"GPT_GATEWAY_DRAIN_SECONDS": "soon"}, ["tool"], 1, "error", "env-invalid", "cmd_mw"),
                  ("settings", MW_CLI, {}, ["tool"], 1, "error", "settings-invalid", "cmd_mw"))
         for name, source, changes, args, expected_code, level, event, function in cases:

@@ -164,6 +164,14 @@ class LoginTest(unittest.TestCase):
         with patch.object(self.store, "post", side_effect=[usercode, (500, {"error": "secret"})]):
             with self.assertRaisesRegex(self.auth.AuthError, "HTTP 500"):
                 self.login.device_login(self.store, output=lambda _: None)
+        unreadable = (200, {"device_auth_id": "invented-device", "user_code": "ABCD", "interval": "soon"})
+        output = []
+        with patch.object(self.store, "post", side_effect=[unreadable, (403, {}), (500, {})]), \
+                patch.object(clock, "sleep") as sleep:  # a polling pace that does not read never ends the login
+            with self.assertRaisesRegex(self.auth.AuthError, "HTTP 500"):
+                self.login.device_login(self.store, output=output.append)
+        self.assertEqual(([c.args for c in sleep.call_args_list], output[0]),
+                         ([(5,)], "ChatGPT sent an unreadable device polling interval 'soon'; polling every 5 s"))
 
     def test_cli_login_dispatch_status_missing_and_bad_args(self):
         with patch.object(self.login, "device_login") as device, patch.object(self.login, "browser_login") as browser:

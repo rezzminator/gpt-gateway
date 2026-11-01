@@ -17,22 +17,64 @@ class ClientTest(unittest.TestCase):
         client = Client(SimpleNamespace(origin=fakes.start_upstream(self, fake), transport="http"), lambda line: None)
         self.addCleanup(client.drop)
         creds = Credentials("invented-bearer", "invented-account")
-        for lite in (True, False):
-            response = client.responses(Translation(b"{}", lite, {}, (), 2), "invented-lane", creds)
-            response.read()
-            headers = fake.seen[-1]["headers"]
-            self.assertEqual(headers["authorization"], "Bearer invented-bearer")
-            self.assertEqual(headers["chatgpt-account-id"], "invented-account")
-            self.assertEqual(headers["session-id"], "invented-lane")
-            self.assertEqual(headers["content-length"], "2")
-            self.assertEqual(headers.get("x-openai-internal-codex-responses-lite"), "true" if lite else None)
+        response = client.responses(Translation(b"{}", {}, (), 2), "invented-lane", creds)
+        response.read()
+        headers = fake.seen[-1]["headers"]
+        self.assertEqual(headers["authorization"], "Bearer invented-bearer")
+        self.assertEqual(headers["chatgpt-account-id"], "invented-account")
+        self.assertEqual(headers["session-id"], "invented-lane")
+        self.assertEqual(headers.get("thread-id"), "invented-lane")
+        self.assertEqual(headers["content-length"], "2")
         self.assertEqual(client.models(creds), fakes.CHATGPT_MODELS)
         self.assertEqual(fake.seen[-1]["path"], "/backend-api/codex/models?client_version=0.162.1")
+
+    def test_both_transports_use_only_owned_compatibility_metadata(self):
+        client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
+        self.addCleanup(client.close)
+        client.upstream = Mock()
+        metadata = {"session_id":"session", "thread_id":"child", "x-codex-window-id":"window",
+                    "x-codex-parent-thread-id":"parent", "x-codex-turn-metadata":'{"request_kind":"turn"}',
+                    "Authorization":"must-not-cross", "x-oai-attestation":"must-not-cross"}
+        body = json.dumps({"client_metadata": metadata}).encode()
+        client.responses(Translation(body, {}, (), len(body)), "lane", Credentials("token", "account"), subagent=True)
+        headers = dict(client.upstream.send.call_args.args[3])
+        self.assertEqual(headers.get("thread-id"), "child")
+        self.assertEqual(headers.get("session-id"), "session")
+        self.assertEqual(headers.get("x-codex-parent-thread-id"), "parent")
+        self.assertEqual(headers.get("x-codex-window-id"), "window")
+        self.assertEqual(headers.get("Authorization"), "Bearer token")
+        self.assertNotIn("x-oai-attestation", headers)
+
+    def test_main_lane_omits_subagent_identity_on_both_transports(self):
+        for transport in ('http', 'websocket'):
+            with self.subTest(transport=transport):
+                fake = type('MainClientFake', (fakes.ChatGPTUpstream,), {'seen': [], 'script': [], 'upgrades': []})
+                client = Client(SimpleNamespace(origin=fakes.start_upstream(self, fake), transport=transport), lambda kind, **fields: None)
+                self.addCleanup(client.close)
+                response = client.responses(Translation(b'{"model":"gpt-test","input":[]}', {}, (), 2),
+                                            'main-lane', Credentials('invented-bearer', 'invented-account'))
+                self.assertEqual(response.status, 200)
+                response.read()
+                response.close()
+                headers = fake.upgrades[-1] if transport == 'websocket' else fake.seen[-1]['headers']
+                self.assertNotIn('x-openai-subagent', headers)
+                self.assertEqual(headers.get('x-codex-routing-hint'), 'model=gpt-test')
+
+    def test_routing_hint_uses_only_bounded_model_and_tier(self):
+        client = Client(SimpleNamespace(origin='http://127.0.0.1:1', transport='http'), lambda kind, **fields: None)
+        self.addCleanup(client.close)
+        for model, tier, expected in [('gpt-test', 'priority', 'model=gpt-test;tier=priority'),
+                                      ('gpt-test;other=x', None, None), ('gpt-test', 'bad\r\nheader', None),
+                                      ('g' * 1025, None, None)]:
+            body = json.dumps({'model':model, 'service_tier':tier,
+                               'client_metadata':{'x-codex-routing-hint':'forged'}}).encode()
+            headers = client._response_headers(Translation(body, {}, (), len(body)), 'lane', Credentials('token','account'), False)
+            self.assertEqual(headers.get('x-codex-routing-hint'), expected)
 
     def test_responses_name_the_request_to_the_upstream_for_its_retry_event(self):
         client = Client(SimpleNamespace(origin="http://127.0.0.1:1", transport="http"), lambda line: None)
         client.upstream = Mock()
-        client.responses(Translation(b"{}", False, {}, (), 2), "invented-lane",
+        client.responses(Translation(b"{}", {}, (), 2), "invented-lane",
                          Credentials("invented-bearer", "invented-account"), request_id=7)
         self.assertEqual(client.upstream.send.call_args.kwargs.get("request_id"), 7)
 
@@ -45,7 +87,7 @@ class ClientTest(unittest.TestCase):
             with self.subTest(cause=repr(cause)), patch("gpt_gateway.chatgpt.websocket.Answer") as answer:
                 answer.return_value.start.side_effect = cause
                 with self.assertRaises(UpstreamError) as caught:
-                    client._over_websocket(Translation(b"{}", False, {}, (), 2), "invented-lane",
+                    client._over_websocket(Translation(b"{}", {}, (), 2), "invented-lane",
                                            Credentials("invented-bearer", "invented-account"), None, None)
                 self.assertEqual(caught.exception.error_class, expected)
 

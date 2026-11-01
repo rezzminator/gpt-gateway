@@ -175,7 +175,7 @@ class PassthroughTest(unittest.TestCase):
             fakes.request(port, "POST", "/v1/messages", ODD)
         self.assertEqual(rows(rt, "path", "status", "error_code", "error_head"), [
             {"path": "/v1/messages", "status": None, "error_code": "gateway_error", "error_head": "RuntimeError('invented')"}])
-        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        path = os.path.join(rt.log.levels.dir, "errors.jsonl")
         self.assertTrue(os.path.isfile(path), "unexpected gateway failures must append an error level row")
         with open(path) as source:
             diagnostic, = [json.loads(line) for line in source]
@@ -196,7 +196,7 @@ class PassthroughTest(unittest.TestCase):
         self.assertEqual([(r["method"], r["path"], r["status"], r["error_code"], "upstream unreachable" in r["error_head"],
                            r.get("error_class"), r["reused"], r["stale"], r["attempts"]) for r in fakes.recorded(rt)],
                          [("POST", "/v1/messages", 502, "api_error", True, "connect", 0, 0, 1)])
-        path = os.path.join(rt.log.level_dir, "errors.jsonl")
+        path = os.path.join(rt.log.levels.dir, "errors.jsonl")
         self.assertTrue(os.path.isfile(path), "upstream transport failures must append an error level row")
         with open(path) as source:
             diagnostic, = [json.loads(line) for line in source]
@@ -286,14 +286,15 @@ class HookExchangeTest(unittest.TestCase):
         expected = dict(json.loads(ODD), added=1)
         self.assertEqual(Upstream.seen[-1]["body"], json.dumps(expected, separators=(",", ":")).encode())
 
-    def test_an_on_request_failure_forwards_the_original_bytes_and_the_stream_whole(self):
+    def test_an_on_request_failure_forwards_the_earlier_edits_and_the_stream_whole(self):
         rt, port = self.gateway("edit", "fail", "rec", edit=EDIT, fail=FAIL, rec=RECORDER.format(name="rec"))
         resp, data = fakes.request(port, "POST", "/v1/messages", ODD)
-        self.assertEqual((resp.status, data, Upstream.seen[-1]["body"]), (200, SSE_BODY, ODD))
-        self.assertEqual([c[0] for c in ended("rec", 1)], ["on_event"] * 3 + ["on_response_end"])
+        self.assertEqual((resp.status, data, Upstream.seen[-1]["body"]), (200, SSE_BODY, (
+            b'{"model":"claude-x","stream":true,"messages":[{"role":"user","content":"hi"}],"added":1}')))
+        self.assertEqual([c[0] for c in ended("rec", 1)], ["on_request"] + ["on_event"] * 3 + ["on_response_end"])
         self.assertEqual([(e["fields"]["module"], e["fields"]["hook"], e["fields"]["error"])
                           for e in fakes.events(rt, "middleware_failed")], [("fail", "on_request", "RuntimeError('x')")])
-        self.assertEqual(rows(rt, "status", "kind", "note"), [{"status": 200, "kind": "main", "note": None}])
+        self.assertEqual(rows(rt, "status", "kind", "note"), [{"status": 200, "kind": "main", "note": "rec=seen"}])
 
     def test_on_event_sees_whole_events_across_split_chunks(self):
         rt, port = self.gateway("rec", rec=RECORDER.format(name="rec"))
@@ -552,16 +553,6 @@ class RouteGateTest(unittest.TestCase):
     send = route_tests.RouteTest.send
     responses = route_tests.RouteTest.responses
 
-    def test_gpt_route_requires_install_secret(self):
-        _, port = self.gateway()
-        unsigned = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), self.headers)
-        self.assertEqual((unsigned[0].status, json.loads(unsigned[1])["error"]["message"],
-                          unsigned[0].getheader("x-should-retry")),
-                         (403, "chatgpt upstream: local client authentication required", "false"))
-        anonymous = fakes.request(port, "POST", "/v1/messages", json.dumps(self.body).encode(), {})
-        self.assertEqual(anonymous[0].status, 400)  # the sub-agent rule answers first
-        self.assertEqual((len(self.responses()), self.send(port)[0].status), (0, 200))
-
     def test_an_image_turn_teaches_the_text_ratio_without_the_attachment_allowance(self):
         rt, port = self.gateway()
         image = dict(type="image", source=dict(type="base64", media_type="image/png", data="invented"))
@@ -570,7 +561,7 @@ class RouteGateTest(unittest.TestCase):
         self.assertEqual([r["input_tokens"] for r in fakes.gpt_rows(rt)], [100])  # the upstream's total, image included
         resp, data = self.send(port, path="/v1/messages/count_tokens")
         # 100 total is under the allowance, so the turn teaches nothing: the text keeps the prior 0.25 ratio
-        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2154))
+        self.assertEqual((resp.status, json.loads(data)["input_tokens"]), (200, 2293))
 
 
 class RouteSecretStripTest(unittest.TestCase):

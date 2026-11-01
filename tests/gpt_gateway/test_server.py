@@ -58,7 +58,7 @@ class DrainTest(unittest.TestCase):
         self.app = jail.stage_install(os.path.join(self.tmp, "app"))
         self.port = jail.free_port()
         self.upstream = fakes.start_upstream(self, fakes.SlowUpstream)
-        self.log = os.path.join(self.tmp, "gw.log")
+        self.log = os.path.join(self.tmp, ".local", "state", "gpt-gateway", "logs", "gpt-gateway.log")
         self.procs = []
         self.addCleanup(self.stop_all)
 
@@ -70,7 +70,7 @@ class DrainTest(unittest.TestCase):
 
     def gateway(self, drain="10"):
         env = jail.clean_env(self.tmp, GPT_GATEWAY_PORT=str(self.port), GPT_GATEWAY_UPSTREAM=self.upstream,
-                             GPT_GATEWAY_LOG=self.log, GPT_GATEWAY_DRAIN_SECONDS=drain)
+                             GPT_GATEWAY_DRAIN_SECONDS=drain)
         p = subprocess.Popen(["/usr/bin/python3", "-I", "-B", os.path.join(self.app, "gateway.py")], env=env)
         self.procs.append(p)
         return p

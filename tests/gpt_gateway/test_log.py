@@ -1,9 +1,9 @@
-"""Tests for gpt_gateway.log: stamped lines, rotation, and a failing log reported, never silent."""
+"""Tests for gpt_gateway.log, the adapter over plugin_log: where the text and level logs go, stamped
+lines, rotation, and what a failing log puts on the screen. The module itself is gpt-gateway's own."""
 import contextlib
 import io
 import os
 import json
-import threading
 import unittest
 from unittest.mock import patch
 
@@ -54,94 +54,24 @@ class LogTest(unittest.TestCase):
             env.plugin_log_dir({"PLUGIN_LOG_DIR": "relative"})
         with patch.object(env, "snapshot", return_value={}):
             absent = Log(None)
-        absent.record("info", "no-home", "nothing to resolve", "gpt_gateway/log.py#record")
-
-    def test_record_write_failure_is_one_stderr_line(self):
-        home = jail.scratch(self)
-        root = os.path.join(home, "blocked")
-        with open(root, "w") as source:
-            source.write("not a directory")
-        log = self.level_log(home, PLUGIN_LOG_DIR=root)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            log.record("error", "forced-event", "first", "gpt_gateway/log.py#record")
-            log.record("error", "forced-event", "second", "gpt_gateway/log.py#record")
-            self.assertEqual(len(err.getvalue().splitlines()), 1)
-            os.unlink(root)
-            log.record("error", "recovered", "third", "gpt_gateway/log.py#record")
-            with patch.object(logmod.os, "open", side_effect=OSError("disk full")):
-                log.record("error", "forced-event", "fourth", "gpt_gateway/log.py#record")
-                log.record("error", "forced-event", "fifth", "gpt_gateway/log.py#record")
-        self.assertEqual(len(err.getvalue().splitlines()), 2)
-        self.assertIn(os.path.join(root, "gpt-gateway"), err.getvalue())
-        self.assertIn("disk full", err.getvalue())
-        self.assertEqual(self.rows(os.path.join(root, "gpt-gateway"), "errors.jsonl")[0]["event"], "recovered")
+            absent.record("info", "no-home", "nothing to resolve", "gpt_gateway/log.py#record")
+            absent.record("info", "no-home", "said once", "gpt_gateway/log.py#record")
+        self.assertEqual(err.getvalue(), "gpt-gateway: plugin log off: no PLUGIN_LOG_DIR and no HOME\n")
 
-    def test_record_cap_moves_file_aside(self):
-        home = jail.scratch(self)
-        log = self.level_log(home, PLUGIN_LOG_DIR=home)
-        directory = os.path.join(home, "gpt-gateway")
-        for level, filename in (("error", "errors.jsonl"), ("warning", "warnings.jsonl"), ("info", "info.jsonl")):
-            with self.subTest(level=level):
-                log.record(level, "before-cap", "old", "gpt_gateway/log.py#record")
-                path = os.path.join(directory, filename)
-                with open(path, "r+b") as source:
-                    source.truncate(20971521)
-                with open(path + ".1", "w") as source:
-                    source.write("stale")
-                log.record(level, "after-cap", "new", "gpt_gateway/log.py#record")
-                self.assertEqual(os.path.getsize(path + ".1"), 20971521)
-                self.assertEqual(self.rows(directory, filename)[-1]["event"], "after-cap")
-                capped = self.rows(directory, "warnings.jsonl")
-                self.assertEqual(capped[-1 if level != "warning" else -2]["event"], "log-capped")
-
-    def test_record_bounds_rows_and_uses_one_append_syscall(self):
-        home = jail.scratch(self)
-        log = self.level_log(home, PLUGIN_LOG_DIR=home)
-        directory = os.path.join(home, "gpt-gateway")
-        for msg, detail in (("brief", {"error": "x" * 5000}), ("☃\udc80" * 5000, {"count": 1})):
-            with self.subTest(kind=len(msg)), patch.object(logmod.os, "write", wraps=os.write) as writer:
-                log.record("error", "large-error", msg, "gpt_gateway/log.py#record", detail)
-                self.assertEqual(writer.call_count, 1)
-                self.assertLessEqual(len(writer.call_args.args[1]), 4096)
-                row = self.rows(directory, "errors.jsonl")[-1]
-                self.assertTrue(row["detail"]["truncated"])
-                self.assertGreater(row["detail"]["bytes"], 4096)
-                self.assertTrue(msg.startswith(row["msg"]))
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), patch.object(logmod.os, "write", return_value=1):
-            log.record("error", "short-write", "failed", "gpt_gateway/log.py#record")
-        self.assertIn("short", err.getvalue())
-
-    def test_record_serializes_concurrent_writers(self):
-        home = jail.scratch(self)
-        log = self.level_log(home, PLUGIN_LOG_DIR=home)
-        workers = [threading.Thread(target=log.record, args=("info", "concurrent", str(i), "gpt_gateway/log.py#record"))
-                   for i in range(40)]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join(5)
-            self.assertFalse(worker.is_alive())
-        rows = self.rows(os.path.join(home, "gpt-gateway"), "info.jsonl")
-        self.assertEqual(sorted(int(row["msg"]) for row in rows), list(range(40)))
-
-    def test_invalid_level_inputs_are_reported_without_interrupting_text(self):
+    def test_an_unusable_log_directory_is_one_line_and_the_text_still_writes(self):
         home = jail.scratch(self)
         text = os.path.join(home, "gw.log")
         log = self.level_log(home, text, PLUGIN_LOG_DIR="relative")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             log.record("error", "invalid-root", "legacy survives", "gpt_gateway/log.py#record")
-        self.assertIn("PLUGIN_LOG_DIR", err.getvalue())
+            log.record("error", "invalid-root", "said once", "gpt_gateway/log.py#record")
+        self.assertEqual(err.getvalue(), "gpt-gateway: plugin log off: env PLUGIN_LOG_DIR: must be an absolute path\n")
         with open(text) as source:
             self.assertIn("legacy survives", source.read())
-        good = self.level_log(home, text, PLUGIN_LOG_DIR=home)
-        with contextlib.redirect_stderr(err):
-            good.record("error", "invalid-detail", "still survives", "gpt_gateway/log.py#record", {"bad": object()})
-            good.record("info", "recovered", "valid", "gpt_gateway/log.py#record")
-        self.assertIn("TypeError", err.getvalue())
-        self.assertEqual(self.rows(os.path.join(home, "gpt-gateway"), "info.jsonl")[0]["event"], "recovered")
+        self.assertIsNone(logmod.text_path({"HOME": home, "PLUGIN_LOG_DIR": "relative"}))
 
     def test_writes_a_stamped_line(self):
         path = os.path.join(jail.scratch(self), "gw.log")
@@ -159,14 +89,26 @@ class LogTest(unittest.TestCase):
         with open(path) as f:
             self.assertIn("second", f.read())
 
-    def test_an_unwritable_log_is_reported_once_on_stderr(self):
-        path = os.path.join(jail.scratch(self), "missing-dir", "gw.log")
+    def test_the_text_log_makes_its_directory_and_is_owner_only(self):
+        path = os.path.join(jail.scratch(self), "gpt-gateway", "gpt-gateway.log")
+        Log(path).write("hello")
+        self.assertEqual((os.stat(os.path.dirname(path)).st_mode & 0o777, os.stat(path).st_mode & 0o777), (0o700, 0o600))
+
+    def test_a_failing_text_log_is_one_error_row_and_its_line(self):
+        home = jail.scratch(self)
+        blocked = os.path.join(home, "blocked")
+        with open(blocked, "w") as source:
+            source.write("not a directory")
+        log = self.level_log(home, os.path.join(blocked, "gw.log"), PLUGIN_LOG_DIR=home)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            log = Log(path)
             log.write("a")
             log.write("b")
-        self.assertEqual(err.getvalue().count("cannot write the log"), 1)
+        errors = os.path.join(home, "gpt-gateway", "errors.jsonl")
+        self.assertTrue(os.path.isfile(errors), "a failing text log must leave an error row")
+        row, = self.rows(os.path.join(home, "gpt-gateway"), "errors.jsonl")
+        self.assertEqual((row["level"], row["event"]), ("error", "text-log-failed"))
+        self.assertEqual(err.getvalue(), "gpt-gateway: %s\n" % row["msg"])
 
     def test_a_line_with_an_unencodable_character_is_written_escaped(self):
         path = os.path.join(jail.scratch(self), "gw.log")
