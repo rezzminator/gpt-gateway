@@ -1,4 +1,4 @@
-# The checks GitHub runs on a pull request to main (.github/workflows/release.yml),
+# The checks GitHub runs on a pull request to main (.github/workflows/ci.yml),
 # runnable here first: `make release-check` runs them all.
 .PHONY: release-check check release
 
@@ -17,3 +17,6 @@ release:
 	[ "$$v" != "$$base" ] && [ "$$(printf '%s\n%s\n' "$$base" "$$v" | sort -V | tail -n 1)" = "$$v" ] \
 	  || { echo "release: VERSION $$v does not move past main's $$base" >&2; exit 1; }; \
 	echo "release: VERSION $$v moves past main's $$base"
+	v=$$(cat VERSION); \
+	awk -v heading="## [$$v]" 'index($$0, heading) == 1 { found = 1; next } found && /^## \[/ { exit } found' CHANGELOG.md | grep -q '' \
+	  || { echo "release: CHANGELOG.md section for $$v yields no release notes" >&2; exit 1; }

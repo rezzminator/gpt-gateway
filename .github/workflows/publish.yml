@@ -1,0 +1,55 @@
+name: publish
+
+# Merging the develop -> main pull request is the release: `publish` tags
+# v{version} from VERSION on the merge commit and creates the GitHub release
+# with notes from the version's CHANGELOG.md section. It publishes no files, so nothing needs a
+# verify. ci.yml gates the pull request before the merge; this re-runs no test.
+# No tag is pushed by hand.
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - name: The tag is new
+        run: |
+          version="$(cat VERSION)"
+          [ -n "$version" ] || { echo "::error::no version in VERSION"; exit 1; }
+          tag="v$version"
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          elif [ "$rc" -ne 2 ]; then
+            echo "::error::could not look up tag $tag (git ls-remote exit $rc)"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+      - name: Release notes from the changelog
+        run: |
+          awk -v heading="## [$VERSION]" 'index($0, heading) == 1 { found = 1; next } found && /^## \[/ { exit } found' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --target "${{ github.event.pull_request.merge_commit_sha }}" \
+            --title "gpt-gateway v$VERSION" --notes-file notes.md

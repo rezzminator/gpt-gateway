@@ -1,0 +1,86 @@
+name: ci
+
+# The one check, on a pull request into main: `make check` on Linux and macOS
+# in parallel, and `make release`. Its `ci` job is main's only required status
+# check, so nothing merges or publishes until every job here is green;
+# publish.yml runs on the merge. No run starts on a push.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ShellCheck release asset and its sha256 per runner; the version
+        # is scripts/gate.sh's SHELLCHECK_VERSION, the one pin both legs read.
+        include:
+          - os: ubuntu-latest
+            shellcheck_asset: linux.x86_64
+            shellcheck_sha256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          - os: macos-15
+            shellcheck_asset: darwin.aarch64
+            shellcheck_sha256: 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned ShellCheck
+        shell: bash
+        env:
+          ASSET: ${{ matrix.shellcheck_asset }}
+          SHA256: ${{ matrix.shellcheck_sha256 }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^SHELLCHECK_VERSION=//p' scripts/gate.sh)"
+          [ -n "$version" ] || { echo "::error::scripts/gate.sh sets no SHELLCHECK_VERSION"; exit 1; }
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 --output shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v$version/shellcheck-v$version.$ASSET.tar.xz"
+          echo "$SHA256  shellcheck.tar.xz" | shasum -a 256 --check
+          tar -xf shellcheck.tar.xz
+          echo "$RUNNER_TEMP/shellcheck-v$version" >> "$GITHUB_PATH"
+      - name: Run repository gate
+        run: make check
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: The version moved past main's, the changelog yields notes
+        run: make release
+
+  # main's only required status check. always(): a skipped or cancelled job
+  # counts as passed for a required check, so this job fails unless every
+  # job it needs succeeded.
+  ci:
+    name: ci
+    needs: [check, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          failed="$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<<"$NEEDS")"
+          if [ -n "$failed" ]; then
+            echo "::error::not every CI job succeeded: $(tr '\n' ' ' <<<"$failed")"
+            exit 1
+          fi
+          echo "every CI job succeeded"

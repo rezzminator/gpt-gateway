@@ -53,7 +53,7 @@ On the Anthropic route the core forwards every request byte for byte and relays 
 
 - Git goes through gitter, per the parent directory's `CLAUDE.md`; this repository is checked out inside that directory.
 - `develop` is protected by the ruleset `develop keeps its history`: never force-push or delete it.
-- `main` is protected by `main is release-only`: it moves only by merging the `develop` -> `main` pull request with a merge commit, after `check` and `release` pass; never a direct push, never an admin override.
-- Every pull request merged into `main` publishes: `VERSION` moves past main's (main's `VERSION`, else its latest `v*` tag), and a pre-release version (`-dev.N`) is bumped to the real release version `X.Y.Z` in that pull request; the pull request's body is the release notes.
-- Before opening it: `git fetch origin main`, then `make release-check` (the gate, then the version check, the same targets `.github/workflows/release.yml` runs) passes.
+- `main` is protected by `main is release-only`: it moves only by merging the `develop` -> `main` pull request with a merge commit, after `ci` passes; never a direct push, never an admin override.
+- Every pull request merged into `main` publishes: `VERSION` moves past main's (main's `VERSION`, else its latest `v*` tag), and a pre-release version (`-dev.N`) is bumped to the real release version `X.Y.Z` in that pull request; the version's `CHANGELOG.md` section is the release notes.
+- Before opening it: `git fetch origin main`, then `make release-check` (the gate, then the version check, the same targets `.github/workflows/ci.yml` runs) passes.
 - After the merge, the `publish` job tags `v{version}` on the merge commit and creates the GitHub release `gpt-gateway v{version}`; nobody pushes a tag by hand. Then `develop` is fast-forwarded onto `main`.
