@@ -10,9 +10,7 @@ cd "$P" || { say setup ERROR "cannot cd $P"; exit 2; }
 T=$(mktemp -d) || { say setup ERROR "mktemp failed"; exit 2; }; trap 'rm -rf "$T"' EXIT; mkdir -p "$BASE"
 listed() { git ls-files -co --exclude-standard | while read -r f; do [ -f "$f" ] && echo "$f"; done; }   # tracked + new, minus deleted
 all() { cat "$T/all"; }
-# The vendored plugin-log copy stays byte-identical to the library's canonical source, which tests it: no law here edits it.
-VENDORED=gpt_gateway/plugin_log.py
-src() { all | grep -E '\.(py|sh)$' | grep -vE '^tests/' | grep -vxF "$VENDORED"; }
+src() { all | grep -E '\.(py|sh)$' | grep -vE '^tests/'; }
 # shellcheck disable=SC2329,SC2317 # called indirectly, as the lister gin and facade name
 pys() { src | grep -E '\.py$'; }
 shs() { src | grep -E '\.sh$'; }

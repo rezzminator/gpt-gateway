@@ -1,8 +1,7 @@
-"""The shared plugin-log library: level files under one directory per plugin, rows bounded and keyed in one order,
+"""The plugin-log library: level files under one directory per plugin, rows bounded and keyed in one order,
 rotation past a cap, and rows held in memory across a failed write. It imports the standard library only.
 
-This file is a vendored copy of the plugin-log canonical source, kept byte-identical in every plugin by a sync
-check: change the canonical source, then re-vendor every copy.
+This is gpt-gateway's own logging module; edit it here.
 """
 from datetime import datetime, timedelta, timezone
 import json
@@ -37,7 +36,7 @@ def on_screen(level):
     return level == "error"
 
 
-def stamp(now_ms):
+def iso_stamp(now_ms):
     """ISO 8601 UTC with milliseconds, from an integer epoch in milliseconds."""
     return (_EPOCH + timedelta(milliseconds=int(now_ms))).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -49,7 +48,7 @@ def level_row(fields, now_ms):
     level = fields.get("level")
     if level not in LEVEL_FILES:
         raise ValueError("plugin log invalid level: %r" % (level,))
-    row = {"ts": fields.get("ts") or stamp(now_ms), "plugin": fields["plugin"], "level": level, "event": fields["event"],
+    row = {"ts": fields.get("ts") or iso_stamp(now_ms), "plugin": fields["plugin"], "level": level, "event": fields["event"],
            "msg": fields["msg"], "where": fields["where"]}
     if fields.get("session"):
         row["session"] = fields["session"]
@@ -145,7 +144,7 @@ class PluginLog:
                     self._failing = True
                     self._say("plugin log off: no PLUGIN_LOG_DIR and no HOME")
                 return
-            fields = {"ts": ts or stamp(self.now_ms()), "plugin": self.plugin, "level": level, "event": event, "msg": msg,
+            fields = {"ts": ts or iso_stamp(self.now_ms()), "plugin": self.plugin, "level": level, "event": event, "msg": msg,
                       "where": where, "session": session, "detail": detail}
             try:
                 data = level_row(fields, 0)

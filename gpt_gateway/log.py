@@ -1,4 +1,4 @@
-"""The gateway log: the rotating text log `gpt-gateway.log` and the level rows of the vendored plugin-log library, both
+"""The gateway log: the rotating text log `gpt-gateway.log` and the level rows of the plugin-log module, both
 in the plugin log directory.
 
 Failures never interrupt gateway work. A service has no screen: stderr gets only a log's one line per failing streak

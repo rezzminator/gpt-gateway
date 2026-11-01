@@ -1,5 +1,5 @@
-"""Tests for gpt_gateway.log, the adapter over the vendored plugin-log: where the text and level logs go, stamped
-lines, rotation, and what a failing log puts on the screen. The library itself is tested by its canonical source."""
+"""Tests for gpt_gateway.log, the adapter over plugin_log: where the text and level logs go, stamped
+lines, rotation, and what a failing log puts on the screen. The module itself is gpt-gateway's own."""
 import contextlib
 import io
 import os
